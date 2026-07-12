@@ -1,0 +1,17 @@
+# hydra/policies/verification.yaml (tracked)
+#
+# trust-and-permissions.md §6. The MANDATORY verification commands. These — and
+# only these — are re-run by the harness (verify.sh) inside the candidate
+# worktree under the verification sandbox. Command provenance rule: workers may
+# SUGGEST additional checks; suggestions never replace or reorder these.
+#
+# This repo currently ships a single JS suite (Project Nightjar) with no build
+# system, so the mandatory gate is a syntax/parse check over all JS under src/.
+# Swap for `pnpm typecheck` / `pnpm test` once a package.json + test runner land
+# (the shape below is exactly the doc's example).
+verification_policy:
+  commands:
+    - "find src -name '*.js' -print0 | xargs -0 -I{} node --check {}"
+  network: false
+  secrets: []
+  timeout_minutes: 15

@@ -1,0 +1,36 @@
+# hydra/templates/task.example.yaml
+#
+# A PLANNED task definition (Domain 1, human-reviewed pre-run). The harness
+# instantiates a copy into external state (Domain 2) and fills the operational
+# fields (worktree, branch, resolved base_commit) via create-worktree.sh.
+#
+# See task-result-review-contracts.md §1 and hydra/schemas/task.schema.json.
+
+task_id: canvas-node-validation
+run_id: "0042"
+spec_version: 1
+base_commit: 91df24a               # filled/confirmed at instantiation
+branch: hydra/0042/canvas-node-validation   # harness-assigned; do not hand-edit
+worktree:                          # harness-assigned by create-worktree.sh
+assigned_vendor: claude            # claude | codex   (Wave 0)
+writable_paths:
+  - src/canvas/**
+  - tests/canvas/**
+read_only_paths:
+  - src/shared/types/**
+  - docs/**
+inaccessible_paths:
+  - .env*
+  - secrets/**
+  - hydra/**
+objective: >
+  Add typed connection validation for canvas nodes.
+acceptance_criteria:
+  - Invalid connections rejected with typed errors
+  - Focused tests cover the validator
+verification:                      # advisory to the worker; the MANDATORY gate
+  - "find src -name '*.js' -print0 | xargs -0 -I{} node --check {}"
+integration_notes: >
+  Exposes validateConnection(); UI consumers arrive in a later task.
+timeout_minutes: 45
+max_cost_usd: 3.00

@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Hydra-Swarm branch review verdict",
+  "description": "task-result-review-contracts.md §3. Produced against the PROMOTED result, never the raw drop.",
+  "type": "object",
+  "required": ["task_id", "verdict", "reviewed_base", "reviewed_head", "reviewer", "risk"],
+  "properties": {
+    "task_id": { "type": "string" },
+    "verdict": { "type": "string", "enum": ["accept", "revise", "reject", "blocked"] },
+    "reviewed_base": { "type": "string" },
+    "reviewed_head": { "type": "string" },
+    "reviewer": { "type": "string" },
+    "reviewer_vendor": { "type": "string" },
+    "blocking_findings": { "type": "array", "items": { "type": "string" } },
+    "non_blocking_findings": { "type": "array", "items": { "type": "string" } },
+    "required_integration_checks": { "type": "array", "items": { "type": "string" } },
+    "risk": { "type": "string", "enum": ["low", "medium", "high", "critical"] }
+  }
+}

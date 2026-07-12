@@ -1,0 +1,52 @@
+# hydra/policies/permissions.yaml (tracked)
+#
+# trust-and-permissions.md §7–8. Role permission matrix + always-restricted
+# actions. Wave 0 enforces the worker floor structurally (no remote credentials
+# exist in a worker environment, state store unreachable); this file is the
+# declarative record the adapters and hooks read from.
+
+roles:
+  explorer:
+    filesystem: read_only
+    git: read_only            # diff/log/show
+    network: off
+    external_side_effects: none
+  reviewer:
+    filesystem: read_only
+    git: read_only
+    network: off
+    external_side_effects: none
+  implementer:
+    filesystem: assigned_worktree_write
+    git: local_branch_commit
+    network: off              # per-task allowlist only when required
+    external_side_effects: none
+  integrator:
+    filesystem: integration_worktree_write
+    git: cherry_pick_local_commit
+    network: off
+    external_side_effects: none
+
+# Require explicit policy authorization or human approval regardless of role.
+always_restricted:
+  - force_push
+  - destructive_reset_or_checkout
+  - rewrite_shared_history
+  - delete_branch_or_worktree_with_unmerged_work
+  - change_secrets_or_credentials
+  - production_deploy
+  - irreversible_migration
+  - publish_package_or_release
+  - send_external_message_or_open_pr   # unless explicitly requested
+
+# Deny-listed command patterns (trust-and-permissions.md §4 layer 2). Adapter
+# wrappers refuse these; they are not the boundary (layer 4 is), but cut noise.
+denied_command_patterns:
+  - "git push"
+  - "git remote"
+  - "git reset --hard"
+  - "git clean -fdx"
+  - "npm publish"
+  - "pnpm publish"
+  - "curl"
+  - "wget"

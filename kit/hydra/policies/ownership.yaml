@@ -1,0 +1,20 @@
+# hydra/policies/ownership.yaml (tracked)
+#
+# trust-and-permissions.md §3. Default path model inherited by task specs. A
+# task narrows these; it never widens inaccessible_paths. Paths are normalized,
+# repository-relative globs (`**` = any depth). The authoritative enforcement is
+# the post-hoc Git diff audit (audit-ownership.sh), not these declarations.
+default_paths:
+  writable_paths:
+    - src/**
+    - tests/**
+  read_only_paths:
+    - docs/**
+  # Never mounted / never writable in any worktree. The state store is
+  # unreachable regardless; hydra/** is listed so no worker rewrites the harness.
+  inaccessible_paths:
+    - .env*
+    - secrets/**
+    - hydra/**
+    - .claude/**
+    - .git/**
