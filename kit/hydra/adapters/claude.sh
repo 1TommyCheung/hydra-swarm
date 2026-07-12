@@ -25,16 +25,19 @@ task_spec="${1:?task_spec required}"; worktree="${2:?worktree required}"
 inbox="${3:?inbox required}"; sessions="${4:?sessions required}"; agent_run_id="${5:?agent_run_id required}"
 
 repo_root="$(hydra_repo_root)"
-result_path="$inbox/result.json"
+result_path="$inbox/result.json"        # adapter-owned; in the state store
+worker_result="$worktree/.hydra-result.json"   # worker-owned; in the worktree
 mkdir -p "$inbox" "$sessions"
+rm -f "$worker_result"
 
-prompt="$("$SELF_DIR/build-worker-prompt.sh" "$task_spec" "$result_path")"
+prompt="$("$SELF_DIR/build-worker-prompt.sh" "$task_spec")"
 
-# Hermetic-ish worker invocation. The ownership PreToolUse hook is active as
-# defense in depth (configured via .claude/settings within the worktree/repo).
-# --add-dir binds the worktree; cwd is the worktree.
+# Headless worker in the worktree. bypassPermissions lets the worker edit/commit
+# non-interactively; the REAL boundary is the post-hoc audit in promote.sh, so
+# broad in-worktree autonomy is acceptable (the worktree is the blast radius).
 raw="$(cd "$worktree" && claude -p "$prompt" \
         --output-format json \
+        --permission-mode bypassPermissions \
         --add-dir "$worktree" 2>"$sessions/$agent_run_id.stderr")" || true
 
 printf '%s' "$raw" >"$sessions/$agent_run_id.cli.json"
@@ -42,12 +45,12 @@ session_id="$(printf '%s' "$raw" | jq -r '.session_id // empty' 2>/dev/null || t
 jq -n --arg sid "$session_id" --arg aid "$agent_run_id" --arg vendor claude \
   '{agent_run_id:$aid, vendor:$vendor, session_id:$sid}' >"$sessions/$agent_run_id.json"
 
-# Guarantee an inbox drop. If the worker wrote one, stamp the captured session
-# id into it; otherwise synthesize a failed drop so promotion can reject cleanly.
-if [ -f "$result_path" ]; then
-  tmp="$(mktemp)"
-  jq --arg sid "$session_id" '.session_id = (.session_id // $sid)' "$result_path" >"$tmp" 2>/dev/null \
-    && mv "$tmp" "$result_path" || rm -f "$tmp"
+# Bridge the worker's in-worktree result into the inbox (workers never touch the
+# state store). Stamp the captured session id + vendor. If absent, synthesize a
+# failed drop so promotion can reject cleanly.
+if [ -f "$worker_result" ] && jq -e . "$worker_result" >/dev/null 2>&1; then
+  jq --arg sid "$session_id" '.vendor = "claude" | .session_id = (.session_id // $sid)' \
+    "$worker_result" >"$result_path"
 else
   task_id="$(hydra_yaml_scalar "$task_spec" 'task_id')"
   run_id="$(hydra_yaml_scalar "$task_spec" 'run_id')"

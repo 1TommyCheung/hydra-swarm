@@ -18,25 +18,38 @@ shift
 task_spec="${1:?task_spec required}"; worktree="${2:?worktree required}"
 inbox="${3:?inbox required}"; sessions="${4:?sessions required}"; agent_run_id="${5:?agent_run_id required}"
 
-result_path="$inbox/result.json"
+result_path="$inbox/result.json"        # adapter-owned; in the state store
+worker_result="$worktree/.hydra-result.json"   # worker-owned; in the worktree
 mkdir -p "$inbox" "$sessions"
+rm -f "$worker_result"
 
-prompt="$("$SELF_DIR/build-worker-prompt.sh" "$task_spec" "$result_path")"
+prompt="$("$SELF_DIR/build-worker-prompt.sh" "$task_spec")"
 
-# codex exec: non-interactive, in the worktree. --json emits structured events
-# (last message carries the result); we persist the stream for session capture.
-( cd "$worktree" && codex exec --json --cd "$worktree" "$prompt" ) \
-  >"$sessions/$agent_run_id.cli.jsonl" 2>"$sessions/$agent_run_id.stderr" || true
+# A linked worktree's Git metadata lives in the MAIN repo's git-common-dir
+# (.git/worktrees/<name> + shared refs/objects), OUTSIDE the worktree. Codex's
+# workspace-write OS sandbox is scoped to the worktree, so `git commit` fails
+# unless we add the git-common-dir as a writable root. (Claude needs no such
+# grant — bypassPermissions imposes no OS sandbox.)
+git_common="$(cd "$worktree" && git rev-parse --path-format=absolute --git-common-dir)"
 
-session_id="$(jq -rs 'map(.session_id // empty) | last // empty' \
+# codex exec: non-interactive, workspace-write sandbox (deps installed
+# pre-worker; network stays off). --json emits a JSONL event stream we persist
+# for session capture. stdin MUST be closed (</dev/null): on a non-TTY codex
+# otherwise blocks "Reading additional input from stdin...".
+codex exec --json -C "$worktree" -s workspace-write \
+  -c "sandbox_workspace_write.writable_roots=[\"$git_common\"]" \
+  "$prompt" \
+  </dev/null >"$sessions/$agent_run_id.cli.jsonl" 2>"$sessions/$agent_run_id.stderr" || true
+
+# Codex identifies the conversation as thread_id (emitted on thread.started).
+session_id="$(jq -rs 'map(.thread_id // .msg.session_id // .session_id // empty) | map(select(. != "")) | last // empty' \
   "$sessions/$agent_run_id.cli.jsonl" 2>/dev/null || true)"
 jq -n --arg sid "$session_id" --arg aid "$agent_run_id" --arg vendor codex \
   '{agent_run_id:$aid, vendor:$vendor, session_id:$sid}' >"$sessions/$agent_run_id.json"
 
-if [ -f "$result_path" ]; then
-  tmp="$(mktemp)"
-  jq --arg sid "$session_id" '.session_id = (.session_id // $sid)' "$result_path" >"$tmp" 2>/dev/null \
-    && mv "$tmp" "$result_path" || rm -f "$tmp"
+if [ -f "$worker_result" ] && jq -e . "$worker_result" >/dev/null 2>&1; then
+  jq --arg sid "$session_id" '.vendor = "codex" | .session_id = (.session_id // $sid)' \
+    "$worker_result" >"$result_path"
 else
   task_id="$(hydra_yaml_scalar "$task_spec" 'task_id')"
   run_id="$(hydra_yaml_scalar "$task_spec" 'run_id')"

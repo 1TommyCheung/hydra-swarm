@@ -8,16 +8,20 @@
 # (architecture.md §4.6). This helper is the one place that authors what a
 # worker is told, so both adapters stay identical.
 #
-# Usage: build-worker-prompt.sh <task_spec> <result_drop_path>
+# Usage: build-worker-prompt.sh <task_spec>
 # Prints the prompt to stdout.
+#
+# The worker writes its result to `.hydra-result.json` in its OWN worktree — it
+# never touches the external state store (workers cannot reach it). The adapter
+# bridges that file into the run inbox.
 
 set -euo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../scripts/lib.sh
 source "$SELF_DIR/../scripts/lib.sh"
 
-task_spec="${1:?usage: build-worker-prompt.sh <task_spec> <result_drop_path>}"
-result_path="${2:?result drop path required}"
+task_spec="${1:?usage: build-worker-prompt.sh <task_spec>}"
+result_file=".hydra-result.json"
 
 task_id="$(hydra_yaml_scalar "$task_spec" 'task_id')"
 run_id="$(hydra_yaml_scalar "$task_spec" 'run_id')"
@@ -55,9 +59,10 @@ Acceptance criteria:
 ${acceptance}
 
 ## Required final action
-After committing, WRITE your result as JSON to exactly this path:
-  ${result_path}
-It MUST match this shape (every field is a claim the harness will verify):
+After committing, WRITE your result as JSON to a file named exactly
+\`${result_file}\` in the ROOT of your working directory (do not write anywhere
+outside your worktree). It MUST match this shape (every field is a claim the
+harness will verify):
 {
   "task_id": "${task_id}",
   "run_id": "${run_id}",

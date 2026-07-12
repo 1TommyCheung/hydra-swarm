@@ -45,7 +45,7 @@ git -C "$repo_root" worktree add --quiet -b "$branch" "$worktree" "$base_commit"
 # the ownership audit. Per-worktree exclude file.
 exclude_file="$(git -C "$worktree" rev-parse --git-path info/exclude)"
 mkdir -p "$(dirname "$exclude_file")"
-{ echo '.hydra-task.yaml'; echo '.env.worktree'; } >>"$exclude_file"
+{ echo '.hydra-task.yaml'; echo '.env.worktree'; echo '.hydra-result.json'; } >>"$exclude_file"
 
 # Read-only copy of the task spec for the worker (workers never see the state store).
 cp "$task_spec" "$worktree/.hydra-task.yaml"

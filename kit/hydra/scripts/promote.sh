@@ -115,8 +115,10 @@ fi
 hydra_ledger_append "$run_id" verification_executed task_id "$task_id" status passed
 
 # --- 6. Promotion: claims + observed + divergence --------------------------
-# Divergence = any command whose claimed status differs from observed status,
-# or a claimed command the harness did not run / vice versa. Recorded per §2.2.
+# Divergence (§2.2): the worker's claim CONTRADICTS the harness observation on
+# the SAME command. Commands the worker ran but the harness didn't (or vice
+# versa) are the expected provenance gap — workers may run their own checks —
+# not a divergence. We compare only the intersection of command strings.
 observed="$(cat "$observed_json")"
 promoted="$run_dir/authoritative/results/$task_id.json"
 divergence="$(jq -n \
@@ -124,8 +126,7 @@ divergence="$(jq -n \
   --argjson observed "$observed" '
     ($claims  | map({key:.command, value:.status}) | from_entries) as $c
   | ($observed | map({key:.command, value:.status}) | from_entries) as $o
-  | ([($c|keys[]),($o|keys[])] | unique) as $cmds
-  | any($cmds[]; ($c[.] // "absent") != ($o[.] // "absent"))
+  | [ ($o|keys[]) as $k | select($c|has($k)) | select($c[$k] != $o[$k]) ] | length > 0
 ')"
 
 jq -n \
