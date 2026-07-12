@@ -77,11 +77,18 @@ Image to analyze: $image"
     prompt="$("$SELF_DIR/build-worker-prompt.sh" "$task_spec")"
 
     wt_abs="$(cd "$worktree" && pwd -P)"
-    prof="$(make_sandbox_profile "$wt_abs" "${TMPDIR:-/tmp}" "/private/tmp" "$HOME/.kimi-code")"
-    hydra_log "kimi write role under sandbox-exec (writes confined to $wt_abs)"
+    # A linked worktree's git metadata lives in the git-common-dir OUTSIDE the
+    # worktree; Kimi must write there to commit. Resolve to a physical path so
+    # sandbox-exec subpath matching works (/var -> /private/var).
+    git_common="$(cd "$worktree" && cd "$(git rev-parse --path-format=absolute --git-common-dir)" && pwd -P)"
+    prof="$(make_sandbox_profile "$wt_abs" "$git_common" "${TMPDIR:-/tmp}" "/private/tmp" "$HOME/.kimi-code")"
+    hydra_log "kimi write role under sandbox-exec (writes confined to worktree + git-common-dir)"
 
+    # NOTE: `kimi -p` (print mode) ALREADY auto-approves tools — that is exactly
+    # why the OS sandbox is mandatory. `-y` is both redundant and rejected
+    # ("Cannot combine --prompt with --yolo"), so it is intentionally absent.
     ( cd "$worktree" && sandbox-exec -f "$prof" \
-        kimi -p "$prompt" -y --output-format stream-json --add-dir "$worktree" ) \
+        kimi -p "$prompt" --output-format stream-json --add-dir "$worktree" ) \
       </dev/null >"$sessions/$agent_run_id.cli.jsonl" 2>"$sessions/$agent_run_id.stderr" || true
     rm -f "$prof"
 
@@ -92,17 +99,17 @@ Image to analyze: $image"
     if [ -f "$worker_result" ] && jq -e . "$worker_result" >/dev/null 2>&1; then
       jq --arg sid "$session_id" '.vendor = "kimi" | .session_id = (.session_id // $sid)' \
         "$worker_result" >"$result_path"
+    elif hydra_derive_drop_from_git "$task_spec" "$worktree" kimi "$session_id" "$result_path"; then
+      hydra_log "kimi committed without a self-report; drop derived from git evidence"
     else
-      task_id="$(hydra_yaml_scalar "$task_spec" 'task_id')"
-      run_id="$(hydra_yaml_scalar "$task_spec" 'run_id')"
-      spec_version="$(hydra_yaml_scalar "$task_spec" 'spec_version')"
-      branch="$(hydra_yaml_scalar "$task_spec" 'branch')"
-      base_commit="$(hydra_yaml_scalar "$task_spec" 'base_commit')"
-      jq -n --arg t "$task_id" --arg r "$run_id" --argjson sv "${spec_version:-1}" \
-            --arg b "$branch" --arg bc "$base_commit" --arg sid "$session_id" '{
+      jq -n --arg t "$(hydra_yaml_scalar "$task_spec" 'task_id')" \
+            --arg r "$(hydra_yaml_scalar "$task_spec" 'run_id')" \
+            --argjson sv "$(hydra_yaml_scalar "$task_spec" 'spec_version')" \
+            --arg b "$(hydra_yaml_scalar "$task_spec" 'branch')" \
+            --arg bc "$(hydra_yaml_scalar "$task_spec" 'base_commit')" --arg sid "$session_id" '{
           task_id:$t, run_id:$r, spec_version:$sv, vendor:"kimi", session_id:$sid,
           status:"failed", branch:$b, base_commit:$bc, head_commit:$bc,
-          summary:"worker produced no result drop", files_changed:[],
+          summary:"worker produced no result drop and no commit", files_changed:[],
           verification_claims:[], risks:["adapter synthesized a failed drop"],
           unresolved_questions:[], suggested_additional_checks:[]
         }' >"$result_path"

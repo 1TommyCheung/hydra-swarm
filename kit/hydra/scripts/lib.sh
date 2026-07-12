@@ -98,6 +98,42 @@ hydra_ledger_append() {
 }
 
 # ---------------------------------------------------------------------------
+# Derive a result drop from GIT EVIDENCE when a worker committed but did not
+# write .hydra-result.json (some vendors implement + commit yet skip the
+# self-report). head_commit + files_changed are git-observable FACTS, not worker
+# claims; verification_claims stays empty and promote.sh re-verifies everything,
+# so this is safe and honest — it turns a silent-but-real candidate into a
+# promotable one instead of a false "failed". Returns 0 if a drop was written
+# (worker advanced HEAD past base), 1 otherwise (nothing committed).
+# Usage: hydra_derive_drop_from_git <task_spec> <worktree> <vendor> <session_id> <out_json>
+# ---------------------------------------------------------------------------
+
+hydra_derive_drop_from_git() {
+  local task_spec="$1" worktree="$2" vendor="$3" session_id="$4" out="$5"
+  local base head; base="$(hydra_yaml_scalar "$task_spec" 'base_commit')"
+  head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || return 1
+  # Nothing committed (HEAD still at base) => not a real candidate.
+  [ -n "$head" ] && [ "$(git -C "$worktree" rev-parse "$base" 2>/dev/null)" != "$head" ] || return 1
+  local files
+  files="$(git -C "$worktree" diff --name-only "$base...HEAD" 2>/dev/null | jq -R . | jq -sc .)"
+  jq -n \
+    --arg t "$(hydra_yaml_scalar "$task_spec" 'task_id')" \
+    --arg r "$(hydra_yaml_scalar "$task_spec" 'run_id')" \
+    --argjson sv "$(hydra_yaml_scalar "$task_spec" 'spec_version')" \
+    --arg v "$vendor" --arg sid "$session_id" \
+    --arg b "$(hydra_yaml_scalar "$task_spec" 'branch')" \
+    --arg bc "$base" --arg h "$head" --argjson files "${files:-[]}" '{
+      task_id:$t, run_id:$r, spec_version:$sv, vendor:$v, session_id:$sid,
+      status:"completed", branch:$b, base_commit:$bc, head_commit:$h,
+      summary:"harness-derived from git (worker committed without a self-report)",
+      files_changed:$files, verification_claims:[],
+      risks:["no worker self-report; drop derived from git evidence"],
+      unresolved_questions:[], suggested_additional_checks:[]
+    }' >"$out"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Portable timeout. macOS ships no coreutils `timeout`. Prefer real binaries,
 # fall back to perl's alarm (present on macOS).
 # Usage: hydra_timeout <seconds> <cmd> [args...]

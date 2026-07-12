@@ -24,7 +24,7 @@
     "base_commit": { "type": "string" },
     "branch": { "type": "string" },
     "worktree": { "type": "string" },
-    "assigned_vendor": { "type": "string", "enum": ["claude", "codex"] },
+    "assigned_vendor": { "type": "string", "enum": ["claude", "codex", "opencode", "kimi"] },
     "writable_paths": { "type": "array", "minItems": 1, "items": { "type": "string" } },
     "read_only_paths": { "type": "array", "items": { "type": "string" } },
     "inaccessible_paths": { "type": "array", "items": { "type": "string" } },

@@ -19,7 +19,7 @@
     "task_id": { "type": "string" },
     "run_id": { "type": "string" },
     "spec_version": { "type": "integer" },
-    "vendor": { "type": "string", "enum": ["claude", "codex"] },
+    "vendor": { "type": "string", "enum": ["claude", "codex", "opencode", "kimi"] },
     "session_id": { "type": "string" },
     "status": { "type": "string", "enum": ["completed", "blocked", "failed"] },
     "branch": { "type": "string" },

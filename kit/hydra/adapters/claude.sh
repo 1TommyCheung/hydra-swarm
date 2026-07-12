@@ -58,6 +58,8 @@ jq -n --arg sid "$session_id" --arg aid "$agent_run_id" --arg vendor claude \
 if [ -f "$worker_result" ] && jq -e . "$worker_result" >/dev/null 2>&1; then
   jq --arg sid "$session_id" '.vendor = "claude" | .session_id = (.session_id // $sid)' \
     "$worker_result" >"$result_path"
+elif hydra_derive_drop_from_git "$task_spec" "$worktree" claude "$session_id" "$result_path"; then
+  hydra_log "claude committed without a self-report; drop derived from git evidence"
 else
   task_id="$(hydra_yaml_scalar "$task_spec" 'task_id')"
   run_id="$(hydra_yaml_scalar "$task_spec" 'run_id')"
