@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Hydra-Swarm run plan",
+  "description": "state-and-worktrees.md §1 (run.yaml, instantiated). Operational state, not product source.",
+  "type": "object",
+  "required": ["run_id", "base_commit", "state"],
+  "properties": {
+    "run_id": { "type": "string" },
+    "base_commit": { "type": "string" },
+    "repo_id": { "type": "string" },
+    "created": { "type": "string" },
+    "state": {
+      "type": "string",
+      "enum": ["planning", "executing", "branch_review", "integrating", "combined_verification", "awaiting_approval", "completed", "cancelled"]
+    },
+    "tasks": { "type": "array", "items": { "type": "string" } },
+    "manual_cap_usd": { "type": "number" }
+  }
+}

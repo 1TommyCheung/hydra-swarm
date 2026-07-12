@@ -1,0 +1,25 @@
+# hydra/profiles/opencode-glm-5.2.yaml — seed profile (vendor-adapters.md §5)
+vendor: opencode
+model: glm-5.2
+roles: [reviewer, explorer]        # read-only in Wave 1; write-role promotion is an open decision
+
+seeded_strengths:
+  - claim: Project-scale takeover, standards adherence, refactoring (FrontierSWE 74.4; TB2.1 81.0)
+    source: vendor_doc
+  - claim: Long textual-diff review / whole-repo audit (1M context)
+    source: vendor_doc
+seeded_weaknesses:
+  - claim: From-scratch generation
+    source: vendor_doc            # route greenfield elsewhere
+  - claim: Marathon tasks (decompose very long tasks)
+    source: vendor_doc
+
+capabilities:
+  input_modalities: [text]         # TEXT ONLY (Z.AI dev doc) — cannot take visual_debugging
+  headless: "opencode run --model <provider>/glm-5.2"
+  fine_tool_allowlist: partial     # opencode.json per-agent permission
+  write_role: false                # Wave 1/2: read-only roles only
+
+cost_hint: "free_tier_or_cheap"
+
+qualitative_notes: []

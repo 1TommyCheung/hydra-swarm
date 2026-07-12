@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Hydra-Swarm task specification",
+  "description": "task-result-review-contracts.md §1. The ONLY valid instruction surface for a worker (architecture.md §4.6). Instantiated specs add operational fields (worktree, SHAs).",
+  "type": "object",
+  "required": [
+    "task_id",
+    "run_id",
+    "spec_version",
+    "base_commit",
+    "assigned_vendor",
+    "writable_paths",
+    "objective",
+    "acceptance_criteria",
+    "verification"
+  ],
+  "properties": {
+    "task_id": { "type": "string" },
+    "run_id": { "type": "string" },
+    "spec_version": { "type": "integer" },
+    "supersedes": { "type": "integer" },
+    "amendment_reason": { "type": "string" },
+    "delivered_via": { "type": "string", "enum": ["resume", "restart"] },
+    "base_commit": { "type": "string" },
+    "branch": { "type": "string" },
+    "worktree": { "type": "string" },
+    "assigned_vendor": { "type": "string", "enum": ["claude", "codex", "opencode", "kimi"] },
+    "writable_paths": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+    "read_only_paths": { "type": "array", "items": { "type": "string" } },
+    "inaccessible_paths": { "type": "array", "items": { "type": "string" } },
+    "objective": { "type": "string" },
+    "acceptance_criteria": { "type": "array", "items": { "type": "string" } },
+    "verification": { "type": "array", "items": { "type": "string" } },
+    "integration_notes": { "type": "string" },
+    "timeout_minutes": { "type": "integer" },
+    "max_cost_usd": { "type": "number" }
+  }
+}

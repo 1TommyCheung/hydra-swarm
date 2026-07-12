@@ -1,0 +1,16 @@
+# hydra/templates/run.example.yaml
+#
+# A run plan. run-init.sh writes the live copy into external state
+# (~/.local/state/<repo-id>-hydra/runs/run-<id>/run.yaml). See
+# hydra/schemas/run.schema.json.
+
+run_id: "0042"
+base_commit: 91df24a
+repo_id: webtrail
+created: 2026-07-12T00:00:00Z
+state: planning                    # planning|executing|branch_review|integrating|
+                                   #   combined_verification|awaiting_approval|completed|cancelled
+manual_cap_usd: 10.00             # Wave 0: a manual run cap; no auto budget accounting
+tasks:
+  - canvas-node-validation
+  - video-export-status

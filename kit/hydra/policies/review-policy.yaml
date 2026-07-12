@@ -1,0 +1,20 @@
+# hydra/policies/review-policy.yaml (tracked) — task-result-review-contracts §3
+#
+# Wave 1 formalizes cross-vendor review from a convention into a risk-triggered
+# policy. Cross-vendor review is MANDATORY when any trigger matches; otherwise
+# same-vendor (or single) review is permitted. The reviewer vendor must differ
+# from the implementer vendor when cross-vendor is required.
+review_policy:
+  cross_vendor_required_when:
+    risk_at_least: high            # high | critical
+    labels_any:
+      - architecture
+      - security
+      - migration
+      - public_api
+  # Preferred reviewer vendor per implementer vendor (diversity override).
+  cross_vendor_pairing:
+    claude: codex
+    codex: claude
+    opencode: codex
+  default: single_vendor_ok        # when no trigger matches

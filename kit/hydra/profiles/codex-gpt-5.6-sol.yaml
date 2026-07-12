@@ -1,0 +1,23 @@
+# hydra/profiles/codex-gpt-5.6-sol.yaml — seed profile (vendor-adapters.md §5)
+vendor: codex
+model: gpt-5.6-sol
+roles: [implementer, reviewer, explorer, integrator]
+
+seeded_strengths:
+  - claim: Hardest reasoning / deep review
+    source: vendor_doc
+  - claim: Rigorous adversarial and conformance review
+    source: human           # observed in runs 0002/0003 (still a prior, not measured)
+seeded_weaknesses:
+  - claim: Expensive; slower wall-clock
+    source: vendor_doc
+
+capabilities:
+  input_modalities: [text, image]
+  headless: "codex exec"
+  fine_tool_allowlist: sandbox_modes
+  write_role: true
+
+cost_hint: "5.0/30.0"             # USD per 1M in/out (§3)
+
+qualitative_notes: []

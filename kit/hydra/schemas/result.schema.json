@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Hydra-Swarm worker result drop (untrusted claims)",
+  "description": "task-result-review-contracts.md §2.1. Written by a worker to inbox/<agent-run-id>/result.json. Every field is a CLAIM until reproduced by promote.sh.",
+  "type": "object",
+  "required": [
+    "task_id",
+    "run_id",
+    "spec_version",
+    "vendor",
+    "status",
+    "branch",
+    "base_commit",
+    "head_commit",
+    "files_changed",
+    "verification_claims"
+  ],
+  "properties": {
+    "task_id": { "type": "string" },
+    "run_id": { "type": "string" },
+    "spec_version": { "type": "integer" },
+    "vendor": { "type": "string", "enum": ["claude", "codex", "opencode", "kimi"] },
+    "session_id": { "type": "string" },
+    "status": { "type": "string", "enum": ["completed", "blocked", "failed"] },
+    "branch": { "type": "string" },
+    "base_commit": { "type": "string" },
+    "head_commit": { "type": "string" },
+    "summary": { "type": "string" },
+    "files_changed": { "type": "array", "items": { "type": "string" } },
+    "verification_claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["command", "status"],
+        "properties": {
+          "command": { "type": "string" },
+          "status": { "type": "string", "enum": ["passed", "failed", "timed_out", "skipped"] }
+        }
+      }
+    },
+    "risks": { "type": "array", "items": { "type": "string" } },
+    "unresolved_questions": { "type": "array", "items": { "type": "string" } },
+    "suggested_additional_checks": { "type": "array", "items": { "type": "string" } }
+  }
+}

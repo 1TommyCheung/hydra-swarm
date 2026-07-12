@@ -1,0 +1,21 @@
+# hydra/policies/bootstrap.yaml (tracked) — state-and-worktrees.md §4
+#
+# Harness-executed BEFORE the worker exists, under the bootstrap network policy
+# (a DIFFERENT policy from worker network, which is off). `common` runs every
+# wave; `wave_1` runs only when the harness wave level is >= 1
+# (HYDRA_WAVE, or the hydra/WAVE marker).
+#
+# Wave 1 activates conditional indexing: the harness pre-builds a GitNexus index
+# so exploration is available during the task. NOTE (code-intelligence §2.1):
+# this pre-task index is for the worker's OWN navigation only. Indexes that feed
+# REVIEW are rebuilt by the harness POST-freeze (index-candidate.sh) and never
+# trust worker-created graph artifacts.
+bootstrap:
+  common:
+    # No-op when the project has no lockfile (true for this repo today).
+    - "test -f pnpm-lock.yaml && pnpm install --frozen-lockfile || true"
+  wave_1:
+    - "gitnexus analyze --skip-agents-md --skip-skills --name hydra-boot-$HYDRA_TASK_ID --allow-duplicate-name . >/dev/null 2>&1 || true"
+env_per_worktree:
+  PORT: "{auto_unique}"
+timeout_minutes: 10

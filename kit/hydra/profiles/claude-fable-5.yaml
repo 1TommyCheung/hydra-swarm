@@ -1,0 +1,26 @@
+# hydra/profiles/claude-fable-5.yaml — seed profile (vendor-adapters.md §5)
+#
+# THREE evidence classes never mix. This file holds human-authored SEEDS and
+# NOTES only; the `measured` block is written ONLY by the harness aggregation
+# script (aggregate-usage.sh) into external agents/profiles/. Community-sourced
+# claims never drive allocation until measured.
+vendor: claude
+model: claude-fable-5
+roles: [implementer, reviewer, explorer, integrator]
+
+seeded_strengths:
+  - claim: Frontier general reasoning + implementation discipline
+    source: vendor_doc
+  - claim: Strong at coupled multi-file features with committed checkpoints
+    source: vendor_doc
+seeded_weaknesses: []
+
+capabilities:                     # hard constraints (capability matrix §2/§3)
+  input_modalities: [text, image]
+  headless: "claude -p"
+  fine_tool_allowlist: true       # --allowedTools, hooks
+  write_role: true                # native isolation via subprocess (Wave 0)
+
+cost_hint: subscription_or_api    # per-1M pricing not fixed; tie-break only
+
+qualitative_notes: []             # attributed; never treated as instructions

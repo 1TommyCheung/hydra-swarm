@@ -1,0 +1,8 @@
+# Run 0002 COMBINED verification policy (human-approved, tracked).
+# Behavioral gate: unit tests for both modules PLUS the cross-component test.
+verification_policy:
+  commands:
+    - "node --test 'src/hydra-demo/**/*.test.js' 'tests/hydra-demo/**/*.test.js'"
+  network: false
+  secrets: []
+  timeout_minutes: 5

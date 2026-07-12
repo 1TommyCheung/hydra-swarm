@@ -1,0 +1,28 @@
+# hydra/profiles/kimi-k2.7-code.yaml — seed profile (vendor-adapters.md §5)
+vendor: kimi
+model: kimi-k2.7-code
+roles: [visual_debugging, implementer_sandboxed]
+
+seeded_strengths:
+  - claim: Only natively-multimodal coder in the pool (image + video, MoonViT)
+    source: vendor_doc            # HARD capability pin for visual_debugging
+  - claim: Token-efficient agent loops; cheap contained implementation
+    source: vendor_doc
+seeded_weaknesses:
+  - claim: Smallest context (256K); trails frontier SWE
+    source: vendor_doc
+  - claim: "'300 parallel sub-agents' scaling"
+    source: community             # creator-video-sourced — DO NOT allocate on this
+    do_not_allocate_on: true
+
+capabilities:
+  input_modalities: [text, image, video]   # unique multimodal pin
+  headless: "kimi -p"
+  fine_tool_allowlist: false      # print mode AUTO-APPROVES (-y) — no allowlist
+  write_role: sandboxed_only      # never a write role outside a full OS sandbox
+
+cost_hint: "0.95/4.00 (0.19 cached)"
+
+qualitative_notes:
+  - note: "Adapter must preserve reasoning_content across multi-step tool calls (preserve_thinking mandatory)."
+    author: vendor_doc
