@@ -140,6 +140,56 @@ hydra_derive_drop_from_git() {
 # Exit 124 on timeout, matching GNU timeout convention.
 # ---------------------------------------------------------------------------
 
+# Push a worker pane's agent state INTO herdr (Layer-1 live monitor).
+#
+# The herdr vendor integrations hook SESSION lifecycle events (SessionStart /
+# UserPromptSubmit / Stop). Our workers run one-shot non-interactive (`codex
+# exec`, `kimi -p`), so those events never fire and the pane sits at
+# agent=null/unknown. That is precisely why the roadmap says the HARNESS pushes
+# pane state from LEDGER events rather than herdr inferring it — so we drive the
+# same installed hook ourselves, with the worker's pane id.
+# Live state stays ADVISORY; Git + the ledger remain authoritative.
+# We speak herdr's socket protocol directly rather than shelling out to a
+# vendor's installed hook: each vendor hook hardcodes its own agent id (the kimi
+# hook would label a Codex pane "kimi"), and the claude/codex hooks only accept
+# the `session` action. Reporting ourselves lets us name the REAL vendor and
+# identify the harness as the source.
+#   method: pane.report_agent
+#   params: {pane_id, source, agent, state, seq}   (newline-delimited JSON, AF_UNIX)
+# Usage: hydra_herdr_state <pane_id> <vendor> <working|idle|blocked>
+hydra_herdr_state() {
+  local pane="${1:-}" vendor="${2:-}" state="${3:-}"
+  [ -n "$pane" ] && [ -n "$vendor" ] && [ -n "$state" ] || return 0
+  local sock="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
+  [ -S "$sock" ] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  HYDRA_PANE="$pane" HYDRA_VENDOR="$vendor" HYDRA_STATE="$state" HYDRA_SOCK="$sock" \
+  python3 - <<'PY' >/dev/null 2>&1 || true
+import json, os, socket, time, random
+req = {
+    "id": f"herdr:hydra:{int(time.time()*1000)}:{random.randrange(1_000_000):06d}",
+    "method": "pane.report_agent",
+    "params": {
+        "pane_id": os.environ["HYDRA_PANE"],
+        "source": "herdr:hydra",          # the HARNESS is the reporter
+        "agent": os.environ["HYDRA_VENDOR"],
+        "state": os.environ["HYDRA_STATE"],
+        "seq": time.time_ns(),
+    },
+}
+try:
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(0.5)
+    c.connect(os.environ["HYDRA_SOCK"])
+    c.sendall((json.dumps(req) + "\n").encode())
+    try: c.recv(4096)
+    except Exception: pass
+    c.close()
+except Exception:
+    pass
+PY
+}
+
 # Kill a process and every descendant. Backgrounding a shell FUNCTION creates a
 # subshell, so the recorded pid is the subshell — signalling it alone orphans the
 # real worker (and leaves an agent burning tokens). Walk the tree instead.

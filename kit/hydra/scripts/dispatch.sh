@@ -142,6 +142,9 @@ run_worker_in_herdr_pane() {
   hydra_ledger_append "$run_id" herdr_pane_started task_id "$task_id" vendor "$vendor" \
     label "$label" pane "${pane_id:-?}"
   hydra_log "worker hosted in herdr pane ${pane_id:-?}: $label (lead workspace ${ws:-?})"
+  # Push live state FROM the ledger transition (task_started -> working). The
+  # vendor's own hooks never fire in one-shot exec/print mode.
+  hydra_herdr_state "$pane_id" "$vendor" working
 
   # Close the worker's terminal when it finishes — the harness cleans up its own
   # panes. Forensics are unaffected: the adapter's cli/stderr/session logs live in
@@ -149,7 +152,8 @@ run_worker_in_herdr_pane() {
   # Set HYDRA_HERDR_KEEP_PANE=1 to leave the pane open for inspection.
   close_pane() {
     [ -n "$pane_id" ] || return 0
-    [ "${HYDRA_HERDR_KEEP_PANE:-0}" = 1 ] && { hydra_log "keeping herdr pane $pane_id"; return 0; }
+    hydra_herdr_state "$pane_id" "$vendor" idle          # ledger says the worker exited
+    [ "${HYDRA_HERDR_KEEP_PANE:-0}" = 1 ] && { hydra_log "keeping herdr pane $pane_id (state=idle)"; return 0; }
     herdr pane close "$pane_id" >/dev/null 2>&1 \
       && hydra_log "closed herdr pane $pane_id ($label)"
   }
