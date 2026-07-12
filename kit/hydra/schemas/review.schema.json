@@ -11,9 +11,9 @@
     "reviewed_head": { "type": "string" },
     "reviewer": { "type": "string" },
     "reviewer_vendor": { "type": "string" },
-    "blocking_findings": { "type": "array", "items": { "type": "string" } },
-    "non_blocking_findings": { "type": "array", "items": { "type": "string" } },
-    "required_integration_checks": { "type": "array", "items": { "type": "string" } },
+    "blocking_findings": { "type": "array", "items": { "type": ["string", "object"] } },
+    "non_blocking_findings": { "type": "array", "items": { "type": ["string", "object"] } },
+    "required_integration_checks": { "type": "array", "items": { "type": ["string", "object"] } },
     "risk": { "type": "string", "enum": ["low", "medium", "high", "critical"] }
   }
 }
