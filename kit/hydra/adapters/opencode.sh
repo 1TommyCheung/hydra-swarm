@@ -45,7 +45,7 @@ if [ "$verb" = start ]; then
   prompt="$("$SELF_DIR/build-worker-prompt.sh" "$task_spec")"
   events="$sessions/$agent_run_id.events.jsonl"
 
-  opencode run --model "$model" --agent hydra-implementer --format json --dir "$worktree" "$prompt" \
+  opencode run --model "$model" --agent hydra-implementer --format json --auto --dir "$worktree" "$prompt" \
     </dev/null >"$events" 2>"$sessions/$agent_run_id.stderr" || true
 
   session_id="$(jq -rs 'map(.sessionID // empty) | map(select(. != "")) | last // empty' "$events" 2>/dev/null || true)"
@@ -82,11 +82,9 @@ agent_run_id="${4:?agent_run_id required}"
 
 events="$out_prefix.events.jsonl"
 mkdir -p "$(dirname "$out_prefix")"
-events="$out_prefix.events.jsonl"
-mkdir -p "$(dirname "$out_prefix")"
 
 # Read-only run under the hydra-reviewer agent profile.
-opencode run --model "$model" --agent hydra-reviewer --format json --dir "$cwd" "$prompt" \
+opencode run --model "$model" --agent hydra-reviewer --format json --auto --dir "$cwd" "$prompt" \
   </dev/null >"$events" 2>"$out_prefix.stderr" || true
 
 # Final assistant text (last text event).

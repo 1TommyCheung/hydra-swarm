@@ -44,7 +44,7 @@ case "$vendor" in
   codex)    inner_cmd="codex exec --json -s read-only -C '$repo_root' \"\$(cat '$prompt_file')\" > '$raw' 2>&1" ;;
   kimi)     inner_cmd="kimi -p \"\$(cat '$prompt_file')\" --output-format stream-json --add-dir '$repo_root' ${image:+--add-dir '$(dirname "$image")'} > '$raw' 2>&1" ;;
   claude)   inner_cmd="claude -p \"\$(cat '$prompt_file')\" --output-format json --add-dir '$repo_root' > '$raw' 2>&1" ;;
-  opencode) inner_cmd="opencode run --model \"\${HYDRA_OPENCODE_MODEL:-zai-coding-plan/glm-5.2}\" --agent hydra-reviewer --format json --dir '$repo_root' \"\$(cat '$prompt_file')\" > '$raw' 2>&1" ;;
+  opencode) inner_cmd="opencode run --model \"\${HYDRA_OPENCODE_MODEL:-zai-coding-plan/glm-5.2}\" --agent hydra-reviewer --format json --auto --dir '$repo_root' \"\$(cat '$prompt_file')\" > '$raw' 2>&1" ;;
   *) hydra_die "unknown vendor: $vendor" ;;
 esac
 wrapped="echo \$\$ > '$pidfile'; $inner_cmd; printf '%s' \$? > '$sentinel'"
