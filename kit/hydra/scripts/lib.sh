@@ -306,6 +306,28 @@ hydra_yaml_list() {
   ' "$file"
 }
 
+# Block-scalar accessor: reads a YAML folded/literal block (`key: >` or `key: |`)
+# — the indented lines that follow the key. Falls back to an inline value if the
+# key has one on its own line. This existed as a latent gap: hydra_yaml_scalar
+# only reads the same line, so `objective: >` blocks came back EMPTY, silently
+# dropping the objective from every worker prompt.
+# Usage: hydra_yaml_block <file> <top_key>   -> prints the block text (dedented)
+hydra_yaml_block() {
+  local file="$1" key="$2"
+  awk -v key="$key" '
+    $0 ~ "^"key":[[:space:]]*[|>]?[[:space:]]*$" && !grab {
+      # Block-scalar header (key: , key: > , key: |). Start collecting.
+      inline=$0; sub("^"key":[[:space:]]*", "", inline); gsub(/[|>[:space:]]/, "", inline);
+      if (inline != "") { print inline; exit }   # actually an inline value
+      grab=1; next
+    }
+    grab {
+      if ($0 ~ /^[^[:space:]]/) exit             # dedent to col 0 => block ended
+      line=$0; sub(/^[[:space:]]+/, "", line); print line
+    }
+  ' "$file" | sed -e 's/[[:space:]]*$//' | awk 'NF||p{print;p=1}'
+}
+
 # Scalar accessor: `key: value` at top level. Strips quotes.
 hydra_yaml_scalar() {
   local file="$1" key="$2"

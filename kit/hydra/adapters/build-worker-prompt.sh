@@ -28,7 +28,10 @@ run_id="$(hydra_yaml_scalar "$task_spec" 'run_id')"
 spec_version="$(hydra_yaml_scalar "$task_spec" 'spec_version')"
 branch="$(hydra_yaml_scalar "$task_spec" 'branch')"
 base_commit="$(hydra_yaml_scalar "$task_spec" 'base_commit')"
-objective="$(hydra_yaml_scalar "$task_spec" 'objective')"
+# objective is a YAML block scalar (`objective: >`); read the whole block, not
+# just the header line (which is empty).
+objective="$(hydra_yaml_block "$task_spec" 'objective')"
+[ -n "$objective" ] || objective="$(hydra_yaml_scalar "$task_spec" 'objective')"
 
 writable="$(hydra_yaml_list "$task_spec" 'writable_paths' | sed 's/^/  - /')"
 readonly_paths="$(hydra_yaml_list "$task_spec" 'read_only_paths' | sed 's/^/  - /')"
