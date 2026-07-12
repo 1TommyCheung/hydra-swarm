@@ -82,19 +82,116 @@ acquire_slot() {
 }
 release_slot() { rm -f "$slots_dir/$agent_run_id"; }
 
+# Every task_started MUST be closed by an exit event. If the dispatch is killed
+# (SIGINT/SIGTERM/SIGHUP) the worker dies without recording one, leaving a
+# dangling "running" task in the ledger — a real hole caught by reconciling the
+# ledger against herdr's live view (herdr-push.sh). This trap guarantees closure.
+exit_recorded=0
+record_exit() {
+  local event="$1" rc="${2:-}"
+  [ "$exit_recorded" -eq 1 ] && return 0
+  exit_recorded=1
+  if [ -n "$rc" ]; then
+    hydra_ledger_append "$run_id" "$event" task_id "$task_id" vendor "$vendor" exit_code "$rc"
+  else
+    hydra_ledger_append "$run_id" "$event" task_id "$task_id" vendor "$vendor"
+  fi
+  release_slot
+}
+worker_pid=""
+herdr_pane_id=""    # set when the worker is hosted in a herdr pane
+on_signal() {
+  # Kill the worker AND its descendants (the recorded pid is a subshell), close
+  # its terminal, then close the ledger entry before exiting.
+  [ -n "$worker_pid" ] && hydra_kill_tree "$worker_pid"
+  if [ -n "$herdr_pane_id" ] && [ "${HYDRA_HERDR_KEEP_PANE:-0}" != 1 ]; then
+    herdr pane close "$herdr_pane_id" >/dev/null 2>&1 || true
+  fi
+  record_exit agent_cancelled
+  hydra_warn "dispatch cancelled — agent_cancelled recorded (no dangling running task)"
+  exit 130
+}
+trap on_signal INT TERM HUP
+
+# --- Optional: host the worker in a herdr pane (HYDRA_HERDR_PANES=1) ---------
+# herdr is the TERMINAL HOST only (like tmux): the harness still decides what to
+# launch, owns the timeout, cancels, and writes the ledger; adapters still write
+# their own session/result files, so structured capture + budget accounting are
+# unaffected. Pane TEXT is never read as truth (observability.yaml). This does
+# NOT make herdr own dispatch/worktrees/task lifecycle (roadmap non-goal).
+herdr_live() { command -v herdr >/dev/null 2>&1 && herdr status >/dev/null 2>&1; }
+
+run_worker_in_herdr_pane() {
+  local sentinel="$sessions_dir/$agent_run_id.exit"
+  local pidfile="$sessions_dir/$agent_run_id.pid"
+  rm -f "$sentinel" "$pidfile"
+  # Attribute the worker to THIS lead: same herdr workspace as the focused
+  # (lead) pane, split beneath it, labelled with run/task/vendor.
+  local ws label
+  ws="$(herdr pane list 2>/dev/null | jq -r '.result.panes[]|select(.focused)|.workspace_id' | head -1)"
+  label="hydra:${run_id}:${task_id}:${vendor}"
+  local inner
+  inner="echo \$\$ > '$pidfile'; '$adapter' '$verb' '$task_spec' '$worktree' '$inbox' '$sessions_dir' '$agent_run_id' '$prior_session'; printf '%s' \$? > '$sentinel'"
+
+  local started pane_id
+  started="$(herdr agent start "$label" --cwd "$worktree" ${ws:+--workspace "$ws"} \
+    --split down --no-focus -- bash -lc "$inner" 2>/dev/null)" || return 1
+  pane_id="$(jq -r '.result.agent.pane_id // empty' <<<"$started" 2>/dev/null)"
+  herdr_pane_id="$pane_id"   # visible to the cancel trap
+  # The pidfile lets us kill the pane-hosted worker tree on timeout/cancel.
+  hydra_ledger_append "$run_id" herdr_pane_started task_id "$task_id" vendor "$vendor" \
+    label "$label" pane "${pane_id:-?}"
+  hydra_log "worker hosted in herdr pane ${pane_id:-?}: $label (lead workspace ${ws:-?})"
+
+  # Close the worker's terminal when it finishes — the harness cleans up its own
+  # panes. Forensics are unaffected: the adapter's cli/stderr/session logs live in
+  # sessions/, and the ledger + Git remain authoritative.
+  # Set HYDRA_HERDR_KEEP_PANE=1 to leave the pane open for inspection.
+  close_pane() {
+    [ -n "$pane_id" ] || return 0
+    [ "${HYDRA_HERDR_KEEP_PANE:-0}" = 1 ] && { hydra_log "keeping herdr pane $pane_id"; return 0; }
+    herdr pane close "$pane_id" >/dev/null 2>&1 \
+      && hydra_log "closed herdr pane $pane_id ($label)"
+  }
+
+  # HARNESS-owned timeout: poll for the adapter's exit sentinel.
+  local waited=0 limit=$(( timeout_min * 60 ))
+  while [ ! -f "$sentinel" ] && [ "$waited" -lt "$limit" ]; do sleep 2; waited=$(( waited + 2 )); done
+  if [ ! -f "$sentinel" ]; then
+    [ -f "$pidfile" ] && hydra_kill_tree "$(cat "$pidfile")"
+    record_exit agent_timed_out
+    close_pane
+    return 0
+  fi
+  record_exit agent_exited "$(cat "$sentinel")"
+  close_pane
+  return 0
+}
+
 run_worker() {
   local rc=0
+  if [ "${HYDRA_HERDR_PANES:-0}" = 1 ] && herdr_live; then
+    run_worker_in_herdr_pane && {
+      "$SELF_DIR/record-usage.sh" "$run_id" "$task_id" "$vendor" "$agent_run_id" 2>/dev/null || true
+      return 0
+    }
+    hydra_warn "herdr pane launch failed — falling back to a plain subprocess"
+  fi
+  # The worker MUST run in the background and be `wait`ed on: bash defers traps
+  # while blocked on a foreground child, so a foreground worker would swallow
+  # SIGTERM until it finished — exactly how the dangling task_started arose.
+  # `wait` is interruptible, so the trap can fire immediately.
   hydra_timeout $(( timeout_min * 60 )) \
-    "$adapter" "$verb" "$task_spec" "$worktree" "$inbox" "$sessions_dir" "$agent_run_id" "$prior_session" \
-    || rc=$?
+    "$adapter" "$verb" "$task_spec" "$worktree" "$inbox" "$sessions_dir" "$agent_run_id" "$prior_session" &
+  worker_pid=$!
+  wait "$worker_pid" || rc=$?
   if [ "$rc" -eq 124 ]; then
-    hydra_ledger_append "$run_id" agent_timed_out task_id "$task_id" vendor "$vendor"
+    record_exit agent_timed_out
   else
-    hydra_ledger_append "$run_id" agent_exited task_id "$task_id" vendor "$vendor" exit_code "$rc"
+    record_exit agent_exited "$rc"
   fi
   # Budget/usage accounting (Wave 1) — parse the adapter session capture.
   "$SELF_DIR/record-usage.sh" "$run_id" "$task_id" "$vendor" "$agent_run_id" 2>/dev/null || true
-  release_slot
   return 0
 }
 

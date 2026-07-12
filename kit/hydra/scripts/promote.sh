@@ -62,6 +62,15 @@ if [ "$claimed_version" != "$spec_version_latest" ]; then
   reject stale_spec "claimed v$claimed_version, latest v$spec_version_latest"
 fi
 
+# --- 2b. Worker-declared status --------------------------------------------
+# A drop that does not claim completion must never promote. (A `failed`/`blocked`
+# drop reaching the gates and passing them on the strength of uncommitted files
+# in the worktree is exactly the hole this closes.)
+claimed_status="$(jq -r '.status' "$drop")"
+if [ "$claimed_status" != "completed" ]; then
+  reject not_completed "worker reported status '$claimed_status'"
+fi
+
 # --- Load spec fields -------------------------------------------------------
 worktree="$(hydra_yaml_scalar "$task_spec" 'worktree')"
 branch="$(hydra_yaml_scalar "$task_spec" 'branch')"
@@ -98,6 +107,16 @@ full_claimed="$(git -C "$worktree" rev-parse --verify "$claimed_head" 2>/dev/nul
 # while stray files outside it are rejected as ownership violations.
 [ -z "$(git -C "$worktree" status --porcelain --untracked-files=no)" ] \
   || reject git_evidence "worktree has uncommitted tracked changes"
+
+# The candidate MUST actually contain committed work. Without this, a worker can
+# leave its output UNTRACKED in the worktree and still pass every gate — the
+# ownership audit permits untracked files inside the lane, and verification would
+# happily run against files that exist on disk but not in Git. Evidence must live
+# in Git (architecture §4.1), so an empty base..head diff is not a candidate.
+if [ "$(git -C "$worktree" rev-parse "$base_commit")" = "$full_claimed" ] \
+   || [ -z "$(git -C "$worktree" diff --name-only "$base_commit...$full_claimed")" ]; then
+  reject no_commit "head == base (or empty diff): worker produced no committed work (§2.1)"
+fi
 
 # --- 4. Ownership audit (authoritative) ------------------------------------
 if ! audit_out="$("$SELF_DIR/audit-ownership.sh" "$worktree" "$base_commit" "$claimed_head" "${writable[@]}" 2>&1)"; then

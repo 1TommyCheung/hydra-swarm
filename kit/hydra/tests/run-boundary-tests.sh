@@ -83,14 +83,14 @@ YAML
   printf '%s' "$wt"
 }
 
-# write_drop <task_id> <head> <spec_version> <verif_status>
+# write_drop <task_id> <head> <spec_version> <verif_status> [worker_status]
 write_drop() {
-  local task_id="$1" head="$2" sv="$3" vstatus="$4"
+  local task_id="$1" head="$2" sv="$3" vstatus="$4" wstatus="${5:-completed}"
   local branch="hydra/$RUN_ID/$task_id"
   jq -n --arg t "$task_id" --arg r "$RUN_ID" --argjson sv "$sv" \
-        --arg b "$branch" --arg bc "$BASE" --arg h "$head" --arg vs "$vstatus" '{
+        --arg b "$branch" --arg bc "$BASE" --arg h "$head" --arg vs "$vstatus" --arg ws "$wstatus" '{
     task_id:$t, run_id:$r, spec_version:$sv, vendor:"claude", session_id:"x",
-    status:"completed", branch:$b, base_commit:$bc, head_commit:$h,
+    status:$ws, branch:$b, base_commit:$bc, head_commit:$h,
     summary:"test", files_changed:["src/app.js"],
     verification_claims:[{command:"node --check src/app.js", status:$vs}],
     risks:[], unresolved_questions:[], suggested_additional_checks:[]
@@ -179,6 +179,25 @@ printf 'console.log(6);\n' >"$wt/src/app.js"; git -C "$wt" commit -qam c
 head="$(git -C "$wt" rev-parse HEAD)"
 drop="$(write_drop stale "$head" 1 passed)"             # drop claims v1
 assert_reject "6. stale spec_version -> stale_spec" stale stale_spec "$drop"
+
+# --- 7. Uncommitted work: worker left output UNTRACKED, never committed -----
+# Real regression (Wave 2, run 0007): Kimi wrote the file but never committed it.
+# The tree looks "clean" (untracked ignored), the ownership audit permits
+# untracked files inside the lane, and verification passes against the file
+# sitting on disk — so the candidate promoted with head == base and NO work in
+# Git. Evidence must live in Git (architecture §4.1).
+wt="$(make_candidate no-commit 1)"
+printf 'console.log(7);\n' >"$wt/src/uncommitted.js"   # written, never committed
+head="$(git -C "$wt" rev-parse HEAD)"                  # == BASE
+drop="$(write_drop no-commit "$head" 1 passed)"
+assert_reject "7. work left uncommitted (head==base) -> no_commit" no-commit no_commit "$drop"
+
+# --- 8. Worker-declared failure must never promote --------------------------
+wt="$(make_candidate declared-fail 1)"
+printf 'console.log(8);\n' >"$wt/src/app.js"; git -C "$wt" commit -qam c
+head="$(git -C "$wt" rev-parse HEAD)"
+drop="$(write_drop declared-fail "$head" 1 passed failed)"   # status: failed
+assert_reject "8. worker-declared 'failed' status -> not_completed" declared-fail not_completed "$drop"
 
 echo
 echo "----------------------------------------"

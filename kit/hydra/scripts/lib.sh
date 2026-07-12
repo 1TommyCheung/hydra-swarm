@@ -140,6 +140,18 @@ hydra_derive_drop_from_git() {
 # Exit 124 on timeout, matching GNU timeout convention.
 # ---------------------------------------------------------------------------
 
+# Kill a process and every descendant. Backgrounding a shell FUNCTION creates a
+# subshell, so the recorded pid is the subshell — signalling it alone orphans the
+# real worker (and leaves an agent burning tokens). Walk the tree instead.
+hydra_kill_tree() {
+  local pid="$1" child
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    hydra_kill_tree "$child"
+  done
+  kill -TERM "$pid" 2>/dev/null || true
+  ( sleep 2; kill -KILL "$pid" 2>/dev/null || true ) >/dev/null 2>&1 &
+}
+
 hydra_timeout() {
   local secs="$1"; shift
   if command -v timeout >/dev/null 2>&1; then
@@ -147,11 +159,21 @@ hydra_timeout() {
   elif command -v gtimeout >/dev/null 2>&1; then
     gtimeout "$secs" "$@"
   elif command -v perl >/dev/null 2>&1; then
+    # The wrapper MUST forward termination to its child, or killing the wrapper
+    # leaves an orphaned worker running (and a stray agent burning tokens).
     perl -e '
       my $s = shift;
       my $pid = fork();
       if ($pid == 0) { exec @ARGV or exit 127; }
-      local $SIG{ALRM} = sub { kill "TERM", $pid; sleep 2; kill "KILL", $pid; exit 124; };
+      my $reap = sub {
+        my ($code) = @_;
+        kill "TERM", $pid; sleep 1; kill "KILL", $pid;
+        exit $code;
+      };
+      local $SIG{ALRM} = sub { $reap->(124) };   # timeout
+      local $SIG{TERM} = sub { $reap->(143) };   # cancelled
+      local $SIG{INT}  = sub { $reap->(130) };
+      local $SIG{HUP}  = sub { $reap->(129) };
       alarm $s;
       waitpid($pid, 0);
       exit($? >> 8);

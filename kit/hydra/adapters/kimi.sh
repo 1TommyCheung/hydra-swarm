@@ -33,12 +33,19 @@ shift
 # Build an SBPL profile that allows all-but-file-writes, then permits writes only
 # under the given roots. Prints the profile path.
 make_sandbox_profile() {
-  local prof; prof="$(mktemp "${TMPDIR:-/tmp}/hydra-kimi-XXXXXX.sb")"
+  # BSD/macOS mktemp requires the X's at the END of the template. A suffix after
+  # them (e.g. ...-XXXXXX.sb) makes mktemp create a LITERAL file of that name —
+  # which then collides forever ("File exists"), yielding an empty path and a
+  # `sandbox-exec -f ""` invocation. Also strip TMPDIR's trailing slash.
+  local tmpdir="${TMPDIR:-/tmp}"; tmpdir="${tmpdir%/}"
+  local prof; prof="$(mktemp "$tmpdir/hydra-kimi-sb-XXXXXX")" || return 1
+  [ -n "$prof" ] || return 1
   {
     echo '(version 1)'
     echo '(allow default)'
     echo '(deny file-write*)'
     for root in "$@"; do
+      [ -n "$root" ] || continue
       printf '(allow file-write* (subpath "%s"))\n' "$root"
     done
   } >"$prof"
@@ -81,7 +88,11 @@ Image to analyze: $image"
     # worktree; Kimi must write there to commit. Resolve to a physical path so
     # sandbox-exec subpath matching works (/var -> /private/var).
     git_common="$(cd "$worktree" && cd "$(git rev-parse --path-format=absolute --git-common-dir)" && pwd -P)"
-    prof="$(make_sandbox_profile "$wt_abs" "$git_common" "${TMPDIR:-/tmp}" "/private/tmp" "$HOME/.kimi-code")"
+    prof="$(make_sandbox_profile "$wt_abs" "$git_common" "${TMPDIR:-/tmp}" "/private/tmp" "$HOME/.kimi-code")" || prof=""
+    # HARD GUARD: never invoke an auto-approving agent without a real profile.
+    # `sandbox-exec -f ""` must never happen — refuse the write role instead.
+    [ -n "$prof" ] && [ -s "$prof" ] \
+      || hydra_die "failed to build sandbox profile — refusing to run Kimi (auto-approves tools) unsandboxed"
     hydra_log "kimi write role under sandbox-exec (writes confined to worktree + git-common-dir)"
 
     # NOTE: `kimi -p` (print mode) ALREADY auto-approves tools — that is exactly
