@@ -44,6 +44,18 @@ make_sandbox_profile() {
     echo '(version 1)'
     echo '(allow default)'
     echo '(deny file-write*)'
+    # Device nodes are NOT the threat model — the lane is. A blanket
+    # file-write deny also blocks /dev/null, which bash and git open for
+    # read/write on almost every command ("fatal: could not open '/dev/null'"),
+    # silently crippling the worker inside its own sandbox.
+    echo '(allow file-write* (subpath "/dev"))'
+    # The herdr status hook connects to herdr's unix socket to report
+    # working/idle/blocked. Without this the pane shows a stale "idle".
+    if [ -n "${HERDR_SOCKET_DIR:-}" ]; then
+      printf '(allow file-write* (subpath "%s"))\n' "$HERDR_SOCKET_DIR"
+    elif [ -d "$HOME/.config/herdr" ]; then
+      printf '(allow file-write* (subpath "%s/.config/herdr"))\n' "$HOME"
+    fi
     for root in "$@"; do
       [ -n "$root" ] || continue
       printf '(allow file-write* (subpath "%s"))\n' "$root"
