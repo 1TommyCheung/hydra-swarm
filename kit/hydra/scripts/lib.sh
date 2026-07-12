@@ -61,6 +61,8 @@ hydra_worktree_root() {
 # keyed by repo-id then commit (code-intelligence.md §2.1).
 hydra_indexes_root() { printf '%s/indexes' "$(hydra_state_root)"; }
 hydra_gitnexus_dir() { printf '%s/gitnexus/%s/%s' "$(hydra_indexes_root)" "$(hydra_repo_id)" "$1"; }
+# Graphify graphs are run-scoped by default (code-intelligence §3): keyed by run.
+hydra_graphify_dir() { printf '%s/graphify/%s/run-%s' "$(hydra_indexes_root)" "$(hydra_repo_id)" "$1"; }
 
 hydra_run_dir()   { printf '%s/runs/run-%s' "$(hydra_state_root)" "$1"; }
 hydra_auth_dir()  { printf '%s/authoritative' "$(hydra_run_dir "$1")"; }

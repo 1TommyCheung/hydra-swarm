@@ -1,0 +1,26 @@
+# hydra/policies/observability.yaml (tracked) — roadmap Wave 2 observability
+#
+# NORMATIVE RULE (do not violate): live state is ADVISORY; Git + the ledger WIN;
+# a disagreement between a live view and the ledger is itself an ANOMALY EVENT.
+# Non-goal: any UI that owns dispatch / worktrees / task lifecycle.
+observability:
+  layer_1_live_monitor:            # herdr — Linux-native; detach/SSH; socket API
+    tool: herdr
+    installed: false               # build-with-note in this environment
+    rule: harness pushes pane state FROM ledger events; never output-scraping as truth
+    push_script: hydra/scripts/herdr-push.sh
+    socket_env: HERDR_SOCKET
+  layer_2_authoritative_view:      # minimal ledger web renderer (self-contained HTML)
+    tool: ledger-view
+    installed: true
+    script: hydra/scripts/ledger-view.sh
+  otel:
+    # Claude Code workers export OpenTelemetry to a LOCAL collector.
+    exporter_endpoint_env: OTEL_EXPORTER_OTLP_ENDPOINT
+    default_endpoint: http://localhost:4318
+    collector_installed: false     # export is a no-op until a collector listens
+    env:
+      CLAUDE_CODE_ENABLE_TELEMETRY: "1"
+      OTEL_METRICS_EXPORTER: otlp
+      OTEL_LOGS_EXPORTER: otlp
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
