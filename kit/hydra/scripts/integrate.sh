@@ -29,7 +29,12 @@ order=("$@")
 
 repo_root="$(hydra_repo_root)"
 run_dir="$(hydra_run_dir "$run_id")"
+# The COMBINED gate runs the full policy (incl. cross-component tests, §6).
 verify_policy="${HYDRA_VERIFY_POLICY:-$repo_root/hydra/policies/verification.yaml}"
+# Per-candidate smoke is TASK-SPECIFIC (§5): a candidate's own tests only, no
+# cross-component checks — those belong to the combined gate. Defaults to the
+# full policy when no smoke policy is provided.
+smoke_policy="${HYDRA_SMOKE_POLICY:-$verify_policy}"
 base_commit="$(hydra_yaml_scalar "$run_dir/run.yaml" 'base_commit')"
 [ -n "$base_commit" ] || hydra_die "run base_commit not recorded in run.yaml"
 
@@ -57,8 +62,9 @@ for task_id in "${order[@]}"; do
     exit 6
   fi
 
-  # Per-candidate smoke verification (sandboxed).
-  if ! "$SELF_DIR/verify.sh" "$int_worktree" "$verify_policy" >/dev/null 2>&1; then
+  # Per-candidate smoke verification (sandboxed, task-specific — not the cross
+  # component gate).
+  if ! "$SELF_DIR/verify.sh" "$int_worktree" "$smoke_policy" >/dev/null 2>&1; then
     after_fail="$(git -C "$int_worktree" rev-parse HEAD)"
     hydra_ledger_append "$run_id" integration_candidate_verify_failed task_id "$task_id" head "$after_fail"
     hydra_warn "per-candidate verification failed for $task_id"

@@ -1,0 +1,7 @@
+# Run 0002 per-candidate SMOKE policy (task-specific, no cross-component test).
+verification_policy:
+  commands:
+    - "node --test 'src/hydra-demo/**/*.test.js'"
+  network: false
+  secrets: []
+  timeout_minutes: 5
