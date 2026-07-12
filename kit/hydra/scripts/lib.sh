@@ -57,6 +57,11 @@ hydra_worktree_root() {
   fi
 }
 
+# Derived code-intelligence indexes (Wave 1+). External state, never tracked,
+# keyed by repo-id then commit (code-intelligence.md §2.1).
+hydra_indexes_root() { printf '%s/indexes' "$(hydra_state_root)"; }
+hydra_gitnexus_dir() { printf '%s/gitnexus/%s/%s' "$(hydra_indexes_root)" "$(hydra_repo_id)" "$1"; }
+
 hydra_run_dir()   { printf '%s/runs/run-%s' "$(hydra_state_root)" "$1"; }
 hydra_auth_dir()  { printf '%s/authoritative' "$(hydra_run_dir "$1")"; }
 hydra_inbox_dir() { printf '%s/inbox' "$(hydra_run_dir "$1")"; }
@@ -197,6 +202,8 @@ hydra_yaml_scalar() {
   awk -v key="$key" '
     $0 ~ "^"key":[[:space:]]*" {
       line=$0; sub("^"key":[[:space:]]*", "", line);
+      # Strip an inline comment introduced by whitespace + # (not a leading #).
+      sub(/[[:space:]]+#.*$/, "", line);
       gsub(/^"|"$/, "", line);
       gsub(/[[:space:]]*$/, "", line);
       print line; exit

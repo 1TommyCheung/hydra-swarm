@@ -45,7 +45,7 @@ git -C "$repo_root" worktree add --quiet -b "$branch" "$worktree" "$base_commit"
 # the ownership audit. Per-worktree exclude file.
 exclude_file="$(git -C "$worktree" rev-parse --git-path info/exclude)"
 mkdir -p "$(dirname "$exclude_file")"
-{ echo '.hydra-task.yaml'; echo '.env.worktree'; echo '.hydra-result.json'; } >>"$exclude_file"
+{ echo '.hydra-task.yaml'; echo '.env.worktree'; echo '.hydra-result.json'; echo '.gitnexus/'; } >>"$exclude_file"
 
 # Read-only copy of the task spec for the worker (workers never see the state store).
 cp "$task_spec" "$worktree/.hydra-task.yaml"
@@ -55,13 +55,29 @@ chmod 0444 "$worktree/.hydra-task.yaml"
 port=$(( 20000 + ( $(printf '%s' "$run_id/$task_id" | cksum | cut -d' ' -f1) % 20000 ) ))
 printf 'PORT=%s\n' "$port" >"$worktree/.env.worktree"
 
-# --- Bootstrap phase: dependency install under the bootstrap network policy --
-# (Different policy from worker network, which is off.) No-op when the project
-# has no lockfile — true for this repo today.
+# --- Bootstrap phase: policy-driven, under the bootstrap network policy -------
+# (Different policy from worker network, which is off.) Runs `common` steps
+# every wave; `wave_1` steps only when HYDRA_WAVE>=1 or the hydra/WAVE marker
+# says so (state-and-worktrees §4; bootstrap.yaml). code-intelligence §2.1: any
+# index built here is for the worker's OWN navigation; review indexes are rebuilt
+# post-freeze by index-candidate.sh.
 bootstrap_status=ok
-if [ -f "$worktree/pnpm-lock.yaml" ]; then
-  ( cd "$worktree" && hydra_timeout 600 pnpm install --frozen-lockfile ) \
-    || bootstrap_status=failed
+bootstrap_policy="$repo_root/hydra/policies/bootstrap.yaml"
+wave_level="${HYDRA_WAVE:-$( [ -f "$repo_root/hydra/WAVE" ] && cat "$repo_root/hydra/WAVE" || echo 0 )}"
+run_bootstrap_steps() {
+  local key="$1"
+  while IFS= read -r step; do
+    [ -n "$step" ] || continue
+    ( cd "$worktree" && HYDRA_TASK_ID="$task_id" HYDRA_RUN_ID="$run_id" \
+        hydra_timeout 600 bash -c "$step" ) || return 1
+  done < <(hydra_yaml_list "$bootstrap_policy" "  $key")
+}
+if [ -f "$bootstrap_policy" ]; then
+  run_bootstrap_steps common || bootstrap_status=failed
+  if [ "$bootstrap_status" = ok ] && [ "${wave_level:-0}" -ge 1 ] 2>/dev/null; then
+    run_bootstrap_steps wave_1 || bootstrap_status=failed
+    hydra_log "wave_1 bootstrap steps executed (wave level $wave_level)"
+  fi
 fi
 
 # --- Persist operational fields back into the instantiated task spec --------

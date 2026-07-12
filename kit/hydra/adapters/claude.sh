@@ -18,11 +18,12 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../scripts/lib.sh
 source "$SELF_DIR/../scripts/lib.sh"
 
-verb="${1:?usage: claude.sh start <task_spec> <worktree> <inbox> <sessions> <agent_run_id>}"
-[ "$verb" = start ] || hydra_die "claude.sh: only 'start' is implemented in Wave 0 (got '$verb')"
+verb="${1:?usage: claude.sh start|resume <task_spec> <worktree> <inbox> <sessions> <agent_run_id> [prior_session_id]}"
+case "$verb" in start|resume) ;; *) hydra_die "claude.sh: unknown verb '$verb'";; esac
 shift
 task_spec="${1:?task_spec required}"; worktree="${2:?worktree required}"
 inbox="${3:?inbox required}"; sessions="${4:?sessions required}"; agent_run_id="${5:?agent_run_id required}"
+prior_session_id="${6:-}"   # resume only (vendor-adapters §1: turn-boundary resume)
 
 repo_root="$(hydra_repo_root)"
 result_path="$inbox/result.json"        # adapter-owned; in the state store
@@ -35,9 +36,15 @@ prompt="$("$SELF_DIR/build-worker-prompt.sh" "$task_spec")"
 # Headless worker in the worktree. bypassPermissions lets the worker edit/commit
 # non-interactively; the REAL boundary is the post-hoc audit in promote.sh, so
 # broad in-worktree autonomy is acceptable (the worktree is the blast radius).
+resume_flag=()
+if [ "$verb" = resume ] && [ -n "$prior_session_id" ]; then
+  resume_flag=(--resume "$prior_session_id")
+  hydra_log "claude resume from session $prior_session_id"
+fi
 raw="$(cd "$worktree" && claude -p "$prompt" \
         --output-format json \
         --permission-mode bypassPermissions \
+        "${resume_flag[@]}" \
         --add-dir "$worktree" 2>"$sessions/$agent_run_id.stderr")" || true
 
 printf '%s' "$raw" >"$sessions/$agent_run_id.cli.json"
