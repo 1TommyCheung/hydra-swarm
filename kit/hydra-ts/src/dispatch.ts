@@ -59,6 +59,10 @@ export interface DispatchOptions {
   repoRoot?: string;
   env?: NodeJS.ProcessEnv;
   adapterRuntime?: 'bash' | 'ts';
+  /** Override directory for TypeScript adapters (used by tests). */
+  tsAdapterDir?: string;
+  /** Override directory for Bash adapters (used by tests). */
+  bashAdapterDir?: string;
   nodeExecutable?: string;
   execFileSync?: ExecFileSyncLike;
   spawn?: SpawnLike;
@@ -1005,10 +1009,15 @@ export async function dispatch(
   // Adapters are kit-owned assets: resolve self-relative to this file's own
   // location, not via the target repo root (repo is for git/worktree/state
   // operations on the TARGET project, which is a different concern).
+  // Tests may override the adapter directories with fixture locations.
   const selfDir = dirname(fileURLToPath(import.meta.url));
+  const defaultTsAdapterDir = selfDir;
+  const defaultBashAdapterDir = join(selfDir, '..', '..', 'hydra', 'adapters');
+  const tsAdapterDir = options.tsAdapterDir ? resolve(cwd, options.tsAdapterDir) : defaultTsAdapterDir;
+  const bashAdapterDir = options.bashAdapterDir ? resolve(cwd, options.bashAdapterDir) : defaultBashAdapterDir;
   const adapterPath = adapterRuntime === 'ts'
-    ? join(selfDir, `adapter-${spec.vendor}.ts`)
-    : join(selfDir, '..', '..', 'hydra', 'adapters', `${spec.vendor}.sh`);
+    ? join(tsAdapterDir, `adapter-${spec.vendor}.ts`)
+    : join(bashAdapterDir, `${spec.vendor}.sh`);
   if (!isFile(adapterPath)) die(`no adapter for vendor '${spec.vendor}': ${adapterPath}`);
 
   const resolvedWorktree = spec.worktree ? resolve(cwd, spec.worktree) : '';

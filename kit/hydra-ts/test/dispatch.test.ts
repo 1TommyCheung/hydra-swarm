@@ -37,6 +37,8 @@ interface Fixture {
   sessionsDir: string;
   worktree: string;
   repoRoot: string;
+  bashAdapterDir: string;
+  tsAdapterDir: string;
   adapterPath: string;
   tsAdapterPath: string;
   taskSpecPath: string;
@@ -58,7 +60,7 @@ function fixture(
   const sessionsDir = join(runDir, 'sessions');
   const worktree = overrides.worktree ?? join(TEST_TMP, id, 'worktree');
   const repoRoot = join(TEST_TMP, id, 'repo');
-  const adapterDir = join(repoRoot, 'hydra', 'adapters');
+  const bashAdapterDir = join(repoRoot, 'hydra', 'adapters');
   const tsAdapterDir = join(repoRoot, 'hydra-ts', 'src');
   const taskSpecPath = join(runDir, 'tasks', 'task-a.yaml');
   const vendor = overrides.vendor ?? 'claude';
@@ -66,7 +68,7 @@ function fixture(
   mkdirSync(join(runDir, 'tasks'), { recursive: true });
   mkdirSync(sessionsDir, { recursive: true });
   mkdirSync(worktree, { recursive: true });
-  mkdirSync(adapterDir, { recursive: true });
+  mkdirSync(bashAdapterDir, { recursive: true });
   mkdirSync(tsAdapterDir, { recursive: true });
   writeFileSync(taskSpecPath, [
     'task_id: task-a',
@@ -79,7 +81,7 @@ function fixture(
     'base_commit: 71bcbcf9acf0aeadc5d8eb5d1c0d3868b45b6070',
     '',
   ].join('\n'));
-  const adapterPath = join(adapterDir, `${vendor}.sh`);
+  const adapterPath = join(bashAdapterDir, `${vendor}.sh`);
   const tsAdapterPath = join(tsAdapterDir, `adapter-${vendor}.ts`);
   writeFileSync(adapterPath, overrides.adapterContent ?? '#!/usr/bin/env bash\necho ok\n');
   writeFileSync(tsAdapterPath, overrides.tsAdapterContent ?? 'export function start(): void {}\n');
@@ -90,6 +92,8 @@ function fixture(
     sessionsDir,
     worktree,
     repoRoot,
+    bashAdapterDir,
+    tsAdapterDir,
     adapterPath,
     tsAdapterPath,
     taskSpecPath,
@@ -219,6 +223,8 @@ function injectedOptions(
   return {
     stateRoot: f.stateRoot,
     repoRoot: f.repoRoot,
+    tsAdapterDir: f.tsAdapterDir,
+    bashAdapterDir: f.bashAdapterDir,
     env: {},
     noSignals: true,
     spawn,
