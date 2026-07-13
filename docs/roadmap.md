@@ -111,9 +111,67 @@ Dates are the day the wave's exit criteria were met in this repo.
 
 ## Now: the front of the roadmap
 
-### Wave 3 — packaging (`packaging.md`)
-Kit extraction, deployment to a second repo, global ledger, upgrade protocol.
-The `hydra-setup` skill supersedes `wave0-implementation.md` for new installs.
+### Wave 3 — packaging & portability (`packaging.md`) — **next**
+
+**Goal:** install the proven kit on a *second* repo at full capability, and carry
+measured evidence across machines and repos. Nothing in Wave 3 is built yet;
+`packaging.md` is the design. Scope is informed by a portability audit
+(2026-07-13) of what actually pins Hydra to this machine.
+
+**What the audit found (drives Wave 3 scope):**
+- The harness itself is trivially portable — **zero hardcoded paths**, all
+  locations env-overridable (`HYDRA_STATE_ROOT`/`WORKTREE_ROOT`/`REPO_ID`).
+- The friction is the *ecosystem*: 10 external CLIs + 4 vendor logins + Graphify
+  API keys + the global herdr integrations — none of which clone with the repo.
+- **bash 4+ required** (`mapfile` in 5 scripts); macOS ships 3.2.
+- **Kimi write-role is macOS-only** (`sandbox-exec`); on Linux the adapter fails
+  closed (refuses the write role) — a real cross-platform gap.
+- **Run history / measured profiles don't clone** — the recovery bundle is
+  documented (`state-and-worktrees` §2) but the export/import scripts don't exist.
+- The **global capability ledger** (`packaging.md` §4) is designed but not built —
+  measured data is currently per-repo under `<state>/agents/`.
+
+**Deliverables:**
+1. **`hydra-kit` repo** — extract the project-agnostic files (scripts, schemas,
+   adapters, skills, hooks, universal rules, *seeded* profiles), version-tagged,
+   with `kit.manifest.yaml` (checksums + min tested CLI versions).
+2. **`hydra-setup` skill** — install / upgrade / doctor modes; supersedes
+   `wave0-implementation.md` for new installs.
+3. **`hydra doctor` preflight** (from the audit) — checks bash ≥ 4; the 10 tools
+   present; each vendor auth reachable (headless smoke per CLI); Graphify key set;
+   herdr integrations installed; a platform sandbox available (`sandbox-exec`
+   macOS / `firejail`|`bwrap` Linux, else Kimi write-role is refused, on the
+   record). Fails loud with the specific gap.
+4. **Run-bundle export/import** (`bundle-export.sh` / `bundle-import.sh`) — closes
+   the Tier-3 gap: a sanitized bundle (run.yaml, tasks, promoted results, reviews,
+   verification, `events.jsonl`; **excludes** credentials, sessions, raw
+   transcripts) that reconstructs a run on another machine.
+5. **Global capability ledger migration** — move `measured` evidence to
+   `~/.local/state/hydra/global/agents/` with `repo_id` tagging and stricter
+   cross-repo confound guards (`packaging.md` §4); `aggregate-usage.sh` gains a
+   global mode. Per-repo `overrides/` win for local pins.
+6. **Per-project verification floor** — resolves open decision #6: a tracked
+   minimum gate the kit ships as `verification.yaml.template` and the install
+   self-check enforces.
+7. **Retention policy** — resolves open decision #7: prune/keep rules for external
+   run state + worktrees (nothing is pruned today; 15 runs retained).
+
+**Wave 3 exit criteria:**
+1. Kit installs on a second repo; the six boundary rejection tests + a headless
+   smoke per configured vendor pass **in that environment**.
+2. A supervised shakedown run (1 task, 1 worker) completes on repo #2.
+3. `hydra doctor` correctly reports a missing dependency and refuses to install.
+4. A bundle exported from repo #1 imports and reconstructs on another machine
+   (recovery drill passes against the imported state).
+5. Measured evidence from two repos aggregates in the global ledger, with the
+   cross-repo confound guard demonstrably suppressing an easy-task-only vendor.
+
+**Wave 3 open decisions:**
+- **Cross-platform sandbox** for the Kimi (and future auto-approving) write role:
+  add `firejail`/`bwrap` on Linux, or keep Kimi read-only off-macOS?
+- **Kit distribution** — private git repo (clone/tag) vs `npm`/`brew` package.
+- **Global-ledger strictness** — how aggressively cross-repo confound guards
+  down-weight a vendor that only saw easy tasks in one repo.
 
 ### Hardening milestone — harness daemon
 Replace the Wave 0 privileged-lead protocol boundary with a real capability

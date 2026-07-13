@@ -1,5 +1,10 @@
 # Hydra-Swarm — Packaging and Multi-Repo Deployment (Wave 3)
 
+> **Status: design spec — nothing in Wave 3 is built yet.** Wave 2 is operational
+> (2026-07-13); this is the plan for the *next* wave. Scope and the preflight
+> matrix below are informed by a portability audit of what actually pins Hydra to
+> the first machine (roadmap → Wave 3). `last_verified: 2026-07-13`.
+
 Applies only after Wave 2 exit criteria pass on the first repository. Waves 0–2 are the de-risking sequence for building Hydra-Swarm **once**; subsequent repositories install the proven kit at full capability.
 
 ## 1. The kit
@@ -24,6 +29,25 @@ hydra-kit/
 **Never ships in the kit:** the three per-project policy files (templates only), measured ledger data, run history, credentials, session state.
 
 ## 2. Deploying to a new repository
+
+### Step 0 — Preflight (`hydra doctor`, non-negotiable)
+
+The kit is trivially portable (zero hardcoded paths; all locations
+env-overridable). The *ecosystem* is not — it must be present and authenticated
+before install. `hydra doctor` checks, and refuses to proceed on any miss:
+
+| Class | Requirement | Failure mode if absent |
+|---|---|---|
+| Shell | **bash ≥ 4** (`mapfile`; macOS ships 3.2) | scripts break cryptically |
+| Core | `jq`, `node`, `git` | harness can't run |
+| Vendor CLIs + auth | `claude`, `codex`, `opencode` (+ Z.AI), `kimi` (+ OAuth) — headless smoke each | dispatch fails; adapter reports it |
+| Code intelligence | `gitnexus`, `graphify` (+ `MOONSHOT_API_KEY`/`ANTHROPIC_API_KEY`) | Wave 1/2 code-intel omitted (advisory, non-fatal) |
+| Observability | `herdr` + `herdr integration install {claude,codex,kimi,opencode}` (global, not cloned) | Layer-1 monitor absent (non-fatal) |
+| **Platform sandbox** | `sandbox-exec` (macOS) **or** `firejail`/`bwrap` (Linux) | **Kimi/auto-approving write roles refused, on the record** — read-only roles still work |
+| Timeout | `timeout`/`gtimeout` preferred; perl fallback otherwise | none (fallback is portable) |
+
+Auth is machine-global (`~/.claude`, `~/.codex`, `~/.local/share/opencode`,
+`~/.kimi-code/oauth`) and never ships in the kit.
 
 ### Step 1 — Install (mechanical)
 `hydra-setup` skill, install mode: copy kit → `hydra/` + `.claude/`; create `~/.local/state/<repo-id>-hydra/` (full Domain-2 layout); link the global agents ledger (§4); write `hydra/WAVE = 2` and `hydra/VERSION = <kit-version>`; add `.gitignore` entries; commit; tag `hydra-wave-2`.
@@ -64,9 +88,36 @@ Measured evidence moves to machine-global scope so it compounds across repositor
 
 Rules: usage events carry `repo_id`; the `task_type` + `risk_mix` confound guards apply **more strictly** cross-repo (a vendor that only saw easy tasks in repo A must not look superior in repo B); rolling windows and per-event model versions unchanged; allocation reads global measured stats with repo overrides winning.
 
+> **As-built (2026-07-13):** measured evidence is currently **per-repo** —
+> `aggregate-usage.sh` writes `<state>/agents/profiles/<vendor>.measured.json`.
+> The move to `~/.local/state/hydra/global/` with `repo_id` tagging is a Wave 3
+> deliverable, not yet built. At Wave 2 exit n is small (Claude 5, Codex 4,
+> Kimi 3), so nothing compounds cross-repo yet regardless.
+
+## 4.1 Run bundles (multi-machine continuity)
+
+External runtime state does **not** clone with the repo (by design). To carry a
+run's history/evidence to another machine, export a sanitized bundle (the shape
+in `state-and-worktrees` §2):
+
+```text
+run-<id>-recovery/  →  run.yaml · tasks/ · promoted-results/ · reviews/ ·
+                       verification/ · events.jsonl
+```
+
+**Excludes** credentials, session tokens, raw environment values, sensitive
+prompts, raw transcripts. `bundle-import.sh` reconstructs it under the target's
+state root; the recovery drill is the acceptance test (a replacement lead
+resumes from the imported bundle + Git alone).
+
+> **As-built (2026-07-13):** the bundle shape is specified but the
+> `bundle-export.sh` / `bundle-import.sh` scripts are **not yet built** — moving
+> history today means `rsync`-ing `<state>/runs/run-<id>/` minus `sessions/`.
+> Building these is a Wave 3 deliverable (closes the Tier-3 portability gap).
+
 ## 5. Upgrade protocol
 
-Kit evolves in its own repo (model releases, CLI flag changes → adapters + seeded profiles are the two designed drift points). Per project: `"upgrade hydra to kit vX.Y.Z"` — the skill:
+Kit evolves in its own repo (model releases, CLI flag changes → adapters + seeded profiles are the two designed drift points). *This held in practice: Waves 1–2 saw exactly this drift — `zhipu/`→`zai-coding-plan/glm-5.2`, `opencode --auto`, `kimi` print-mode auto-approve, `--output-format stream-json` — all confined to the adapters. The design point is validated.* Per project: `"upgrade hydra to kit vX.Y.Z"` — the skill:
 
 1. Refuses if any run is open in the ledger.
 2. Diffs manifests; applies kit changes only.
