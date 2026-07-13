@@ -9,6 +9,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import {
@@ -20,7 +21,7 @@ import {
   type SpawnLike,
 } from '../src/dispatch.ts';
 
-const TEST_TMP = join(import.meta.dirname, 'tmp-dispatch');
+const TEST_TMP = join(tmpdir(), `hydra-ts-dispatch-${process.pid}`);
 let sequence = 0;
 
 function runId(): string {
@@ -553,6 +554,25 @@ describe('dispatch Bash parity', () => {
     assert.equal(ledger(f)[1].mode, 'monitor_only');
   });
 
+  it('records an opencode exit when monitor banner setup fails', async () => {
+    const f = fixture(runId(), { vendor: 'opencode' });
+    const expectedId = `${f.runId}-task-a-v1`;
+    mkdirSync(join(f.sessionsDir, `${expectedId}.monitor.txt`));
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    const mock = fakeSpawn();
+
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+      env: { HYDRA_HERDR_PANES: '1' },
+      herdr,
+    }));
+
+    assert.equal(mock.calls.length, 1);
+    assert.deepEqual(herdr.starts, []);
+    assert.deepEqual(ledger(f).map(({ event }) => event), ['task_started', 'agent_exited']);
+    assert.equal(ledger(f).at(-1)?.exit_code, '0');
+  });
+
   it('runs opencode plainly without a monitor when panes are disabled', async () => {
     const f = fixture(runId(), { vendor: 'opencode' });
     const herdr = new FakeHerdr();
@@ -642,5 +662,178 @@ describe('dispatch Bash parity', () => {
     ], { encoding: 'utf8' });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /usage: dispatch/);
+  });
+
+  it('writes the starting banner and dispatches via herdr pane for claude, codex, and kimi', async () => {
+    for (const vendor of ['claude', 'codex', 'kimi'] as const) {
+      const f = fixture(runId(), { vendor });
+      const herdr = new FakeHerdr();
+      herdr.live = true;
+      herdr.workspace = `ws-${vendor}`;
+      const expectedId = `${f.runId}-task-a-v1`;
+      const clock = new StepClock(() => {
+        writeFileSync(join(f.sessionsDir, `${expectedId}.exit`), '0');
+      });
+      let spawnCalled = false;
+      await dispatch(f.runId, 'task-a', injectedOptions(f, () => { spawnCalled = true; throw new Error('no spawn'); }, {
+        env: { HYDRA_HERDR_PANES: '1' },
+        herdr,
+        clock,
+        buildWorkerPrompt: () => `the ${vendor} worker prompt`,
+      }));
+
+      assert.equal(spawnCalled, false, `${vendor} should use herdr pane, not plain spawn`);
+      assert.equal(herdr.starts.length, 1, `${vendor} should start one pane`);
+
+      const banner = readFileSync(join(f.sessionsDir, `${expectedId}.pane-banner.txt`), 'utf8');
+      const vlabel = vendor === 'claude' ? 'Claude' : vendor === 'codex' ? 'Codex' : 'Kimi';
+      assert.match(banner, new RegExp(`^${vlabel} starting — run ${f.runId} task task-a`), `${vendor} banner has vendor label and run/task ids`);
+      assert.match(banner, new RegExp(`worktree: ${f.worktree}`), `${vendor} banner has worktree`);
+      assert.match(banner, new RegExp(`the ${vendor} worker prompt`), `${vendor} banner has rendered prompt`);
+
+      const command = herdr.starts[0].command;
+      const bannerPath = join(f.sessionsDir, `${expectedId}.pane-banner.txt`);
+      assert.ok(command.indexOf(`cat '${bannerPath}'`) < command.indexOf(`'${f.adapterPath}'`), `${vendor} banner is printed before the adapter`);
+      assert.match(command, /echo \$\$ > '.*\.pid'/, `${vendor} inner writes pidfile`);
+      assert.match(command, /printf '%s'.*> '.*\.exit'/, `${vendor} inner writes sentinel`);
+      assert.equal(ledger(f).at(-1)?.event, 'agent_exited');
+    }
+  });
+
+  it('live-tails codex progress events from cli.jsonl into the pane', async () => {
+    const f = fixture(runId(), { vendor: 'codex' });
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    const expectedId = `${f.runId}-task-a-v1`;
+    const cliJsonlPath = join(f.sessionsDir, `${expectedId}.cli.jsonl`);
+    const progressPath = join(f.sessionsDir, `${expectedId}.pane-progress.txt`);
+    const sentinelPath = join(f.sessionsDir, `${expectedId}.exit`);
+    const command = `npm run test\n${'x'.repeat(160)}`;
+    const displayedCommand = command.replaceAll('\n', ' ').slice(0, 140);
+
+    const clock = new StepClock((_ms, count) => {
+      if (count === 1) {
+        writeFileSync(cliJsonlPath, [
+          JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'Analyzing the codebase' } }),
+          JSON.stringify({ type: 'item.started', item: { type: 'command_execution', command } }),
+          JSON.stringify({ type: 'item.started', item: { type: 'file_change', changes: [{ path: 'src/foo.ts' }, { path: 'src/bar.ts' }] } }),
+          JSON.stringify({ type: 'item.started', item: { type: 'mcp_tool_call', server: 'fs', tool: 'read' } }),
+          JSON.stringify({ type: 'item.started', item: { type: 'agent_message', text: 'ignored event' } }),
+          '{malformed',
+          '',
+        ].join('\n'));
+      } else {
+        writeFileSync(sentinelPath, '0');
+      }
+    });
+
+    await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('no spawn'); }, {
+      env: { HYDRA_HERDR_PANES: '1' },
+      herdr,
+      clock,
+      buildWorkerPrompt: () => 'the codex prompt',
+    }));
+
+    assert.match(herdr.starts[0].command, /tail -n \+1 -f/);
+    assert.match(herdr.starts[0].command, /TPID=/);
+    assert.match(herdr.starts[0].command, /kill \$TPID/);
+
+    const progress = readFileSync(progressPath, 'utf8');
+    assert.match(progress, /Analyzing the codebase/);
+    assert.ok(progress.includes(`[cmd] ${displayedCommand}`));
+    assert.equal(progress.includes(`[cmd] ${command.replaceAll('\n', ' ')}`), false, 'command display is capped at 140 characters');
+    assert.match(progress, /\[edit\] foo\.ts, bar\.ts/);
+    assert.match(progress, /\[tool\] fs\.read/);
+    assert.doesNotMatch(progress, /ignored event|malformed/);
+  });
+
+  it('does not create a live progress tail for kimi or claude panes', async () => {
+    for (const vendor of ['kimi', 'claude'] as const) {
+      const f = fixture(runId(), { vendor });
+      const herdr = new FakeHerdr();
+      herdr.live = true;
+      const expectedId = `${f.runId}-task-a-v1`;
+      const clock = new StepClock(() => {
+        writeFileSync(join(f.sessionsDir, `${expectedId}.exit`), '0');
+      });
+      await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('no spawn'); }, {
+        env: { HYDRA_HERDR_PANES: '1' },
+        herdr,
+        clock,
+        buildWorkerPrompt: () => 'prompt',
+      }));
+
+      const progressPath = join(f.sessionsDir, `${expectedId}.pane-progress.txt`);
+      assert.equal(existsSync(progressPath), false, `${vendor} should not have a progress file`);
+      assert.doesNotMatch(herdr.starts[0].command, /tail -n \+1 -f/);
+      assert.doesNotMatch(herdr.starts[0].command, /TPID/);
+    }
+  });
+
+  it('records a hosted worker exit even when the banner prompt build fails', async () => {
+    const f = fixture(runId());
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    const expectedId = `${f.runId}-task-a-v1`;
+    const clock = new StepClock(() => {
+      writeFileSync(join(f.sessionsDir, `${expectedId}.exit`), '0');
+    });
+
+    await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('no spawn'); }, {
+      env: { HYDRA_HERDR_PANES: '1' },
+      herdr,
+      clock,
+      buildWorkerPrompt: () => { throw new Error('prompt build unavailable'); },
+    }));
+
+    assert.deepEqual(ledger(f).map(({ event }) => event), ['task_started', 'herdr_pane_started', 'agent_exited']);
+    assert.equal(ledger(f).at(-1)?.exit_code, '0');
+    const banner = readFileSync(join(f.sessionsDir, `${expectedId}.pane-banner.txt`), 'utf8');
+    assert.match(banner, /\(prompt unavailable\)/);
+  });
+
+  it('records hosted codex exits and timeouts when banner and tail files cannot be written', async () => {
+    const exited = fixture(runId(), { vendor: 'codex' });
+    const exitedHerdr = new FakeHerdr();
+    exitedHerdr.live = true;
+    const exitedId = `${exited.runId}-task-a-v1`;
+    mkdirSync(join(exited.sessionsDir, `${exitedId}.pane-banner.txt`));
+    mkdirSync(join(exited.sessionsDir, `${exitedId}.pane-progress.txt`));
+    const exitClock = new StepClock((_ms, count) => {
+      if (count === 1) {
+        writeFileSync(join(exited.sessionsDir, `${exitedId}.cli.jsonl`), `${JSON.stringify({
+          type: 'item.completed',
+          item: { type: 'agent_message', text: 'cannot append this progress' },
+        })}\n`);
+      } else {
+        writeFileSync(join(exited.sessionsDir, `${exitedId}.exit`), '7');
+      }
+    });
+
+    await dispatch(exited.runId, 'task-a', injectedOptions(exited, () => { throw new Error('no spawn'); }, {
+      env: { HYDRA_HERDR_PANES: '1' },
+      herdr: exitedHerdr,
+      clock: exitClock,
+    }));
+
+    assert.equal(ledger(exited).at(-1)?.event, 'agent_exited');
+    assert.equal(ledger(exited).at(-1)?.exit_code, '7');
+
+    const timedOut = fixture(runId(), { vendor: 'codex', timeoutMinutes: 1 });
+    const timedOutHerdr = new FakeHerdr();
+    timedOutHerdr.live = true;
+    const timedOutId = `${timedOut.runId}-task-a-v1`;
+    mkdirSync(join(timedOut.sessionsDir, `${timedOutId}.pane-banner.txt`));
+    mkdirSync(join(timedOut.sessionsDir, `${timedOutId}.pane-progress.txt`));
+
+    await dispatch(timedOut.runId, 'task-a', injectedOptions(timedOut, () => { throw new Error('no spawn'); }, {
+      env: { HYDRA_HERDR_PANES: '1' },
+      herdr: timedOutHerdr,
+      clock: new StepClock(),
+      pollIntervalMs: 20_000,
+    }));
+
+    assert.equal(ledger(timedOut).at(-1)?.event, 'agent_timed_out');
+    assert.equal(ledger(timedOut).at(-1)?.reason, 'stalled');
   });
 });
