@@ -1,4 +1,8 @@
-import { spawnSync } from 'node:child_process';
+import {
+  spawn,
+  type ChildProcess,
+  type SpawnOptionsWithoutStdio,
+} from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -26,25 +30,18 @@ import {
 //   review(cwd, prompt, outPrefix, agentRunId, options?)
 //   start(taskSpec, worktree, inbox, sessions, agentRunId, options?)
 //
-// All side-effectful CLIs are injectable via options.exec so tests never invoke
+// The side-effectful CLI is injectable via options.spawn so tests never invoke
 // real vendor tooling.
 // ---------------------------------------------------------------------------
 
 const DEFAULT_MODEL = 'zai-coding-plan/glm-5.2';
 
-/** Result shape returned by an injected (or default) opencode runner. */
-export interface OpencodeExecResult {
-  exitCode: number | null;
-  stdout: string;
-  stderr: string;
-}
-
-/** Injectable replacement for spawning the real opencode CLI. */
-export type OpencodeExec = (
+/** Injectable replacement for spawning the streaming opencode CLI. */
+export type OpencodeSpawn = (
   command: string,
   args: string[],
-  options?: { cwd?: string; env?: NodeJS.ProcessEnv },
-) => OpencodeExecResult;
+  options?: SpawnOptionsWithoutStdio,
+) => ChildProcess;
 
 /** Injectable replacement for deriving a result drop from git evidence. */
 export type DeriveDropFromGit = (
@@ -58,8 +55,8 @@ export type DeriveDropFromGit = (
 export interface OpencodeRunOptions {
   /** Explicit model override for injected callers and tests. */
   model?: string;
-  /** Injected opencode runner for tests. */
-  exec?: OpencodeExec;
+  /** Injected streaming opencode runner for tests. */
+  spawn?: OpencodeSpawn;
   /** Injected git-derived drop helper for tests. */
   deriveDropFromGit?: DeriveDropFromGit;
   /** Base directory for relative paths (unused, kept for sibling compatibility). */
@@ -96,35 +93,93 @@ function resolveModel(options?: OpencodeRunOptions): string {
   return DEFAULT_MODEL;
 }
 
-function defaultExec(
+interface RunResult {
+  exitCode: number | null;
+}
+
+/** Append both child streams as they arrive, then resolve after exit and EOF. */
+function runStreaming(
   command: string,
   args: string[],
-  options?: { cwd?: string; env?: NodeJS.ProcessEnv },
-): OpencodeExecResult {
-  const result = spawnSync(command, args, {
-    cwd: options?.cwd,
-    env: options?.env ?? process.env,
-    encoding: 'utf8',
-    input: '',
-    stdio: ['pipe', 'pipe', 'pipe'],
-    maxBuffer: 50 * 1024 * 1024,
-  });
-  if (result.error) {
-    const code = (result.error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT') {
-      die(`${command} CLI not found (Wave 1 dependency)`);
+  options: {
+    stdoutPath: string;
+    stderrPath: string;
+    spawn: OpencodeSpawn;
+  },
+): Promise<RunResult> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    mkdirSync(dirname(options.stdoutPath), { recursive: true });
+    mkdirSync(dirname(options.stderrPath), { recursive: true });
+    writeFileSync(options.stdoutPath, '', 'utf8');
+    writeFileSync(options.stderrPath, '', 'utf8');
+
+    let stdoutDone = false;
+    let stderrDone = false;
+    let exitCode: number | null | undefined;
+    let settled = false;
+
+    function finish(): void {
+      if (settled || !stdoutDone || !stderrDone || exitCode === undefined) return;
+      settled = true;
+      resolvePromise({ exitCode });
     }
-    return {
-      exitCode: 1,
-      stdout: result.stdout ?? '',
-      stderr: result.stderr ?? '',
-    };
-  }
-  return {
-    exitCode: result.status,
-    stdout: result.stdout ?? '',
-    stderr: result.stderr ?? '',
-  };
+
+    let child: ChildProcess;
+    try {
+      child = options.spawn(command, args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') {
+        rejectPromise(new Error(`${command} CLI not found (Wave 1 dependency)`));
+      } else {
+        resolvePromise({ exitCode: 1 });
+      }
+      return;
+    }
+
+    if (child.stdout === null) {
+      stdoutDone = true;
+    } else {
+      child.stdout.on('data', (chunk: Buffer | string) => {
+        writeFileSync(options.stdoutPath, chunk, { flag: 'a' });
+      });
+      child.stdout.on('end', () => {
+        stdoutDone = true;
+        finish();
+      });
+    }
+
+    if (child.stderr === null) {
+      stderrDone = true;
+    } else {
+      child.stderr.on('data', (chunk: Buffer | string) => {
+        writeFileSync(options.stderrPath, chunk, { flag: 'a' });
+      });
+      child.stderr.on('end', () => {
+        stderrDone = true;
+        finish();
+      });
+    }
+
+    child.on('exit', (code) => {
+      exitCode = code ?? null;
+      finish();
+    });
+    child.on('error', (error: NodeJS.ErrnoException) => {
+      if (settled) return;
+      if (error.code === 'ENOENT') {
+        settled = true;
+        rejectPromise(new Error(`${command} CLI not found (Wave 1 dependency)`));
+        return;
+      }
+      exitCode = 1;
+      stdoutDone = true;
+      stderrDone = true;
+      finish();
+    });
+  });
 }
 
 function parseEvents(stdout: string): Record<string, unknown>[] | null {
@@ -268,27 +323,27 @@ function writeSessionJson(
   );
 }
 
-function runReadOnly(
+async function runReadOnly(
   verb: 'explore' | 'review',
   cwd: string,
   prompt: string,
   outPrefix: string,
   agentRunId: string,
   options?: OpencodeRunOptions,
-): string {
+): Promise<string> {
   if (!cwd) die(`usage: opencode.ts ${verb} <cwd> <prompt> <out_prefix> <agent_run_id>`);
   if (!prompt) die(`usage: opencode.ts ${verb} <cwd> <prompt> <out_prefix> <agent_run_id>`);
   if (!outPrefix) die(`usage: opencode.ts ${verb} <cwd> <prompt> <out_prefix> <agent_run_id>`);
   if (!agentRunId) die(`usage: opencode.ts ${verb} <cwd> <prompt> <out_prefix> <agent_run_id>`);
 
   const model = resolveModel(options);
-  const exec = options?.exec ?? defaultExec;
+  const spawnFn = options?.spawn ?? spawn;
   const eventsPath = `${outPrefix}.events.jsonl`;
   const stderrPath = `${outPrefix}.stderr`;
 
   mkdirSync(dirname(outPrefix), { recursive: true });
 
-  const { exitCode, stdout, stderr } = exec(
+  const { exitCode } = await runStreaming(
     'opencode',
     [
       'run',
@@ -303,15 +358,14 @@ function runReadOnly(
       cwd,
       prompt,
     ],
+    { stdoutPath: eventsPath, stderrPath, spawn: spawnFn },
   );
 
   // The bash adapter tolerates opencode failures because the event stream still
   // contains the partial output.
   void exitCode;
 
-  writeFileSync(eventsPath, stdout, 'utf8');
-  writeFileSync(stderrPath, stderr, 'utf8');
-
+  const stdout = readFileSync(eventsPath, 'utf8');
   const events = parseEvents(stdout);
   const sessionId = extractSessionId(events);
   const finalText = extractFinalText(events);
@@ -326,24 +380,24 @@ function runReadOnly(
 }
 
 /** Read-only exploration role. */
-export function explore(
+export async function explore(
   cwd: string,
   prompt: string,
   outPrefix: string,
   agentRunId: string,
   options?: OpencodeRunOptions,
-): string {
+): Promise<string> {
   return runReadOnly('explore', cwd, prompt, outPrefix, agentRunId, options);
 }
 
 /** Read-only review role. */
-export function review(
+export async function review(
   cwd: string,
   prompt: string,
   outPrefix: string,
   agentRunId: string,
   options?: OpencodeRunOptions,
-): string {
+): Promise<string> {
   return runReadOnly('review', cwd, prompt, outPrefix, agentRunId, options);
 }
 
@@ -417,14 +471,14 @@ harness will verify):
 }
 
 /** Implementer role: run a worker in its own worktree and bridge the result drop. */
-export function start(
+export async function start(
   taskSpec: string,
   worktree: string,
   inbox: string,
   sessions: string,
   agentRunId: string,
   options?: OpencodeRunOptions,
-): string {
+): Promise<string> {
   if (!taskSpec) die('usage: opencode.ts start <task_spec> <worktree> <inbox> <sessions> <agent_run_id>');
   if (!worktree) die('usage: opencode.ts start <task_spec> <worktree> <inbox> <sessions> <agent_run_id>');
   if (!inbox) die('usage: opencode.ts start <task_spec> <worktree> <inbox> <sessions> <agent_run_id>');
@@ -432,7 +486,7 @@ export function start(
   if (!agentRunId) die('usage: opencode.ts start <task_spec> <worktree> <inbox> <sessions> <agent_run_id>');
 
   const model = resolveModel(options);
-  const exec = options?.exec ?? defaultExec;
+  const spawnFn = options?.spawn ?? spawn;
   const derive = options?.deriveDropFromGit ?? libDeriveDropFromGit;
 
   const resultPath = join(inbox, 'result.json');
@@ -446,7 +500,7 @@ export function start(
 
   const prompt = buildWorkerPrompt(taskSpec);
 
-  const { exitCode, stdout, stderr } = exec(
+  const { exitCode } = await runStreaming(
     'opencode',
     [
       'run',
@@ -461,13 +515,12 @@ export function start(
       worktree,
       prompt,
     ],
+    { stdoutPath: eventsPath, stderrPath, spawn: spawnFn },
   );
 
   void exitCode;
 
-  writeFileSync(eventsPath, stdout, 'utf8');
-  writeFileSync(stderrPath, stderr, 'utf8');
-
+  const stdout = readFileSync(eventsPath, 'utf8');
   const events = parseEvents(stdout);
   const sessionId = extractSessionId(events);
 
@@ -549,7 +602,7 @@ export function start(
 
 export default { explore, review, start, buildWorkerPrompt };
 
-export function main(args: string[] = process.argv.slice(2)): number {
+export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
   try {
     const [verb, ...rest] = args;
     if (!verb) die('usage: opencode.sh explore|review|start ...');
@@ -561,7 +614,7 @@ export function main(args: string[] = process.argv.slice(2)): number {
       if (!inbox) die('inbox required');
       if (!sessions) die('sessions required');
       if (!agentRunId) die('agent_run_id required');
-      start(taskSpec, worktree, inbox, sessions, agentRunId);
+      await start(taskSpec, worktree, inbox, sessions, agentRunId);
       return 0;
     }
 
@@ -571,7 +624,7 @@ export function main(args: string[] = process.argv.slice(2)): number {
       if (!prompt) die('prompt required');
       if (!outPrefix) die('out_prefix required');
       if (!agentRunId) die('agent_run_id required');
-      (verb === 'explore' ? explore : review)(cwd, prompt, outPrefix, agentRunId);
+      await (verb === 'explore' ? explore : review)(cwd, prompt, outPrefix, agentRunId);
       return 0;
     }
 
@@ -587,5 +640,7 @@ const isMain = process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {
-  process.exitCode = main();
+  void main().then((exitCode) => {
+    process.exitCode = exitCode;
+  });
 }

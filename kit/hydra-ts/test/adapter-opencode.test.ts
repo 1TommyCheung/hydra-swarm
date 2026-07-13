@@ -8,12 +8,15 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { EventEmitter } from 'node:events';
+import { Readable, Writable } from 'node:stream';
+import type { ChildProcess, SpawnOptionsWithoutStdio } from 'node:child_process';
 import {
   explore,
   review,
   start,
   buildWorkerPrompt,
-  type OpencodeExec,
+  type OpencodeSpawn,
 } from '../src/adapter-opencode.ts';
 
 const TEST_TMP = join(import.meta.dirname, 'tmp-adapter-opencode');
@@ -44,7 +47,9 @@ function makePaths(): { cwd: string; outPrefix: string; agentRunId: string } {
   return { cwd, outPrefix, agentRunId };
 }
 
-function captureStdout<T>(fn: () => T): { output: string; result: T } {
+async function captureStdout<T>(
+  fn: () => T | Promise<T>,
+): Promise<{ output: string; result: T }> {
   const chunks: string[] = [];
   const originalWrite = process.stdout.write;
   process.stdout.write = ((chunk: string | Uint8Array) => {
@@ -53,14 +58,16 @@ function captureStdout<T>(fn: () => T): { output: string; result: T } {
   }) as typeof process.stdout.write;
 
   try {
-    const result = fn();
+    const result = await fn();
     return { output: chunks.join(''), result };
   } finally {
     process.stdout.write = originalWrite;
   }
 }
 
-function captureStderr<T>(fn: () => T): { output: string; result: T } {
+async function captureStderr<T>(
+  fn: () => T | Promise<T>,
+): Promise<{ output: string; result: T }> {
   const chunks: string[] = [];
   const originalWrite = process.stderr.write;
   process.stderr.write = ((chunk: string | Uint8Array) => {
@@ -69,7 +76,7 @@ function captureStderr<T>(fn: () => T): { output: string; result: T } {
   }) as typeof process.stderr.write;
 
   try {
-    const result = fn();
+    const result = await fn();
     return { output: chunks.join(''), result };
   } finally {
     process.stderr.write = originalWrite;
@@ -80,17 +87,32 @@ function eventsStdout(...events: Record<string, unknown>[]): string {
   return events.map((e) => JSON.stringify(e)).join('\n') + '\n';
 }
 
-function makeExec(
+function makeSpawn(
   stdout: string,
-  opts?: { exitCode?: number; sideEffect?: (command: string, args: string[], cwd?: string) => void },
-): OpencodeExec {
+  opts?: {
+    exitCode?: number | null;
+    stderr?: string;
+    onSpawn?: (command: string, args: string[], options?: SpawnOptionsWithoutStdio) => void;
+  },
+): OpencodeSpawn {
   return (command, args, options) => {
-    opts?.sideEffect?.(command, args, options?.cwd);
-    return {
-      exitCode: opts?.exitCode ?? 0,
-      stdout,
-      stderr: '',
-    };
+    opts?.onSpawn?.(command, args, options);
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new Readable({ read() {} }),
+      stderr: new Readable({ read() {} }),
+      stdin: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+      pid: 12345,
+    }) as ChildProcess;
+
+    process.nextTick(() => {
+      if (stdout) child.stdout?.push(Buffer.from(stdout, 'utf8'));
+      child.stdout?.push(null);
+      if (opts?.stderr) child.stderr?.push(Buffer.from(opts.stderr, 'utf8'));
+      child.stderr?.push(null);
+      child.emit('exit', opts?.exitCode ?? 0, null);
+    });
+
+    return child;
   };
 }
 
@@ -150,7 +172,7 @@ describe('explore', () => {
     restoreEnv();
   });
 
-  it('runs opencode under the hydra-reviewer agent and writes outputs', () => {
+  it('runs opencode under the hydra-reviewer agent and writes outputs', async () => {
     const { cwd, outPrefix, agentRunId } = makePaths();
     const stdout = eventsStdout(
       { sessionID: 'sess-1', type: 'text', text: 'first' },
@@ -162,16 +184,15 @@ describe('explore', () => {
     let capturedCommand = '';
     let capturedArgs: string[] = [];
     let capturedCwd: string | undefined;
-    const exec: OpencodeExec = (command, args, options) => {
+    const spawn = makeSpawn(stdout, { onSpawn: (command, args, options) => {
       capturedCommand = command;
       capturedArgs = args;
-      capturedCwd = options?.cwd;
-      return { exitCode: 0, stdout, stderr: '' };
-    };
+      capturedCwd = options?.cwd?.toString();
+    } });
 
-    const { output, result } = captureStdout(() =>
+    const { output, result } = await captureStdout(() =>
       explore(cwd, 'explore this repo', outPrefix, agentRunId, {
-        exec,
+        spawn,
         stateRoot: join(TEST_TMP, 'missing-state', agentRunId),
       }),
     );
@@ -206,39 +227,37 @@ describe('explore', () => {
     assert.equal(session.cost, 0.003);
   });
 
-  it('uses the HYDRA_OPENCODE_MODEL environment variable by default', () => {
+  it('uses the HYDRA_OPENCODE_MODEL environment variable by default', async () => {
     const { cwd, outPrefix, agentRunId } = makePaths();
     process.env.HYDRA_OPENCODE_MODEL = 'custom/model-7';
 
     let capturedModel = '';
-    const exec: OpencodeExec = (command, args) => {
+    const spawn = makeSpawn('', { onSpawn: (_command, args) => {
       const modelIndex = args.indexOf('--model');
       capturedModel = args[modelIndex + 1] ?? '';
-      return { exitCode: 0, stdout: '', stderr: '' };
-    };
+    } });
 
-    explore(cwd, 'prompt', outPrefix, agentRunId, { exec });
+    await explore(cwd, 'prompt', outPrefix, agentRunId, { spawn });
     assert.equal(capturedModel, 'custom/model-7');
   });
 
-  it('uses the default model when HYDRA_OPENCODE_MODEL is empty', () => {
+  it('uses the default model when HYDRA_OPENCODE_MODEL is empty', async () => {
     const { cwd, outPrefix, agentRunId } = makePaths();
     process.env.HYDRA_OPENCODE_MODEL = '';
 
     let capturedModel = '';
-    const exec: OpencodeExec = (command, args) => {
+    const spawn = makeSpawn('', { onSpawn: (_command, args) => {
       capturedModel = args[args.indexOf('--model') + 1] ?? '';
-      return { exitCode: 0, stdout: '', stderr: '' };
-    };
+    } });
 
-    explore(cwd, 'prompt', outPrefix, agentRunId, {
-      exec,
+    await explore(cwd, 'prompt', outPrefix, agentRunId, {
+      spawn,
       stateRoot: join(TEST_TMP, 'missing-state', agentRunId),
     });
     assert.equal(capturedModel, 'zai-coding-plan/glm-5.2');
   });
 
-  it('uses a valid model from the durable config file', () => {
+  it('uses a valid model from the durable config file', async () => {
     const { cwd, outPrefix, agentRunId } = makePaths();
     const stateRoot = join(TEST_TMP, 'state', agentRunId);
     mkdirSync(stateRoot, { recursive: true });
@@ -250,16 +269,15 @@ describe('explore', () => {
     delete process.env.HYDRA_OPENCODE_MODEL;
 
     let capturedModel = '';
-    const exec: OpencodeExec = (command, args) => {
+    const spawn = makeSpawn('', { onSpawn: (_command, args) => {
       capturedModel = args[args.indexOf('--model') + 1] ?? '';
-      return { exitCode: 0, stdout: '', stderr: '' };
-    };
+    } });
 
-    explore(cwd, 'prompt', outPrefix, agentRunId, { exec, stateRoot });
+    await explore(cwd, 'prompt', outPrefix, agentRunId, { spawn, stateRoot });
     assert.equal(capturedModel, 'account/model-from-file');
   });
 
-  it('prefers HYDRA_OPENCODE_MODEL over the durable config file', () => {
+  it('prefers HYDRA_OPENCODE_MODEL over the durable config file', async () => {
     const { cwd, outPrefix, agentRunId } = makePaths();
     const stateRoot = join(TEST_TMP, 'state', agentRunId);
     mkdirSync(stateRoot, { recursive: true });
@@ -271,16 +289,15 @@ describe('explore', () => {
     process.env.HYDRA_OPENCODE_MODEL = 'one-off/env-model';
 
     let capturedModel = '';
-    const exec: OpencodeExec = (command, args) => {
+    const spawn = makeSpawn('', { onSpawn: (_command, args) => {
       capturedModel = args[args.indexOf('--model') + 1] ?? '';
-      return { exitCode: 0, stdout: '', stderr: '' };
-    };
+    } });
 
-    explore(cwd, 'prompt', outPrefix, agentRunId, { exec, stateRoot });
+    await explore(cwd, 'prompt', outPrefix, agentRunId, { spawn, stateRoot });
     assert.equal(capturedModel, 'one-off/env-model');
   });
 
-  it('warns and uses the default when the durable config file is invalid', () => {
+  it('warns and uses the default when the durable config file is invalid', async () => {
     const invalidConfigs = ['not JSON', '{}', '{"model":""}', '{"model":42}'];
 
     for (const [index, rawConfig] of invalidConfigs.entries()) {
@@ -291,67 +308,64 @@ describe('explore', () => {
       delete process.env.HYDRA_OPENCODE_MODEL;
 
       let capturedModel = '';
-      const exec: OpencodeExec = (command, args) => {
+      const spawn = makeSpawn('', { onSpawn: (_command, args) => {
         capturedModel = args[args.indexOf('--model') + 1] ?? '';
-        return { exitCode: 0, stdout: '', stderr: '' };
-      };
+      } });
 
-      const { output } = captureStderr(() =>
-        explore(cwd, 'prompt', outPrefix, agentRunId, { exec, stateRoot }),
+      const { output } = await captureStderr(() =>
+        explore(cwd, 'prompt', outPrefix, agentRunId, { spawn, stateRoot }),
       );
       assert.equal(capturedModel, 'zai-coding-plan/glm-5.2');
       assert.match(output, /invalid or unreadable OpenCode model config/);
     }
   });
 
-  it('warns and uses the default when the durable config file is unreadable', () => {
+  it('warns and uses the default when the durable config file is unreadable', async () => {
     const { cwd, outPrefix, agentRunId } = makePaths();
     const stateRoot = join(TEST_TMP, 'unreadable-state', agentRunId);
     mkdirSync(join(stateRoot, 'opencode-model.json'), { recursive: true });
     delete process.env.HYDRA_OPENCODE_MODEL;
 
     let capturedModel = '';
-    const exec: OpencodeExec = (command, args) => {
+    const spawn = makeSpawn('', { onSpawn: (_command, args) => {
       capturedModel = args[args.indexOf('--model') + 1] ?? '';
-      return { exitCode: 0, stdout: '', stderr: '' };
-    };
+    } });
 
-    const { output } = captureStderr(() =>
-      explore(cwd, 'prompt', outPrefix, agentRunId, { exec, stateRoot }),
+    const { output } = await captureStderr(() =>
+      explore(cwd, 'prompt', outPrefix, agentRunId, { spawn, stateRoot }),
     );
     assert.equal(capturedModel, 'zai-coding-plan/glm-5.2');
     assert.match(output, /invalid or unreadable OpenCode model config/);
   });
 
-  it('allows the model to be overridden via options', () => {
+  it('allows the model to be overridden via options', async () => {
     const { cwd, outPrefix, agentRunId } = makePaths();
     process.env.HYDRA_OPENCODE_MODEL = 'env/model';
 
     let capturedModel = '';
-    const exec: OpencodeExec = (command, args) => {
+    const spawn = makeSpawn('', { onSpawn: (_command, args) => {
       const modelIndex = args.indexOf('--model');
       capturedModel = args[modelIndex + 1] ?? '';
-      return { exitCode: 0, stdout: '', stderr: '' };
-    };
+    } });
 
-    explore(cwd, 'prompt', outPrefix, agentRunId, { exec, model: 'opt/model-99' });
+    await explore(cwd, 'prompt', outPrefix, agentRunId, { spawn, model: 'opt/model-99' });
     assert.equal(capturedModel, 'opt/model-99');
   });
 
-  it('extracts text from .part.type == "text" events', () => {
+  it('extracts text from .part.type == "text" events', async () => {
     const { cwd, outPrefix, agentRunId } = makePaths();
     const stdout = eventsStdout(
       { sessionID: 's-2', part: { type: 'text', text: 'part one' } },
       { sessionID: 's-2', part: { type: 'text', text: 'part two' } },
     );
 
-    const exec = makeExec(stdout);
-    explore(cwd, 'prompt', outPrefix, agentRunId, { exec });
+    const spawn = makeSpawn(stdout);
+    await explore(cwd, 'prompt', outPrefix, agentRunId, { spawn });
 
     assert.equal(readFileSync(`${outPrefix}.txt`, 'utf8'), 'part two\n');
   });
 
-  it('falls back from null top-level text to part text like jq //', () => {
+  it('falls back from null top-level text to part text like jq //', async () => {
     const { cwd, outPrefix, agentRunId } = makePaths();
     const stdout = eventsStdout({
       sessionID: 's-2b',
@@ -360,40 +374,40 @@ describe('explore', () => {
       part: { type: 'metadata', text: 'fallback' },
     });
 
-    explore(cwd, 'prompt', outPrefix, agentRunId, { exec: makeExec(stdout) });
+    await explore(cwd, 'prompt', outPrefix, agentRunId, { spawn: makeSpawn(stdout) });
 
     assert.equal(readFileSync(`${outPrefix}.txt`, 'utf8'), 'fallback\n');
   });
 
-  it('defaults usage to empty tokens and zero cost when no step_finish events', () => {
+  it('defaults usage to empty tokens and zero cost when no step_finish events', async () => {
     const { cwd, outPrefix, agentRunId } = makePaths();
     const stdout = eventsStdout({ sessionID: 's-3', type: 'text', text: 'ok' });
 
-    const exec = makeExec(stdout);
-    explore(cwd, 'prompt', outPrefix, agentRunId, { exec });
+    const spawn = makeSpawn(stdout);
+    await explore(cwd, 'prompt', outPrefix, agentRunId, { spawn });
 
     const session = readJson(`${outPrefix}.session.json`) as Record<string, unknown>;
     assert.deepEqual(session.tokens, {});
     assert.equal(session.cost, 0);
   });
 
-  it('ignores non-zero opencode exit codes', () => {
+  it('ignores non-zero opencode exit codes', async () => {
     const { cwd, outPrefix, agentRunId } = makePaths();
     const stdout = eventsStdout({ sessionID: 's-4', type: 'text', text: 'still captured' });
 
-    const exec = makeExec(stdout, { exitCode: 1 });
-    const { result } = captureStdout(() => explore(cwd, 'prompt', outPrefix, agentRunId, { exec }));
+    const spawn = makeSpawn(stdout, { exitCode: 1 });
+    const { result } = await captureStdout(() => explore(cwd, 'prompt', outPrefix, agentRunId, { spawn }));
 
     assert.equal(result, `${outPrefix}.txt`);
     assert.equal(readFileSync(`${outPrefix}.txt`, 'utf8'), 'still captured\n');
   });
 
-  it('treats a malformed JSON line as failure of each whole jq extraction', () => {
+  it('treats a malformed JSON line as failure of each whole jq extraction', async () => {
     const { cwd, outPrefix, agentRunId } = makePaths();
     const stdout = '{"sessionID":"s-5","type":"text","text":"good"}\nnot-json\n';
 
-    const exec = makeExec(stdout);
-    explore(cwd, 'prompt', outPrefix, agentRunId, { exec });
+    const spawn = makeSpawn(stdout);
+    await explore(cwd, 'prompt', outPrefix, agentRunId, { spawn });
 
     assert.equal(readFileSync(`${outPrefix}.txt`, 'utf8'), '');
     const session = readJson(`${outPrefix}.session.json`) as Record<string, unknown>;
@@ -402,40 +416,84 @@ describe('explore', () => {
     assert.equal(session.cost, 0);
   });
 
-  it('discards all extracted text when jq hits an invalid nested part', () => {
+  it('discards all extracted text when jq hits an invalid nested part', async () => {
     const { cwd, outPrefix, agentRunId } = makePaths();
     const stdout = eventsStdout(
       { sessionID: 's-nested', type: 'text', text: 'earlier' },
       { sessionID: 's-nested', type: 'other', part: [] },
     );
 
-    explore(cwd, 'prompt', outPrefix, agentRunId, { exec: makeExec(stdout) });
+    await explore(cwd, 'prompt', outPrefix, agentRunId, { spawn: makeSpawn(stdout) });
 
     assert.equal(readFileSync(`${outPrefix}.txt`, 'utf8'), '');
     const session = readJson(`${outPrefix}.session.json`) as Record<string, unknown>;
     assert.equal(session.session_id, 's-nested');
   });
 
-  it('uses jq addition semantics for string costs', () => {
+  it('uses jq addition semantics for string costs', async () => {
     const { cwd, outPrefix, agentRunId } = makePaths();
     const stdout = eventsStdout(
       { type: 'step_finish', part: { tokens: { input: 1 }, cost: 'a' } },
       { type: 'step_finish', part: { tokens: false, cost: 'b' } },
     );
 
-    explore(cwd, 'prompt', outPrefix, agentRunId, { exec: makeExec(stdout) });
+    await explore(cwd, 'prompt', outPrefix, agentRunId, { spawn: makeSpawn(stdout) });
 
     const session = readJson(`${outPrefix}.session.json`) as Record<string, unknown>;
     assert.deepEqual(session.tokens, {});
     assert.equal(session.cost, 'ab');
   });
 
-  it('writes stderr to the out prefix', () => {
+  it('writes stderr to the out prefix', async () => {
     const { cwd, outPrefix, agentRunId } = makePaths();
-    const exec: OpencodeExec = () => ({ exitCode: 0, stdout: '', stderr: 'some warning' });
+    const spawn = makeSpawn('', { stderr: 'some warning' });
 
-    explore(cwd, 'prompt', outPrefix, agentRunId, { exec });
+    await explore(cwd, 'prompt', outPrefix, agentRunId, { spawn });
     assert.equal(readFileSync(`${outPrefix}.stderr`, 'utf8'), 'some warning');
+  });
+
+  it('appends event chunks while opencode is still running', async () => {
+    const { cwd, outPrefix, agentRunId } = makePaths();
+    const first = eventsStdout({ sessionID: 'stream-1', type: 'step_start' });
+    const second = eventsStdout({ sessionID: 'stream-1', type: 'text', text: 'finished' });
+    let child!: ChildProcess;
+
+    const spawn: OpencodeSpawn = (_command, _args, options) => {
+      assert.deepEqual(options?.stdio, ['ignore', 'pipe', 'pipe']);
+      const stdout = new Readable({ read() {} });
+      const stderr = new Readable({ read() {} });
+      child = Object.assign(new EventEmitter(), {
+        stdout,
+        stderr,
+        stdin: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+        pid: 23456,
+      }) as ChildProcess;
+      process.nextTick(() => stdout.push(Buffer.from(first, 'utf8')));
+      return child;
+    };
+
+    let completed = false;
+    const runPromise = explore(cwd, 'prompt', outPrefix, agentRunId, { spawn })
+      .then((result) => {
+        completed = true;
+        return result;
+      });
+
+    await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+    assert.equal(readFileSync(`${outPrefix}.events.jsonl`, 'utf8'), first);
+    assert.equal(completed, false);
+    assert.equal(existsSync(`${outPrefix}.txt`), false);
+
+    child.stdout?.push(Buffer.from(second, 'utf8'));
+    child.stdout?.push(null);
+    child.stderr?.push(Buffer.from('late warning', 'utf8'));
+    child.stderr?.push(null);
+    child.emit('exit', 7, null);
+
+    assert.equal(await runPromise, `${outPrefix}.txt`);
+    assert.equal(readFileSync(`${outPrefix}.events.jsonl`, 'utf8'), first + second);
+    assert.equal(readFileSync(`${outPrefix}.stderr`, 'utf8'), 'late warning');
+    assert.equal(readFileSync(`${outPrefix}.txt`, 'utf8'), 'finished\n');
   });
 });
 
@@ -446,17 +504,16 @@ describe('review', () => {
     restoreEnv();
   });
 
-  it('uses the hydra-reviewer agent like explore', () => {
+  it('uses the hydra-reviewer agent like explore', async () => {
     const { cwd, outPrefix, agentRunId } = makePaths();
     const stdout = eventsStdout({ sessionID: 's-r', type: 'text', text: 'reviewed' });
 
     let capturedArgs: string[] = [];
-    const exec: OpencodeExec = (command, args) => {
+    const spawn = makeSpawn(stdout, { onSpawn: (_command, args) => {
       capturedArgs = args;
-      return { exitCode: 0, stdout, stderr: '' };
-    };
+    } });
 
-    review(cwd, 'review prompt', outPrefix, agentRunId, { exec });
+    await review(cwd, 'review prompt', outPrefix, agentRunId, { spawn });
     assert.ok(capturedArgs.includes('hydra-reviewer'));
     assert.equal(readFileSync(`${outPrefix}.txt`, 'utf8'), 'reviewed\n');
   });
@@ -500,7 +557,7 @@ acceptance_criteria:
     return { agentRunId, worktree, inbox, sessions, spec };
   }
 
-  it('runs the implementer profile and writes session + result files', () => {
+  it('runs the implementer profile and writes session + result files', async () => {
     const { agentRunId, worktree, inbox, sessions, spec } = setupStart();
     const stdout = eventsStdout(
       { sessionID: 'impl-1', type: 'text', text: 'done' },
@@ -509,9 +566,9 @@ acceptance_criteria:
 
     let capturedArgs: string[] = [];
     let capturedCwd: string | undefined;
-    const exec: OpencodeExec = (command, args, options) => {
+    const spawn = makeSpawn(stdout, { onSpawn: (_command, args, options) => {
       capturedArgs = args;
-      capturedCwd = options?.cwd;
+      capturedCwd = options?.cwd?.toString();
       // Worker produced a result while the CLI ran.
       writeFileSync(
         join(worktree, '.hydra-result.json'),
@@ -533,18 +590,17 @@ acceptance_criteria:
         }),
         'utf8',
       );
-      return { exitCode: 0, stdout, stderr: '' };
-    };
+    } });
 
-    const { output, result } = captureStdout(() =>
+    const { output, result } = await captureStdout(() =>
       start(spec, worktree, inbox, sessions, agentRunId, {
-        exec,
+        spawn,
         stateRoot: join(TEST_TMP, 'missing-state', agentRunId),
       }),
     );
 
     assert.equal(result, agentRunId);
-    assert.equal(output, `${agentRunId}\n`);
+    assert.ok(output.endsWith(`${agentRunId}\n`));
 
     assert.ok(capturedArgs.includes('hydra-implementer'));
     assert.ok(capturedArgs.includes(worktree));
@@ -563,7 +619,7 @@ acceptance_criteria:
     assert.equal(resultDrop.head_commit, 'deadbeef');
   });
 
-  it('falls back to a git-derived drop when no worker result is produced', () => {
+  it('falls back to a git-derived drop when no worker result is produced', async () => {
     const { agentRunId, worktree, inbox, sessions, spec } = setupStart();
     const stdout = eventsStdout({ sessionID: 'impl-2', type: 'text', text: 'ok' });
 
@@ -602,21 +658,21 @@ acceptance_criteria:
       return true;
     };
 
-    const exec = makeExec(stdout);
-    start(spec, worktree, inbox, sessions, agentRunId, { exec, deriveDropFromGit });
+    const spawn = makeSpawn(stdout);
+    await start(spec, worktree, inbox, sessions, agentRunId, { spawn, deriveDropFromGit });
 
     const resultDrop = readJson(join(inbox, 'result.json')) as Record<string, unknown>;
     assert.equal(resultDrop.head_commit, 'abc123');
     assert.equal(resultDrop.summary, 'derived');
   });
 
-  it('synthesizes a failed drop when neither worker result nor git derivation succeeds', () => {
+  it('synthesizes a failed drop when neither worker result nor git derivation succeeds', async () => {
     const { agentRunId, worktree, inbox, sessions, spec } = setupStart();
     const stdout = eventsStdout({ sessionID: 'impl-3', type: 'text', text: 'ok' });
 
     const deriveDropFromGit = (): boolean => false;
-    const exec = makeExec(stdout);
-    start(spec, worktree, inbox, sessions, agentRunId, { exec, deriveDropFromGit });
+    const spawn = makeSpawn(stdout);
+    await start(spec, worktree, inbox, sessions, agentRunId, { spawn, deriveDropFromGit });
 
     const resultDrop = readJson(join(inbox, 'result.json')) as Record<string, unknown>;
     assert.equal(resultDrop.task_id, 'adapter-opencode');
@@ -628,14 +684,14 @@ acceptance_criteria:
     assert.deepEqual(resultDrop.risks, ['adapter synthesized a failed drop']);
   });
 
-  it('fails like jq --argjson when a synthesized drop has an invalid spec version', () => {
+  it('fails like jq --argjson when a synthesized drop has an invalid spec version', async () => {
     const { agentRunId, worktree, inbox, sessions, spec } = setupStart();
     const rawSpec = readFileSync(spec, 'utf8').replace('spec_version: 1', 'spec_version: nope');
     writeFileSync(spec, rawSpec, 'utf8');
 
-    assert.throws(
+    await assert.rejects(
       () => start(spec, worktree, inbox, sessions, agentRunId, {
-        exec: makeExec(''),
+        spawn: makeSpawn(''),
         deriveDropFromGit: () => false,
       }),
       /invalid JSON spec_version: nope/,
@@ -643,11 +699,11 @@ acceptance_criteria:
     assert.equal(readFileSync(join(inbox, 'result.json'), 'utf8'), '');
   });
 
-  it('overrides vendor and preserves an empty session_id in a worker result drop', () => {
+  it('overrides vendor and preserves an empty session_id in a worker result drop', async () => {
     const { agentRunId, worktree, inbox, sessions, spec } = setupStart();
     const stdout = eventsStdout({ sessionID: 'impl-4', type: 'text', text: 'ok' });
 
-    const exec: OpencodeExec = () => {
+    const spawn = makeSpawn(stdout, { onSpawn: () => {
       writeFileSync(
         join(worktree, '.hydra-result.json'),
         JSON.stringify({
@@ -669,67 +725,63 @@ acceptance_criteria:
         }),
         'utf8',
       );
-      return { exitCode: 0, stdout, stderr: '' };
-    };
+    } });
 
-    start(spec, worktree, inbox, sessions, agentRunId, { exec });
+    await start(spec, worktree, inbox, sessions, agentRunId, { spawn });
 
     const resultDrop = readJson(join(inbox, 'result.json')) as Record<string, unknown>;
     assert.equal(resultDrop.vendor, 'opencode');
     assert.equal(resultDrop.session_id, '');
   });
 
-  it('backfills a null session_id in a worker result drop', () => {
+  it('backfills a null session_id in a worker result drop', async () => {
     const { agentRunId, worktree, inbox, sessions, spec } = setupStart();
     const stdout = eventsStdout({ sessionID: 'impl-5', type: 'text', text: 'ok' });
 
-    const exec: OpencodeExec = () => {
+    const spawn = makeSpawn(stdout, { onSpawn: () => {
       writeFileSync(
         join(worktree, '.hydra-result.json'),
         JSON.stringify({ session_id: null }),
         'utf8',
       );
-      return { exitCode: 0, stdout, stderr: '' };
-    };
+    } });
 
-    start(spec, worktree, inbox, sessions, agentRunId, { exec });
+    await start(spec, worktree, inbox, sessions, agentRunId, { spawn });
 
     const resultDrop = readJson(join(inbox, 'result.json')) as Record<string, unknown>;
     assert.equal(resultDrop.vendor, 'opencode');
     assert.equal(resultDrop.session_id, 'impl-5');
   });
 
-  it('falls back when the worker result is false, null, or invalid JSON', () => {
+  it('falls back when the worker result is false, null, or invalid JSON', async () => {
     for (const raw of ['false', 'null', '{bad json']) {
       const { agentRunId, worktree, inbox, sessions, spec } = setupStart();
       let deriveCalls = 0;
-      const exec: OpencodeExec = () => {
+      const spawn = makeSpawn('', { onSpawn: () => {
         writeFileSync(join(worktree, '.hydra-result.json'), raw, 'utf8');
-        return { exitCode: 0, stdout: '', stderr: '' };
-      };
+      } });
       const deriveDropFromGit = (): boolean => {
         deriveCalls += 1;
         writeFileSync(join(inbox, 'result.json'), JSON.stringify({ derived: true }), 'utf8');
         return true;
       };
 
-      start(spec, worktree, inbox, sessions, agentRunId, { exec, deriveDropFromGit });
+      await start(spec, worktree, inbox, sessions, agentRunId, { spawn, deriveDropFromGit });
       assert.equal(deriveCalls, 1);
       assert.deepEqual(readJson(join(inbox, 'result.json')), { derived: true });
     }
   });
 
-  it('fails hard when jq would accept then fail to stamp a non-object drop', () => {
+  it('fails hard when jq would accept then fail to stamp a non-object drop', async () => {
     const { agentRunId, worktree, inbox, sessions, spec } = setupStart();
     let deriveCalled = false;
-    const exec: OpencodeExec = () => {
+    const spawn = makeSpawn('', { onSpawn: () => {
       writeFileSync(join(worktree, '.hydra-result.json'), '[]', 'utf8');
-      return { exitCode: 0, stdout: '', stderr: '' };
-    };
+    } });
 
-    assert.throws(
+    await assert.rejects(
       () => start(spec, worktree, inbox, sessions, agentRunId, {
-        exec,
+        spawn,
         deriveDropFromGit: () => {
           deriveCalled = true;
           return false;
@@ -741,15 +793,14 @@ acceptance_criteria:
     assert.equal(readFileSync(join(inbox, 'result.json'), 'utf8'), '');
   });
 
-  it('removes a stale worker result before running', () => {
+  it('removes a stale worker result before running', async () => {
     const { agentRunId, worktree, inbox, sessions, spec } = setupStart();
     const staleResult = join(worktree, '.hydra-result.json');
     writeFileSync(staleResult, JSON.stringify({ stale: true }), 'utf8');
 
-    const exec: OpencodeExec = () => {
+    const spawn = makeSpawn('', { onSpawn: () => {
       assert.equal(existsSync(staleResult), false);
-      return { exitCode: 0, stdout: '', stderr: '' };
-    };
+    } });
 
     const deriveDropFromGit = (): boolean => {
       writeFileSync(
@@ -760,6 +811,6 @@ acceptance_criteria:
       return true;
     };
 
-    start(spec, worktree, inbox, sessions, agentRunId, { exec, deriveDropFromGit });
+    await start(spec, worktree, inbox, sessions, agentRunId, { spawn, deriveDropFromGit });
   });
 });
