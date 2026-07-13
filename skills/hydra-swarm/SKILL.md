@@ -130,6 +130,24 @@ node: `node --experimental-strip-types hydra-ts/src/<name>.ts <same args>`.
   `hydra/scripts/dispatch.sh`, which knows nothing about
   `HYDRA_ADAPTER_RUNTIME` or any other TS-side option.
 
+## When to use a subagent instead of a full Hydra run
+Not everything needs worktree + dispatch + promote + squash + integrate
+ceremony. Use the `Agent` tool directly (a lightweight subagent, no trust
+boundary, no Git branch) for work that produces an OPINION or ANALYSIS, not
+a durable code change: advisory/planning consults (e.g. "ask all four
+vendors to review and propose a migration sequence"), one-off research,
+summarizing/synthesizing output you already have, or verification checks
+that don't need to be independently reconstructable from Git. Reserve full
+Hydra dispatch for anything that mutates `hydra/`, `hydra-ts/`, or other
+tracked source — that always needs the trust boundary, cross-vendor review,
+and a promoted/integrated commit, no matter how small.
+Rule of thumb: if the deliverable is a file the codebase depends on, use
+Hydra; if the deliverable is a recommendation you'll read once and decide
+from, a subagent is faster and cheaper, and — as done for the 4-vendor
+TS-cutover consult (run 0030) — you can still have it fan out per-vendor
+via Hydra tasks IF you want the multi-vendor perspective specifically (a
+subagent alone can't impersonate "what would Codex/Kimi/GLM say").
+
 ## Recovery
 If your session is replaced, do NOT rely on conversational memory. Read
 `run.yaml` + the ledger + Git to reconstruct which tasks are planned / running /
