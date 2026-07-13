@@ -135,19 +135,21 @@ export function deriveDropFromGit(
   try {
     head = execFileSync('git', ['-C', worktree, 'rev-parse', 'HEAD'], {
       encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
   } catch {
     return false;
   }
   if (!head) return false;
 
-  let baseHead: string;
+  let baseHead = '';
   try {
     baseHead = execFileSync('git', ['-C', worktree, 'rev-parse', base], {
       encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
   } catch {
-    return false;
+    baseHead = '';
   }
   if (baseHead === head) return false;
 
@@ -156,7 +158,7 @@ export function deriveDropFromGit(
     const diff = execFileSync(
       'git',
       ['-C', worktree, 'diff', '--name-only', `${base}...HEAD`],
-      { encoding: 'utf8' },
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
     );
     files = diff
       .split('\n')
@@ -299,7 +301,11 @@ export function pathInGlobs(path: string, globs: string[]): boolean {
 // ---------------------------------------------------------------------------
 
 function readLines(file: string): string[] {
-  return readFileSync(file, 'utf8').split('\n');
+  const content = readFileSync(file, 'utf8');
+  if (content === '') return [];
+  const lines = content.split('\n');
+  if (content.endsWith('\n')) lines.pop();
+  return lines;
 }
 
 export function yamlList(file: string, key: string): string[] {
@@ -347,7 +353,6 @@ export function yamlBlock(file: string, key: string): string {
     }
   }
   while (collected[0] === '') collected.shift();
-  while (collected.at(-1) === '') collected.pop();
   return collected.join('\n');
 }
 

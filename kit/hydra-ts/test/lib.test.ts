@@ -1,6 +1,13 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import {
   pathInGlobs,
@@ -9,6 +16,7 @@ import {
   yamlBlock,
   yamlList,
   now,
+  deriveDropFromGit,
 } from '../src/lib.ts';
 
 const TEST_TMP = join(import.meta.dirname, 'tmp');
@@ -110,6 +118,23 @@ describe('yamlScalar', () => {
   });
 });
 
+describe('key matching', () => {
+  before(() => mkdirSync(TEST_TMP, { recursive: true }));
+  after(cleanTmp);
+
+  it('yamlScalar does not match a longer key sharing a prefix (time vs timeline)', () => {
+    const file = writeFixture('keys', `timeline: morning\ntime: noon\n`);
+    assert.equal(yamlScalar(file, 'time'), 'noon');
+    assert.equal(yamlScalar(file, 'timeline'), 'morning');
+  });
+
+  it('yamlBlock does not match a longer key sharing a prefix (time vs timeline)', () => {
+    const file = writeFixture('keys', `timeline: morning\ntime: noon\n`);
+    assert.equal(yamlBlock(file, 'time'), 'noon');
+    assert.equal(yamlBlock(file, 'timeline'), 'morning');
+  });
+});
+
 describe('yamlBlock', () => {
   before(() => mkdirSync(TEST_TMP, { recursive: true }));
   after(cleanTmp);
@@ -159,6 +184,58 @@ other: value
     const block = yamlBlock(file, 'objective');
     assert.equal(block, 'First.');
   });
+
+  it('preserves a trailing blank line that is part of the block', () => {
+    const file = writeFixture('block', `description: |
+  line one
+  line two
+
+next: value
+`);
+    const block = yamlBlock(file, 'description');
+    assert.deepEqual(block.split('\n'), ['line one', 'line two', '']);
+  });
+
+  it('preserves all trailing blank lines at end of file without inventing one', () => {
+    const withTrailingBlanks = writeFixture(
+      'block',
+      'description: |\n  line one\n\n\n',
+    );
+    const withoutTrailingBlank = writeFixture('block', 'description: |\n  line one\n');
+
+    assert.equal(yamlBlock(withTrailingBlanks, 'description'), 'line one\n\n');
+    assert.equal(yamlBlock(withoutTrailingBlank, 'description'), 'line one');
+  });
+
+  it('preserves trailing blank lines and removes carriage returns under CRLF', () => {
+    const file = writeFixture(
+      'block',
+      'description: |\r\n  line one\r\n  line two\r\n\r\nnext: value\r\n',
+    );
+
+    assert.equal(yamlBlock(file, 'description'), 'line one\nline two\n');
+  });
+
+  it('preserves interior blank lines once block content has started', () => {
+    const file = writeFixture('block', `description: |
+  line one
+
+  line two
+next: value
+`);
+    const block = yamlBlock(file, 'description');
+    assert.equal(block, 'line one\n\nline two');
+  });
+
+  it('returns an inline value that itself contains a pipe character', () => {
+    const file = writeFixture('block', `cmd: echo a | b\n`);
+    assert.equal(yamlBlock(file, 'cmd'), 'echo a | b');
+  });
+
+  it('returns an inline value that itself contains a greater-than character', () => {
+    const file = writeFixture('block', `cmd: echo a > b\n`);
+    assert.equal(yamlBlock(file, 'cmd'), 'echo a > b');
+  });
 });
 
 describe('yamlList', () => {
@@ -191,6 +268,11 @@ other: value
 `);
     assert.deepEqual(yamlList(file, 'items'), ['quoted', 'plain']);
   });
+
+  it('parses list items under CRLF line endings', () => {
+    const file = writeFixture('list', 'items:\r\n  - alpha\r\n  - beta\r\n  - gamma\r\n');
+    assert.deepEqual(yamlList(file, 'items'), ['alpha', 'beta', 'gamma']);
+  });
 });
 
 describe('now', () => {
@@ -198,5 +280,80 @@ describe('now', () => {
     const t = now();
     assert.match(t, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
     assert.ok(!Number.isNaN(Date.parse(t)));
+  });
+});
+
+describe('deriveDropFromGit', () => {
+  const DIR = join(TEST_TMP, 'derive');
+  let worktree = '';
+
+  function git(args: string[]): void {
+    execFileSync('git', ['-C', worktree, ...args], {
+      encoding: 'utf8',
+      stdio: 'ignore',
+    });
+  }
+
+  before(() => {
+    mkdirSync(DIR, { recursive: true });
+    worktree = join(DIR, `repo-${Date.now()}`);
+    execFileSync('git', ['init', worktree], { encoding: 'utf8', stdio: 'ignore' });
+    git(['config', 'user.email', 'test@example.com']);
+    git(['config', 'user.name', 'Test']);
+    writeFileSync(join(worktree, 'a.txt'), 'base\n');
+    git(['add', 'a.txt']);
+    git(['commit', '-m', 'base']);
+    writeFileSync(join(worktree, 'b.txt'), 'more\n');
+    git(['add', 'b.txt']);
+    git(['commit', '-m', 'more']);
+  });
+  after(cleanTmp);
+
+  it('proceeds (does not hard-fail) when base_commit is unresolvable', () => {
+    const spec = join(DIR, 'spec-invalid.yaml');
+    writeFileSync(
+      spec,
+      'task_id: t1\nrun_id: "0020"\nspec_version: 1\nbranch: b\nbase_commit: not-a-real-commit-xyz\n',
+    );
+    const out = join(DIR, 'out-invalid.json');
+    const ok = deriveDropFromGit(spec, worktree, 'codex', 'sess1', out);
+    assert.equal(ok, true);
+    assert.ok(existsSync(out));
+    const drop = JSON.parse(readFileSync(out, 'utf8'));
+    assert.equal(drop.status, 'completed');
+    assert.ok(drop.head_commit.length > 0);
+    assert.deepEqual(drop.files_changed, []);
+    assert.equal(drop.base_commit, 'not-a-real-commit-xyz');
+  });
+
+  it('derives files_changed from a valid base_commit', () => {
+    const base = execFileSync('git', ['-C', worktree, 'rev-parse', 'HEAD~1'], {
+      encoding: 'utf8',
+    }).trim();
+    const spec = join(DIR, 'spec-valid.yaml');
+    writeFileSync(
+      spec,
+      `task_id: t2\nrun_id: "0020"\nspec_version: 1\nbranch: b\nbase_commit: ${base}\n`,
+    );
+    const out = join(DIR, 'out-valid.json');
+    const ok = deriveDropFromGit(spec, worktree, 'codex', 'sess2', out);
+    assert.equal(ok, true);
+    const drop = JSON.parse(readFileSync(out, 'utf8'));
+    assert.deepEqual(drop.files_changed, ['b.txt']);
+  });
+
+  it('returns false when HEAD equals base_commit (nothing committed)', () => {
+    const head = execFileSync('git', ['-C', worktree, 'rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+    }).trim();
+    const spec = join(DIR, 'spec-same.yaml');
+    writeFileSync(
+      spec,
+      `task_id: t3\nrun_id: "0020"\nspec_version: 1\nbranch: b\nbase_commit: ${head}\n`,
+    );
+    const out = join(DIR, 'out-same.json');
+    const ok = deriveDropFromGit(spec, worktree, 'codex', 'sess3', out);
+    assert.equal(ok, false);
+    assert.equal(existsSync(out), false);
   });
 });
