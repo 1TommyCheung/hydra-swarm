@@ -1,5 +1,6 @@
-import { join } from 'node:path';
-import { repoRoot, yamlList, yamlScalar } from './lib.ts';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { die, repoRoot, yamlList, yamlScalar } from './lib.ts';
 
 // ---------------------------------------------------------------------------
 // Risk-triggered cross-vendor review decision.
@@ -91,3 +92,26 @@ export function reviewRequired(
 export default {
   reviewRequired,
 };
+
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    const [implementer, risk, ...labels] = args;
+    if (!implementer) {
+      die('usage: review-required.sh <implementer_vendor> <risk> [label...]');
+    }
+    if (!risk) die('risk required (low|medium|high|critical)');
+    process.stdout.write(`${JSON.stringify(reviewRequired(implementer, risk, labels))}\n`);
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { authDir, ledger, log, runDir, yamlScalar } from './lib.ts';
 
 /**
@@ -121,3 +122,24 @@ export default {
   renderLedgerView,
   escapeHtml,
 };
+
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    if (!args[0]) {
+      throw new Error('hydra: error: usage: ledger-view.sh <run_id> [out.html]');
+    }
+    renderLedgerView(args[0], args[1]);
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}

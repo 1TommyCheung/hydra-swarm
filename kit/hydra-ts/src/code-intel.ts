@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { basename } from 'node:path';
+import { basename, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { die } from './lib.ts';
 
 // ---------------------------------------------------------------------------
@@ -451,3 +452,22 @@ export default {
   drift,
   stripAnsi,
 };
+
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    const output = codeIntel(args);
+    process.stdout.write(`${output}\n`);
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}

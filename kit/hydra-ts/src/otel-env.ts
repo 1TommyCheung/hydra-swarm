@@ -1,4 +1,6 @@
 import { env } from 'node:process';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 // ---------------------------------------------------------------------------
 // OpenTelemetry exporter environment for Claude workers (Wave 2).
@@ -51,3 +53,15 @@ export default {
   formatOtelEnv,
   otelEnvShell,
 };
+
+export function main(): number {
+  process.stdout.write(otelEnvShell());
+  return 0;
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}

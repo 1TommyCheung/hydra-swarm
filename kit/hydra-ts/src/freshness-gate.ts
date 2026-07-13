@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { die, log, runDir, warn, yamlScalar } from './lib.ts';
 
 /**
@@ -80,3 +81,24 @@ export function freshnessGate(runId: string, taskId: string): FreshnessGateResul
 }
 
 export default { freshnessGate };
+
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    const [runId, taskId] = args;
+    if (!runId || !taskId) {
+      die('usage: freshness-gate.sh <run_id> <task_id>');
+    }
+    return freshnessGate(runId, taskId).fresh ? 0 : 8;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}

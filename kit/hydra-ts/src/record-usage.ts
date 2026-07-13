@@ -4,8 +4,10 @@ import {
   mkdirSync,
   readFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
+  die,
   ledgerAppend,
   now,
   runDir,
@@ -235,3 +237,25 @@ export default {
   recordUsage,
   readVendorUsage,
 };
+
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    const [runId, taskId, vendor, agentRunId] = args;
+    if (!runId || !taskId || !vendor || !agentRunId) {
+      die('usage: record-usage.sh <run_id> <task_id> <vendor> <agent_run_id>');
+    }
+    recordUsage(runId, taskId, vendor, agentRunId);
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}

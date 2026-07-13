@@ -7,7 +7,9 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
+  die,
   deriveDropFromGit,
   log,
   repoRoot,
@@ -353,3 +355,33 @@ export default {
   buildWorkerPrompt,
   defaultRunCommand,
 };
+
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    const [verb, taskSpec, worktree, inbox, sessions, agentRunId, priorSessionId] = args;
+    if (!verb) {
+      die('usage: claude.sh start|resume <task_spec> <worktree> <inbox> <sessions> <agent_run_id> [prior_session_id]');
+    }
+    if (verb !== 'start' && verb !== 'resume') {
+      die(`claude.sh: unknown verb '${verb}'`);
+    }
+    if (!taskSpec) die('task_spec required');
+    if (!worktree) die('worktree required');
+    if (!inbox) die('inbox required');
+    if (!sessions) die('sessions required');
+    if (!agentRunId) die('agent_run_id required');
+    claude(verb, taskSpec, worktree, inbox, sessions, agentRunId, priorSessionId);
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}

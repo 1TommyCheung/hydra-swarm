@@ -7,8 +7,8 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { die, ledgerAppend, log, runDir, yamlScalar } from './lib.ts';
 
 // ---------------------------------------------------------------------------
@@ -198,3 +198,26 @@ export function amendTask(
 
 // Backwards-compatible default export for consumers that import the module.
 export default { amendTask, rewriteTaskSpec };
+
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    const [runId, taskId, reason, delivery = 'restart'] = args;
+    if (!runId || !taskId) {
+      die('usage: amend-task.sh <run_id> <task_id> <reason> [resume|restart]');
+    }
+    if (!reason) die('amendment_reason required');
+    amendTask(runId, taskId, reason, delivery);
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}
