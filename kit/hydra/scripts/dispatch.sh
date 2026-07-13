@@ -121,6 +121,26 @@ trap on_signal INT TERM HUP
 # NOT make herdr own dispatch/worktrees/task lifecycle (roadmap non-goal).
 herdr_live() { command -v herdr >/dev/null 2>&1 && herdr status >/dev/null 2>&1; }
 
+# Shared starting-banner builder for worker panes. Writes the banner — vendor/
+# model label, run/task ids, worktree, and the ACTUAL worker prompt that
+# build-worker-prompt.sh renders (reused, not reimplemented) — to a file and
+# echoes the path. The pane script cats this BEFORE the adapter runs, so a pane
+# answers "what is this worker even doing" before the first token streams. Pure
+# display; pane text is never read as truth (observability.yaml).
+# Usage: _write_pane_banner <vendor_label>   -> echoes banner file path
+_write_pane_banner() {
+  local label="$1"
+  local banner_file="$sessions_dir/$agent_run_id.pane-banner.txt"
+  {
+    printf '%s starting — run %s task %s\n' "$label" "$run_id" "$task_id"
+    printf 'worktree: %s\n' "$worktree"
+    printf -- '--- prompt ---\n'
+    "$repo_root/hydra/adapters/build-worker-prompt.sh" "$task_spec" 2>/dev/null || printf '(prompt unavailable)\n'
+    printf -- '--------------\n\n'
+  } >"$banner_file" 2>/dev/null || true
+  printf '%s' "$banner_file"
+}
+
 run_worker_in_herdr_pane() {
   local sentinel="$sessions_dir/$agent_run_id.exit"
   local pidfile="$sessions_dir/$agent_run_id.pid"
@@ -130,8 +150,54 @@ run_worker_in_herdr_pane() {
   local ws label
   ws="$(herdr pane list 2>/dev/null | jq -r '.result.panes[]|select(.focused)|.workspace_id' | head -1)"
   label="hydra:${run_id}:${task_id}:${vendor}"
+
+  # Starting banner + (codex only) live progress tail — purely ADDITIVE display
+  # in the SAME pane as the wrapped adapter invocation. The pidfile/sentinel/
+  # keep-alive/timeout mechanism below is NOT touched; this only changes what
+  # the pane PRINTS. claude/kimi get the banner only:
+  #   - kimi already tees its human-readable stderr live inside kimi.sh, so its
+  #     existing live channel is preserved unchanged ahead of the banner.
+  #   - claude -p --output-format json emits ONE JSON blob at the very end (not a
+  #     stream), and its stderr is empty in real worker runs (0-byte .stderr
+  #     files across run-0001/run-0002); there is no live stream to tail, so we
+  #     do NOT tee a silent stream for cosmetics (documented in result notes).
+  # codex --json streams real JSONL events to its cli.jsonl (same as opencode),
+  # so we live-tail them exactly like open_opencode_monitor_pane, using codex's
+  # OWN event field names (verified against real capture samples).
+  local vlabel
+  case "$vendor" in
+    codex)  vlabel="Codex" ;;
+    claude) vlabel="Claude" ;;
+    kimi)   vlabel="Kimi" ;;
+    *)      vlabel="$vendor" ;;
+  esac
+  local banner_file; banner_file="$(_write_pane_banner "$vlabel")"
+
   local inner
-  inner="echo \$\$ > '$pidfile'; '$adapter' '$verb' '$task_spec' '$worktree' '$inbox' '$sessions_dir' '$agent_run_id' '$prior_session'; printf '%s' \$? > '$sentinel'"
+  if [ "$vendor" = codex ]; then
+    # codex --json event schema (from ~/.local/state/webtrail-hydra/runs/*/sessions
+    # /*.cli.jsonl samples): item.completed+agent_message -> .item.text;
+    # item.started+command_execution -> .item.command; item.started+file_change
+    # -> .item.changes[].path; item.started+mcp_tool_call -> .item.server/.tool.
+    local events_file="$sessions_dir/$agent_run_id.cli.jsonl"
+    local codex_filter='
+      if .type=="item.completed" and .item.type=="agent_message" and ((.item.text//"")!="") then .item.text
+      elif .type=="item.started" and .item.type=="command_execution" and ((.item.command//"")!="")
+        then ("\n[cmd] " + ((.item.command|gsub("\n";" ")) | .[0:140]))
+      elif .type=="item.started" and .item.type=="file_change"
+        then ("\n[edit] " + ([.item.changes[].path] | map(split("/")|last) | join(", ")))
+      elif .type=="item.started" and .item.type=="mcp_tool_call"
+        then ("\n[tool] " + (.item.server//"") + "." + (.item.tool//""))
+      else empty end'
+    # set +e so a nonzero adapter exit still reaches the sentinel write (matches
+    # the adapters' own `|| true`). RC captures the adapter's exit, then the
+    # progress tailer (TPID) is stopped before writing the sentinel.
+    inner="echo \$\$ > '$pidfile'; set +e; cat '$banner_file' 2>/dev/null; touch '$events_file' 2>/dev/null; tail -n +1 -f '$events_file' 2>/dev/null | jq --unbuffered -r '$codex_filter' 2>/dev/null & TPID=\$!; '$adapter' '$verb' '$task_spec' '$worktree' '$inbox' '$sessions_dir' '$agent_run_id' '$prior_session'; RC=\$?; kill \$TPID 2>/dev/null; printf '%s' \$RC > '$sentinel'"
+  else
+    # claude / kimi: banner only (kimi's own stderr tee carries live progress;
+    # claude has no live stream).
+    inner="echo \$\$ > '$pidfile'; cat '$banner_file' 2>/dev/null; '$adapter' '$verb' '$task_spec' '$worktree' '$inbox' '$sessions_dir' '$agent_run_id' '$prior_session'; printf '%s' \$? > '$sentinel'"
+  fi
 
   local started pane_id
   started="$(herdr agent start "$label" --cwd "$worktree" ${ws:+--workspace "$ws"} \
@@ -210,17 +276,10 @@ open_opencode_monitor_pane() {
   local events_file="$sessions_dir/$agent_run_id.events.jsonl"
   local model="${HYDRA_OPENCODE_MODEL:-zhipu/glm-5.2}"
 
-  # Starting banner + the actual prompt (build-worker-prompt.sh is pure/side-
-  # effect-free, safe to call a second time purely for display) so the pane
-  # answers "what is this worker even doing" before the first token streams.
-  local banner_file="$sessions_dir/$agent_run_id.monitor-banner.txt"
-  {
-    printf 'OpenCode (%s) starting — run %s task %s\n' "$model" "$run_id" "$task_id"
-    printf 'worktree: %s\n' "$worktree"
-    printf -- '--- prompt ---\n'
-    "$repo_root/hydra/adapters/build-worker-prompt.sh" "$task_spec" 2>/dev/null || printf '(prompt unavailable)\n'
-    printf -- '--------------\n\n'
-  } >"$banner_file" 2>/dev/null
+  # Starting banner + the actual prompt so the pane answers "what is this worker
+  # even doing" before the first token streams. Reuses the shared banner builder
+  # that run_worker_in_herdr_pane also uses (no duplicated prompt construction).
+  local banner_file; banner_file="$(_write_pane_banner "OpenCode ($model)")"
 
   # Progress filter: assistant text as it streams, plus short "-> tool" lines
   # for tool calls, so the pane reads like activity, not silence-then-result.
