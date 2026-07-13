@@ -10,7 +10,7 @@
 
 set -euo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ "${HYDRA_HARNESS:-bash}" = "ts" ]; then
+if [ "${HYDRA_HARNESS:-ts}" != "bash" ]; then
 exec node --experimental-strip-types "$SELF_DIR/../../hydra-ts/src/otel-env.ts" "$@"
 fi
 policy="$SELF_DIR/../policies/observability.yaml"
