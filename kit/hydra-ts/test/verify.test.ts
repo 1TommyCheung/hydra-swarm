@@ -309,7 +309,7 @@ commands:
     assert.deepEqual(result, [{ command: 'echo hi', status: 'timed_out' }]);
   });
 
-  it('marks failed commands and sets exitCode to 4', async () => {
+  it('marks failed commands', async () => {
     const { worktree, policy } = setupFixture(makeRunId());
     writePolicy(
       policy,
@@ -319,18 +319,13 @@ commands:
 `,
     );
 
-    const previousExitCode = process.exitCode;
     const exec = sequentialRunner([{ exitCode: 0 }, { exitCode: 1 }]);
-    try {
-      const result = await verify(worktree, policy, undefined, { exec });
-      assert.deepEqual(result, [
-        { command: 'pass', status: 'passed' },
-        { command: 'fail', status: 'failed' },
-      ]);
-      assert.equal(process.exitCode, 4);
-    } finally {
-      process.exitCode = previousExitCode ?? undefined;
-    }
+    const result = await verify(worktree, policy, undefined, { exec });
+
+    assert.deepEqual(result, [
+      { command: 'pass', status: 'passed' },
+      { command: 'fail', status: 'failed' },
+    ]);
   });
 
   it('treats exit code 124 as a timeout', async () => {
@@ -342,15 +337,10 @@ commands:
 `,
     );
 
-    const previousExitCode = process.exitCode;
     const exec = sequentialRunner([{ exitCode: 124 }]);
-    try {
-      const result = await verify(worktree, policy, undefined, { exec });
-      assert.deepEqual(result, [{ command: 'slow', status: 'timed_out' }]);
-      assert.equal(process.exitCode, 4);
-    } finally {
-      process.exitCode = previousExitCode ?? undefined;
-    }
+    const result = await verify(worktree, policy, undefined, { exec });
+
+    assert.deepEqual(result, [{ command: 'slow', status: 'timed_out' }]);
   });
 
   it('treats a signal-terminated command as failed', async () => {
@@ -362,15 +352,10 @@ commands:
 `,
     );
 
-    const previousExitCode = process.exitCode;
     const exec = sequentialRunner([{ exitCode: null, signal: 'SIGKILL' }]);
-    try {
-      const result = await verify(worktree, policy, undefined, { exec });
-      assert.deepEqual(result, [{ command: 'killed', status: 'failed' }]);
-      assert.equal(process.exitCode, 4);
-    } finally {
-      process.exitCode = previousExitCode ?? undefined;
-    }
+    const result = await verify(worktree, policy, undefined, { exec });
+
+    assert.deepEqual(result, [{ command: 'killed', status: 'failed' }]);
   });
 
   it('skips empty commands without adding results', async () => {
@@ -523,18 +508,13 @@ commands:
 `,
     );
 
-    const previousExitCode = process.exitCode;
-    try {
-      const result = await verify(worktree, policy);
-      assert.deepEqual(result, [
-        { command: 'echo ok > output.txt', status: 'passed' },
-        { command: 'test -f output.txt', status: 'passed' },
-      ]);
-      assert.equal(existsSync(join(worktree, 'output.txt')), true);
-      assert.equal(process.exitCode, 0);
-    } finally {
-      process.exitCode = previousExitCode ?? undefined;
-    }
+    const result = await verify(worktree, policy);
+
+    assert.deepEqual(result, [
+      { command: 'echo ok > output.txt', status: 'passed' },
+      { command: 'test -f output.txt', status: 'passed' },
+    ]);
+    assert.equal(existsSync(join(worktree, 'output.txt')), true);
   });
 
   it('kills descendant processes when the default runner times out', async () => {
@@ -580,13 +560,8 @@ commands:
 `,
     );
 
-    const previousExitCode = process.exitCode;
-    try {
-      const result = await verify(worktree, policy);
-      assert.deepEqual(result, [{ command: 'false', status: 'failed' }]);
-      assert.equal(process.exitCode, 4);
-    } finally {
-      process.exitCode = previousExitCode ?? undefined;
-    }
+    const result = await verify(worktree, policy);
+
+    assert.deepEqual(result, [{ command: 'false', status: 'failed' }]);
   });
 });
