@@ -154,8 +154,10 @@ run_worker_in_herdr_pane() {
     [ -n "$pane_id" ] || return 0
     hydra_herdr_state "$pane_id" "$vendor" idle          # ledger says the worker exited
     [ "${HYDRA_HERDR_KEEP_PANE:-0}" = 1 ] && { hydra_log "keeping herdr pane $pane_id (state=idle)"; return 0; }
-    herdr pane close "$pane_id" >/dev/null 2>&1 \
-      && hydra_log "closed herdr pane $pane_id ($label)"
+    if herdr pane close "$pane_id" >/dev/null 2>&1; then
+      hydra_log "closed herdr pane $pane_id ($label)"
+    fi
+    return 0
   }
 
   # HARNESS-owned KEEP-ALIVE timeout: poll for the adapter's exit sentinel.
@@ -189,8 +191,112 @@ run_worker_in_herdr_pane() {
   return 0
 }
 
+# --- opencode/GLM: DECOUPLED pane monitor ------------------------------------
+# Hosting the opencode CLI itself inside a herdr-spawned process reliably broke
+# it (immediate "Unexpected server error" from the Z.AI endpoint, 6/6 repro;
+# the identical invocation as a plain subprocess succeeded every time — see
+# hydra-ts/migration/FINDINGS.md). Root cause not isolated (PTY/fd/signal
+# interaction suspected), so the fix decouples PROCESS EXECUTION from PANE
+# VISIBILITY: the adapter always runs as a plain background subprocess (the
+# proven-reliable path); a SEPARATE herdr pane, which never touches the vendor
+# process, just tails its capture file live for observability and self-closes
+# once the worker pid disappears. Pane text is still never read as truth.
+open_opencode_monitor_pane() {
+  local watch_pid="$1"
+  herdr_live || return 1
+  local ws label
+  ws="$(herdr pane list 2>/dev/null | jq -r '.result.panes[]|select(.focused)|.workspace_id' | head -1)"
+  label="hydra:${run_id}:${task_id}:${vendor}"
+  local events_file="$sessions_dir/$agent_run_id.events.jsonl"
+  local model="${HYDRA_OPENCODE_MODEL:-zhipu/glm-5.2}"
+
+  # Starting banner + the actual prompt (build-worker-prompt.sh is pure/side-
+  # effect-free, safe to call a second time purely for display) so the pane
+  # answers "what is this worker even doing" before the first token streams.
+  local banner_file="$sessions_dir/$agent_run_id.monitor-banner.txt"
+  {
+    printf 'OpenCode (%s) starting — run %s task %s\n' "$model" "$run_id" "$task_id"
+    printf 'worktree: %s\n' "$worktree"
+    printf -- '--- prompt ---\n'
+    "$repo_root/hydra/adapters/build-worker-prompt.sh" "$task_spec" 2>/dev/null || printf '(prompt unavailable)\n'
+    printf -- '--------------\n\n'
+  } >"$banner_file" 2>/dev/null
+
+  # Progress filter: assistant text as it streams, plus short "-> tool" lines
+  # for tool calls, so the pane reads like activity, not silence-then-result.
+  local jq_filter='
+    if .part.type == "text" and ((.part.text // "") != "") then .part.text
+    elif .part.type == "tool" then
+      ("\n[tool] " + (.part.tool // "tool") +
+       (if (.part.state.title // "") != "" then ": " + .part.state.title else "" end))
+    else empty end'
+
+  local monitor
+  monitor="cat '$banner_file' 2>/dev/null; touch '$events_file' 2>/dev/null; tail -n +1 -f '$events_file' 2>/dev/null | jq --unbuffered -r '$jq_filter' & TPID=\$!; while kill -0 $watch_pid 2>/dev/null; do sleep 1; done; kill \$TPID 2>/dev/null"
+  local started pane_id
+  started="$(herdr agent start "$label" --cwd "$worktree" ${ws:+--workspace "$ws"} \
+    --split down --no-focus -- bash -lc "$monitor" 2>/dev/null)" || return 1
+  pane_id="$(jq -r '.result.agent.pane_id // empty' <<<"$started" 2>/dev/null)"
+  [ -n "$pane_id" ] || return 1
+  herdr_pane_id="$pane_id"
+  hydra_ledger_append "$run_id" herdr_pane_started task_id "$task_id" vendor "$vendor" \
+    label "$label" pane "$pane_id" mode monitor_only
+  hydra_log "opencode monitor pane $pane_id: $label (worker pid $watch_pid, lead workspace ${ws:-?})"
+  hydra_herdr_state "$pane_id" "$vendor" working
+  printf '%s\n' "$pane_id"
+}
+
+close_opencode_monitor_pane() {
+  local pane_id="$1"
+  [ -n "$pane_id" ] || return 0
+  hydra_herdr_state "$pane_id" "$vendor" idle
+  if [ "${HYDRA_HERDR_KEEP_PANE:-0}" = 1 ]; then
+    hydra_log "keeping opencode monitor pane $pane_id (state=idle)"
+    return 0
+  fi
+  if herdr pane close "$pane_id" >/dev/null 2>&1; then
+    hydra_log "closed opencode monitor pane $pane_id"
+  fi
+  return 0
+}
+
 run_worker() {
   local rc=0
+  if [ "$vendor" = opencode ] && [ "${HYDRA_HERDR_PANES:-0}" = 1 ] && herdr_live; then
+    "$adapter" "$verb" "$task_spec" "$worktree" "$inbox" "$sessions_dir" "$agent_run_id" "$prior_session" &
+    worker_pid=$!
+    local monitor_pane_id
+    monitor_pane_id="$(open_opencode_monitor_pane "$worker_pid")" || true
+    # Same keep-alive watchdog as the plain path below: inactivity-window
+    # timeout, renewed while capture files grow; hard cap backstops runaways.
+    local waited=0 limit=$(( timeout_min * 60 ))
+    local elapsed=0 hard_cap=$(( ${HYDRA_HARD_CAP_MIN:-$(( timeout_min * 6 ))} * 60 ))
+    local act prev_act="" timed_out=""
+    while kill -0 "$worker_pid" 2>/dev/null; do
+      if [ "$waited" -ge "$limit" ]; then timed_out=stalled; break; fi
+      if [ "$elapsed" -ge "$hard_cap" ]; then timed_out=hard_cap; break; fi
+      sleep 2; waited=$(( waited + 2 )); elapsed=$(( elapsed + 2 ))
+      act="$(wc -c "$sessions_dir/$agent_run_id".* 2>/dev/null | tail -1)"
+      [ "$act" != "$prev_act" ] && { prev_act="$act"; waited=0; }
+    done
+    # Ledger truth is written FIRST, pane cleanup SECOND (and never allowed to
+    # take the script down): `herdr pane close` can return nonzero for benign
+    # reasons (pane already gone, etc.) and under `set -e` an unguarded
+    # nonzero here would abort the script before agent_exited is recorded —
+    # exactly the ordering bug that made this branch silently skip the ledger
+    # write during development. Matches run_worker_in_herdr_pane's ordering.
+    if [ -n "$timed_out" ]; then
+      hydra_kill_tree "$worker_pid"
+      hydra_ledger_append "$run_id" agent_timed_out task_id "$task_id" vendor "$vendor" reason "$timed_out" && exit_recorded=1
+      release_slot
+    else
+      wait "$worker_pid" || rc=$?
+      record_exit agent_exited "$rc"
+    fi
+    [ -n "${monitor_pane_id:-}" ] && { close_opencode_monitor_pane "$monitor_pane_id" || true; }
+    "$SELF_DIR/record-usage.sh" "$run_id" "$task_id" "$vendor" "$agent_run_id" 2>/dev/null || true
+    return 0
+  fi
   if [ "${HYDRA_HERDR_PANES:-0}" = 1 ] && herdr_live; then
     run_worker_in_herdr_pane && {
       "$SELF_DIR/record-usage.sh" "$run_id" "$task_id" "$vendor" "$agent_run_id" 2>/dev/null || true
