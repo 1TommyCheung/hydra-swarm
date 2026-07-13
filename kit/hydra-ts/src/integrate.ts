@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import {
   ledgerAppend,
   log,
@@ -11,9 +11,7 @@ import {
   worktreeRoot,
   yamlScalar,
 } from './lib.ts';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const VERIFY_SH = resolve(__dirname, '../../hydra/scripts/verify.sh');
+import { verify } from './verify.ts';
 
 export type ExecFunction = (
   file: string,
@@ -25,7 +23,7 @@ export type VerifyFunction = (
   worktree: string,
   policy: string,
   out?: string,
-) => boolean;
+) => Promise<boolean>;
 
 export interface IntegrateOptions {
   cwd?: string;
@@ -61,15 +59,16 @@ function defaultExec(
   }) as string;
 }
 
-function defaultVerify(execFn: ExecFunction): VerifyFunction {
-  return (worktree: string, policy: string, out?: string): boolean => {
-    const args = [worktree, policy];
-    if (out) args.push(out);
+function defaultVerify(): VerifyFunction {
+  return async (worktree: string, policy: string, out?: string): Promise<boolean> => {
+    const originalExitCode = process.exitCode;
     try {
-      execFn(VERIFY_SH, args, { encoding: 'utf8', stdio: 'pipe' });
-      return true;
+      const results = await verify(worktree, policy, out);
+      return results.every((result) => result.status === 'passed');
     } catch {
       return false;
+    } finally {
+      process.exitCode = originalExitCode;
     }
   };
 }
@@ -89,7 +88,7 @@ function git(
  * Serialized convergence: cherry-pick accepted squashes onto an integration
  * branch with per-candidate smoke verification and a combined verification gate.
  *
- * Ports hydra/scripts/integrate.sh. Returns the integration branch HEAD on
+ * Ports the historical integration harness. Returns the integration branch HEAD on
  * success. Throws IntegrationError with exitCode 6 for textual conflicts and
  * exitCode 7 for verification failures.
  *
@@ -102,27 +101,33 @@ export function integrate(
   runId: string,
   taskIds: string[],
   options: IntegrateOptions = {},
-): string {
-  if (!runId) {
-    fail('usage: integrate.ts <run_id> <task_id_in_order>...');
-  }
-  if (!taskIds || taskIds.length === 0) {
-    fail('no tasks to integrate');
-  }
-
-  const repoRootPath = options.cwd ?? repoRoot();
-  const worktreeRootPath = options.worktreeRoot ?? worktreeRoot();
-  const execFn: ExecFunction = options.exec ?? defaultExec;
-  const verifyFn: VerifyFunction = options.verify ?? defaultVerify(execFn);
-
-  // Foundation state and ledger helpers read HYDRA_STATE_ROOT. Scope the test
-  // override to this synchronous operation and restore it in finally below.
+): Promise<string> {
   const originalStateRoot = process.env.HYDRA_STATE_ROOT;
-  if (options.stateRoot) {
-    process.env.HYDRA_STATE_ROOT = options.stateRoot;
-  }
+  const restoreStateRoot = (): void => {
+    if (!options.stateRoot) return;
+    if (originalStateRoot === undefined) {
+      delete process.env.HYDRA_STATE_ROOT;
+    } else {
+      process.env.HYDRA_STATE_ROOT = originalStateRoot;
+    }
+  };
 
-  try {
+  const isPromiseLike = <T>(value: T | PromiseLike<T>): value is PromiseLike<T> =>
+    typeof (value as PromiseLike<T>)?.then === 'function';
+
+  const runIntegration = (): string | Promise<string> => {
+    if (!runId) {
+      fail('usage: integrate.ts <run_id> <task_id_in_order>...');
+    }
+    if (!taskIds || taskIds.length === 0) {
+      fail('no tasks to integrate');
+    }
+
+    const repoRootPath = options.cwd ?? repoRoot();
+    const worktreeRootPath = options.worktreeRoot ?? worktreeRoot();
+    const execFn: ExecFunction = options.exec ?? defaultExec;
+    const verifyFn: VerifyFunction = options.verify ?? defaultVerify();
+
     const rDir = runDir(runId);
     const runYaml = join(rDir, 'run.yaml');
     const baseCommit = yamlScalar(runYaml, 'base_commit');
@@ -167,7 +172,50 @@ export function integrate(
       intBranch,
     );
 
-    for (const taskId of taskIds) {
+    const finishCombinedVerification = (passed: boolean): string => {
+      if (!passed) {
+        ledgerAppend(runId, 'combined_verification', 'status', 'failed');
+        warn(
+          'COMBINED VERIFICATION FAILED — candidates individually clean, jointly broken',
+        );
+        warn(
+          'this is the gate catching a semantic conflict; NOT proposing for merge',
+        );
+        throw new IntegrationError('combined verification failed', 7);
+      }
+
+      const head = git(execFn, intWorktree, ['rev-parse', 'HEAD']);
+      ledgerAppend(
+        runId,
+        'combined_verification',
+        'status',
+        'passed',
+        'head',
+        head,
+      );
+      log(`combined verification PASSED at ${head} (branch ${intBranch})`);
+      process.stdout.write(`${head}\n`);
+      return head;
+    };
+
+    const verifyCombined = (): string | Promise<string> => {
+      const combinedOut = join(
+        rDir,
+        'authoritative',
+        'verification',
+        'combined.json',
+      );
+      const result = verifyFn(intWorktree, verifyPolicy, combinedOut) as
+        | boolean
+        | Promise<boolean>;
+      return isPromiseLike(result)
+        ? Promise.resolve(result).then(finishCombinedVerification)
+        : finishCombinedVerification(result);
+    };
+
+    const integrateTask = (index: number): string | Promise<string> => {
+      if (index >= taskIds.length) return verifyCombined();
+      const taskId = taskIds[index];
       const recordPath = join(
         rDir,
         'authoritative',
@@ -221,72 +269,66 @@ export function integrate(
         );
       }
 
-      if (!verifyFn(intWorktree, smokePolicy)) {
-        const afterFail = git(execFn, intWorktree, ['rev-parse', 'HEAD']);
+      const finishCandidateVerification = (
+        passed: boolean,
+      ): string | Promise<string> => {
+        if (!passed) {
+          const afterFail = git(execFn, intWorktree, ['rev-parse', 'HEAD']);
+          ledgerAppend(
+            runId,
+            'integration_candidate_verify_failed',
+            'task_id',
+            taskId,
+            'head',
+            afterFail,
+          );
+          warn(`per-candidate verification failed for ${taskId}`);
+          throw new IntegrationError(
+            `per-candidate verification failed for ${taskId}`,
+            7,
+          );
+        }
+
+        const after = git(execFn, intWorktree, ['rev-parse', 'HEAD']);
         ledgerAppend(
           runId,
-          'integration_candidate_verify_failed',
+          'candidate_integrated',
           'task_id',
           taskId,
           'head',
-          afterFail,
+          after,
         );
-        warn(`per-candidate verification failed for ${taskId}`);
-        throw new IntegrationError(
-          `per-candidate verification failed for ${taskId}`,
-          7,
-        );
-      }
+        log(`integrated ${taskId}: ${before} -> ${after}`);
+        return integrateTask(index + 1);
+      };
 
-      const after = git(execFn, intWorktree, ['rev-parse', 'HEAD']);
-      ledgerAppend(
-        runId,
-        'candidate_integrated',
-        'task_id',
-        taskId,
-        'head',
-        after,
-      );
-      log(`integrated ${taskId}: ${before} -> ${after}`);
-    }
+      const result = verifyFn(intWorktree, smokePolicy) as
+        | boolean
+        | Promise<boolean>;
+      return isPromiseLike(result)
+        ? Promise.resolve(result).then(finishCandidateVerification)
+        : finishCandidateVerification(result);
+    };
 
-    const combinedOut = join(
-      rDir,
-      'authoritative',
-      'verification',
-      'combined.json',
-    );
-    if (!verifyFn(intWorktree, verifyPolicy, combinedOut)) {
-      ledgerAppend(runId, 'combined_verification', 'status', 'failed');
-      warn(
-        'COMBINED VERIFICATION FAILED — candidates individually clean, jointly broken',
-      );
-      warn(
-        'this is the gate catching a semantic conflict; NOT proposing for merge',
-      );
-      throw new IntegrationError('combined verification failed', 7);
-    }
+    return integrateTask(0);
+  };
 
-    const head = git(execFn, intWorktree, ['rev-parse', 'HEAD']);
-    ledgerAppend(
-      runId,
-      'combined_verification',
-      'status',
-      'passed',
-      'head',
-      head,
-    );
-    log(`combined verification PASSED at ${head} (branch ${intBranch})`);
-    process.stdout.write(`${head}\n`);
-    return head;
-  } finally {
-    if (options.stateRoot) {
-      if (originalStateRoot === undefined) {
-        delete process.env.HYDRA_STATE_ROOT;
-      } else {
-        process.env.HYDRA_STATE_ROOT = originalStateRoot;
-      }
+  if (options.stateRoot) {
+    process.env.HYDRA_STATE_ROOT = options.stateRoot;
+  }
+
+  try {
+    const result = runIntegration();
+    if (isPromiseLike(result)) {
+      return Promise.resolve(result).finally(restoreStateRoot);
     }
+    restoreStateRoot();
+    // Runtime compatibility for legacy synchronous test doubles. The typed
+    // VerifyFunction and the default native verifier are promise-based.
+    return result as unknown as Promise<string>;
+  } catch (error) {
+    restoreStateRoot();
+    return Promise.reject(error);
   }
 }
 
@@ -294,9 +336,9 @@ export default {
   integrate,
 };
 
-export function main(args: string[] = process.argv.slice(2)): number {
+export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
   try {
-    integrate(args[0] ?? '', args.slice(1));
+    await integrate(args[0] ?? '', args.slice(1));
     return 0;
   } catch (error) {
     const exitCode = error instanceof IntegrationError ? error.exitCode : 1;
@@ -314,5 +356,5 @@ const isMain = process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {
-  process.exitCode = main();
+  process.exitCode = await main();
 }

@@ -8,7 +8,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   integrate,
   IntegrationError,
@@ -190,7 +190,7 @@ function makeVerify(results: {
   combined: boolean;
 }): { fn: VerifyFunction; calls: Array<{ worktree: string; policy: string; out?: string }> } {
   const calls: Array<{ worktree: string; policy: string; out?: string }> = [];
-  const fn: VerifyFunction = (worktree: string, policy: string, out?: string) => {
+  const fn: VerifyFunction = async (worktree: string, policy: string, out?: string) => {
     calls.push({ worktree, policy, out });
     return out ? results.combined : results.smoke;
   };
@@ -214,24 +214,6 @@ function hasExitCode(error: unknown, exitCode: number, message: RegExp): boolean
     && message.test(error.message);
 }
 
-function pathWithMapfileBash(): string {
-  const candidates = [
-    '/opt/homebrew/bin/bash',
-    '/usr/local/bin/bash',
-    '/bin/bash',
-  ];
-  for (const candidate of candidates) {
-    if (!existsSync(candidate)) continue;
-    const probe = spawnSync(candidate, ['-c', 'type mapfile'], {
-      stdio: 'ignore',
-    });
-    if (probe.status === 0) {
-      return `${dirname(candidate)}:${process.env.PATH ?? ''}`;
-    }
-  }
-  throw new Error('verify.sh tests require Bash with mapfile support');
-}
-
 describe('integrate', { concurrency: 1 }, () => {
   before(() => {
     cleanTmp();
@@ -244,39 +226,39 @@ describe('integrate', { concurrency: 1 }, () => {
     restoreEnv();
   });
 
-  it('throws when runId is empty', () => {
-    assert.throws(
+  it('throws when runId is empty', async () => {
+    await assert.rejects(
       () => integrate('', ['a']),
       (error: unknown) => hasExitCode(error, 1, /usage: integrate/),
     );
   });
 
-  it('throws when no tasks are given', () => {
-    assert.throws(
+  it('throws when no tasks are given', async () => {
+    await assert.rejects(
       () => integrate('0018', []),
       (error: unknown) => hasExitCode(error, 1, /no tasks to integrate/),
     );
   });
 
-  it('throws when run.yaml is missing base_commit', () => {
+  it('throws when run.yaml is missing base_commit', async () => {
     const fixture = initRepoWithTasks('no-base', []);
     const f = setupState(fixture, 'no-base', []);
     const rDir = join(f.stateRoot, 'runs', `run-${f.runId}`);
     writeFileSync(join(rDir, 'run.yaml'), 'run_id: no-base\n', 'utf8');
 
-    assert.throws(
+    await assert.rejects(
       () =>
         integrate('no-base', ['a'], {
           cwd: fixture.repoPath,
           stateRoot: f.stateRoot,
           worktreeRoot: f.worktreeRoot,
-          verify: () => true,
+          verify: async () => true,
         }),
       (error: unknown) => hasExitCode(error, 1, /base_commit not recorded/),
     );
   });
 
-  it('throws when integration worktree already exists', () => {
+  it('throws when integration worktree already exists', async () => {
     const fixture = initRepoWithTasks('existing-wt', [
       { id: 'a', files: { 'a.txt': 'a\n' } },
     ]);
@@ -285,20 +267,20 @@ describe('integrate', { concurrency: 1 }, () => {
       recursive: true,
     });
 
-    assert.throws(
+    await assert.rejects(
       () =>
         integrate('existing-wt', ['a'], {
           cwd: fixture.repoPath,
           stateRoot: f.stateRoot,
           worktreeRoot: f.worktreeRoot,
-          verify: () => true,
+          verify: async () => true,
         }),
       (error: unknown) =>
         hasExitCode(error, 1, /integration worktree already exists/),
     );
   });
 
-  it('reports a bare structured error when worktree add fails', () => {
+  it('reports a bare structured error when worktree add fails', async () => {
     const fixture = initRepoWithTasks('worktree-add-fail', [
       { id: 'alpha', files: { 'alpha.txt': 'alpha\n' } },
     ]);
@@ -309,14 +291,14 @@ describe('integrate', { concurrency: 1 }, () => {
       throw new Error('git diagnostic that Bash suppresses');
     };
 
-    assert.throws(
+    await assert.rejects(
       () =>
         integrate(f.runId, ['alpha'], {
           cwd: fixture.repoPath,
           stateRoot: f.stateRoot,
           worktreeRoot: f.worktreeRoot,
           exec: failingExec,
-          verify: () => true,
+          verify: async () => true,
         }),
       (error: unknown) =>
         error instanceof IntegrationError
@@ -325,7 +307,7 @@ describe('integrate', { concurrency: 1 }, () => {
     );
   });
 
-  it('integrates candidates serially and returns the final HEAD', () => {
+  it('integrates candidates serially and returns the final HEAD', async () => {
     const fixture = initRepoWithTasks('happy', [
       { id: 'alpha', files: { 'alpha.txt': 'alpha\n' } },
       { id: 'beta', files: { 'beta.txt': 'beta\n' } },
@@ -333,7 +315,7 @@ describe('integrate', { concurrency: 1 }, () => {
     const f = setupState(fixture, 'happy', ['alpha', 'beta']);
     const verify = makeVerify({ smoke: true, combined: true });
 
-    const head = integrate('happy', ['alpha', 'beta'], {
+    const head = await integrate('happy', ['alpha', 'beta'], {
       cwd: fixture.repoPath,
       stateRoot: f.stateRoot,
       worktreeRoot: f.worktreeRoot,
@@ -379,7 +361,7 @@ describe('integrate', { concurrency: 1 }, () => {
     );
   });
 
-  it('uses non-empty verify and smoke policy overrides', () => {
+  it('uses non-empty verify and smoke policy overrides', async () => {
     const fixture = initRepoWithTasks('policy-overrides', [
       { id: 'alpha', files: { 'alpha.txt': 'alpha\n' } },
     ]);
@@ -389,7 +371,7 @@ describe('integrate', { concurrency: 1 }, () => {
     process.env.HYDRA_VERIFY_POLICY = '/policy/full.yaml';
     process.env.HYDRA_SMOKE_POLICY = '/policy/smoke.yaml';
     try {
-      integrate(f.runId, ['alpha'], {
+      await integrate(f.runId, ['alpha'], {
         cwd: fixture.repoPath,
         stateRoot: f.stateRoot,
         worktreeRoot: f.worktreeRoot,
@@ -404,7 +386,7 @@ describe('integrate', { concurrency: 1 }, () => {
     assert.equal(verify.calls[1].policy, '/policy/full.yaml');
   });
 
-  it('treats empty policy overrides as unset, matching Bash :- expansion', () => {
+  it('treats empty policy overrides as unset, matching Bash :- expansion', async () => {
     const fixture = initRepoWithTasks('empty-policy-overrides', [
       { id: 'alpha', files: { 'alpha.txt': 'alpha\n' } },
     ]);
@@ -414,7 +396,7 @@ describe('integrate', { concurrency: 1 }, () => {
     process.env.HYDRA_VERIFY_POLICY = '';
     process.env.HYDRA_SMOKE_POLICY = '';
     try {
-      integrate(f.runId, ['alpha'], {
+      await integrate(f.runId, ['alpha'], {
         cwd: fixture.repoPath,
         stateRoot: f.stateRoot,
         worktreeRoot: f.worktreeRoot,
@@ -435,7 +417,7 @@ describe('integrate', { concurrency: 1 }, () => {
     assert.equal(verify.calls[1].policy, defaultPolicy);
   });
 
-  it('invokes the real verify.sh for smoke and combined verification', () => {
+  it('invokes the native TS verify for smoke and combined verification', async () => {
     const fixture = initRepoWithTasks('real-verify', [
       { id: 'alpha', files: { 'alpha.txt': 'alpha\n' } },
     ]);
@@ -455,10 +437,8 @@ describe('integrate', { concurrency: 1 }, () => {
 
     process.env.HYDRA_VERIFY_POLICY = policy;
     process.env.HYDRA_SMOKE_POLICY = policy;
-    const originalPath = process.env.PATH;
-    process.env.PATH = pathWithMapfileBash();
     try {
-      integrate(f.runId, ['alpha'], {
+      await integrate(f.runId, ['alpha'], {
         cwd: fixture.repoPath,
         stateRoot: f.stateRoot,
         worktreeRoot: f.worktreeRoot,
@@ -466,11 +446,6 @@ describe('integrate', { concurrency: 1 }, () => {
     } finally {
       delete process.env.HYDRA_VERIFY_POLICY;
       delete process.env.HYDRA_SMOKE_POLICY;
-      if (originalPath === undefined) {
-        delete process.env.PATH;
-      } else {
-        process.env.PATH = originalPath;
-      }
     }
 
     const combined = JSON.parse(
@@ -491,7 +466,7 @@ describe('integrate', { concurrency: 1 }, () => {
     ]);
   });
 
-  it('stops on textual conflict with exit code 6', () => {
+  it('stops on textual conflict with exit code 6', async () => {
     const fixture = initRepoWithTasks('conflict', [
       { id: 'first', files: { 'shared.txt': 'first\n' } },
       { id: 'second', files: { 'shared.txt': 'second\n' } },
@@ -499,7 +474,7 @@ describe('integrate', { concurrency: 1 }, () => {
     const f = setupState(fixture, 'conflict', ['first', 'second']);
     const verify = makeVerify({ smoke: true, combined: true });
 
-    assert.throws(
+    await assert.rejects(
       () =>
         integrate('conflict', ['first', 'second'], {
           cwd: fixture.repoPath,
@@ -525,7 +500,7 @@ describe('integrate', { concurrency: 1 }, () => {
     assert.equal(verify.calls.length, 1); // smoke for first only
   });
 
-  it('maps a textual conflict to process exit code 6 from the CLI', () => {
+  it('maps a textual conflict to process exit code 6 from the CLI', async () => {
     const fixture = initRepoWithTasks('cli-conflict', [
       { id: 'first', files: { 'shared.txt': 'first\n' } },
       { id: 'second', files: { 'shared.txt': 'second\n' } },
@@ -556,7 +531,6 @@ describe('integrate', { concurrency: 1 }, () => {
           HYDRA_WORKTREE_ROOT: f.worktreeRoot,
           HYDRA_VERIFY_POLICY: policy,
           HYDRA_SMOKE_POLICY: policy,
-          PATH: pathWithMapfileBash(),
         },
       },
     );
@@ -565,14 +539,14 @@ describe('integrate', { concurrency: 1 }, () => {
     assert.match(result.stderr, /TEXTUAL CONFLICT integrating second/);
   });
 
-  it('fails with exit code 7 when per-candidate smoke fails', () => {
+  it('fails with exit code 7 when per-candidate smoke fails', async () => {
     const fixture = initRepoWithTasks('smoke-fail', [
       { id: 'alpha', files: { 'alpha.txt': 'alpha\n' } },
     ]);
     const f = setupState(fixture, 'smoke-fail', ['alpha']);
     const verify = makeVerify({ smoke: false, combined: true });
 
-    assert.throws(
+    await assert.rejects(
       () =>
         integrate('smoke-fail', ['alpha'], {
           cwd: fixture.repoPath,
@@ -598,7 +572,7 @@ describe('integrate', { concurrency: 1 }, () => {
     );
   });
 
-  it('fails with exit code 7 when combined verification fails', () => {
+  it('fails with exit code 7 when combined verification fails', async () => {
     const fixture = initRepoWithTasks('combined-fail', [
       { id: 'alpha', files: { 'alpha.txt': 'alpha\n' } },
       { id: 'beta', files: { 'beta.txt': 'beta\n' } },
@@ -606,7 +580,7 @@ describe('integrate', { concurrency: 1 }, () => {
     const f = setupState(fixture, 'combined-fail', ['alpha', 'beta']);
     const verify = makeVerify({ smoke: true, combined: false });
 
-    assert.throws(
+    await assert.rejects(
       () =>
         integrate('combined-fail', ['alpha', 'beta'], {
           cwd: fixture.repoPath,
@@ -628,57 +602,57 @@ describe('integrate', { concurrency: 1 }, () => {
     );
   });
 
-  it('throws when a squash record is missing', () => {
+  it('throws when a squash record is missing', async () => {
     const fixture = initRepoWithTasks('missing-record', [
       { id: 'alpha', files: { 'alpha.txt': 'alpha\n' } },
     ]);
     const f = setupState(fixture, 'missing-record', []);
 
-    assert.throws(
+    await assert.rejects(
       () =>
         integrate('missing-record', ['alpha'], {
           cwd: fixture.repoPath,
           stateRoot: f.stateRoot,
           worktreeRoot: f.worktreeRoot,
-          verify: () => true,
+          verify: async () => true,
         }),
       (error: unknown) => hasExitCode(error, 1, /no squash record for alpha/),
     );
   });
 
-  it('reports malformed squash JSON with jq-compatible exit code 5', () => {
+  it('reports malformed squash JSON with jq-compatible exit code 5', async () => {
     const fixture = initRepoWithTasks('invalid-record', [
       { id: 'alpha', files: { 'alpha.txt': 'alpha\n' } },
     ]);
     const f = setupState(fixture, 'invalid-record', ['alpha']);
     writeFileSync(squashRecordPath(f, 'alpha'), '{not json\n', 'utf8');
 
-    assert.throws(
+    await assert.rejects(
       () =>
         integrate(f.runId, ['alpha'], {
           cwd: fixture.repoPath,
           stateRoot: f.stateRoot,
           worktreeRoot: f.worktreeRoot,
-          verify: () => true,
+          verify: async () => true,
         }),
       (error: unknown) => hasExitCode(error, 5, /malformed JSON/),
     );
   });
 
-  it('treats a missing integration_commit key like jq output null', () => {
+  it('treats a missing integration_commit key like jq output null', async () => {
     const fixture = initRepoWithTasks('missing-commit-key', [
       { id: 'alpha', files: { 'alpha.txt': 'alpha\n' } },
     ]);
     const f = setupState(fixture, 'missing-commit-key', ['alpha']);
     writeFileSync(squashRecordPath(f, 'alpha'), '{}\n', 'utf8');
 
-    assert.throws(
+    await assert.rejects(
       () =>
         integrate(f.runId, ['alpha'], {
           cwd: fixture.repoPath,
           stateRoot: f.stateRoot,
           worktreeRoot: f.worktreeRoot,
-          verify: () => true,
+          verify: async () => true,
         }),
       (error: unknown) => hasExitCode(error, 6, /textual conflict/),
     );
