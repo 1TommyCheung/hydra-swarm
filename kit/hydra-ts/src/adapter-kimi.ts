@@ -2,7 +2,6 @@ import { execFileSync, spawn, type ChildProcess, type SpawnOptionsWithoutStdio }
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -31,7 +30,11 @@ export type SpawnLike = (
 
 export type CommandExists = (command: string) => boolean;
 
-export type SandboxProfileFactory = (roots: string[]) => string;
+export type SrtSettingsFactory = (
+  settingsPath: string,
+  roots: string[],
+  allowedDomains: string[],
+) => string;
 
 export interface KimiAdapterOptions {
   /** Working directory used to resolve relative paths (tests). */
@@ -44,8 +47,10 @@ export interface KimiAdapterOptions {
   spawn?: SpawnLike;
   /** Injected command lookup so tests never probe real vendor/tool CLIs. */
   commandExists?: CommandExists;
-  /** Injected profile factory for exercising the hard refusal gate. */
-  makeSandboxProfile?: SandboxProfileFactory;
+  /** Override the production baseline-domain file (tests). */
+  sandboxDomainsPath?: string;
+  /** Injected settings factory for exercising the hard refusal gate. */
+  makeSrtSettings?: SrtSettingsFactory;
 }
 
 function defaultCommandExists(command: string): boolean {
@@ -149,47 +154,93 @@ harness will verify):
 }
 
 // ---------------------------------------------------------------------------
-// Sandbox profile generation.
+// srt settings generation.
 // ---------------------------------------------------------------------------
 
-/**
- * Build an SBPL profile that allows all-but-file-writes, then permits writes only
- * under the given roots. Returns the profile path.
- */
-export function makeSandboxProfile(
-  roots: string[],
-  _options: Pick<KimiAdapterOptions, 'exec'> = {},
-): string {
-  const tmpdir = (process.env.TMPDIR ?? '/tmp').replace(/\/$/, '');
-  const profDir = mkdtempSync(join(tmpdir, 'hydra-kimi-sb-'));
-  const prof = join(profDir, 'profile.sb');
+export interface SrtSettings {
+  network: {
+    allowedDomains: string[];
+    deniedDomains: string[];
+  };
+  filesystem: {
+    allowWrite: string[];
+    denyWrite: string[];
+    denyRead: string[];
+  };
+}
 
-  const lines: string[] = [
-    '(version 1)',
-    '(allow default)',
-    '(deny file-write*)',
-    // Device nodes are NOT the threat model — the lane is. A blanket
-    // file-write deny also blocks /dev/null, which bash and git open for
-    // read/write on almost every command.
-    '(allow file-write* (subpath "/dev"))',
-  ];
+/**
+ * Write an srt settings file that permits network access only to the merged
+ * domain allowlist and writes only beneath the supplied roots.
+ */
+export function makeSrtSettings(
+  settingsPath: string,
+  roots: string[],
+  allowedDomains: string[],
+): string {
+  const allowWrite: string[] = [];
 
   // The herdr status hook connects to herdr's unix socket to report
   // working/idle/blocked. Without this the pane shows a stale "idle".
   const herdrSocketDir = process.env.HERDR_SOCKET_DIR;
   if (herdrSocketDir) {
-    lines.push(`(allow file-write* (subpath "${herdrSocketDir}"))`);
+    allowWrite.push(herdrSocketDir);
   } else if (existsSync(join(process.env.HOME ?? '', '.config/herdr'))) {
-    lines.push(`(allow file-write* (subpath "${process.env.HOME}/.config/herdr"))`);
+    allowWrite.push(`${process.env.HOME}/.config/herdr`);
   }
 
   for (const root of roots) {
     if (!root) continue;
-    lines.push(`(allow file-write* (subpath "${root}"))`);
+    if (!allowWrite.includes(root)) allowWrite.push(root);
   }
 
-  writeFileSync(prof, `${lines.join('\n')}\n`);
-  return prof;
+  const settings: SrtSettings = {
+    network: { allowedDomains: [...new Set(allowedDomains)], deniedDomains: [] },
+    filesystem: { allowWrite, denyWrite: [], denyRead: [] },
+  };
+  writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+  return settingsPath;
+}
+
+function validStringArray(value: unknown, requireNonEmpty = false): value is string[] {
+  return Array.isArray(value)
+    && (!requireNonEmpty || value.length > 0)
+    && value.every((item) => typeof item === 'string' && item.length > 0);
+}
+
+function isValidAllowedDomain(value: string): boolean {
+  if (value.includes('://') || value.includes('/') || value.includes(':')) return false;
+  if (value === 'localhost') return true;
+  if (value.startsWith('*.')) {
+    const domain = value.slice(2);
+    const parts = domain.split('.');
+    return domain.includes('.')
+      && !domain.startsWith('.')
+      && !domain.endsWith('.')
+      && parts.length >= 2
+      && parts.every((part) => part.length > 0);
+  }
+  if (value.includes('*')) return false;
+  return value.includes('.') && !value.startsWith('.') && !value.endsWith('.');
+}
+
+function isValidSrtSettings(value: unknown): value is SrtSettings {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (typeof record.network !== 'object' || record.network === null) return false;
+  if (typeof record.filesystem !== 'object' || record.filesystem === null) return false;
+  const network = record.network as Record<string, unknown>;
+  const filesystem = record.filesystem as Record<string, unknown>;
+  return validStringArray(network.allowedDomains, true)
+    && network.allowedDomains.every(isValidAllowedDomain)
+    && validStringArray(network.deniedDomains)
+    && validStringArray(filesystem.allowWrite, true)
+    && validStringArray(filesystem.denyWrite)
+    && validStringArray(filesystem.denyRead);
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 // ---------------------------------------------------------------------------
@@ -407,7 +458,7 @@ export async function kimiVisual(
 }
 
 /**
- * Sandboxed write role. Confines kimi with sandbox-exec to the worktree,
+ * Sandboxed write role. Confines kimi with srt to the worktree,
  * git-common-dir, and a handful of system paths, then bridges the worker's
  * in-worktree result into the inbox.
  *
@@ -423,8 +474,8 @@ export async function kimiStart(
 ): Promise<string> {
   const commandExists = options.commandExists ?? defaultCommandExists;
   requireKimi(commandExists);
-  if (!commandExists('sandbox-exec')) {
-    die('no OS sandbox (sandbox-exec) — refusing Kimi write role (auto-approves tools)');
+  if (!commandExists('srt')) {
+    die('no OS sandbox (srt) — refusing Kimi write role (auto-approves tools)');
   }
 
   if (!taskSpec || !worktree || !inbox || !sessions || !agentRunId) {
@@ -447,39 +498,57 @@ export async function kimiStart(
 
   const prompt = buildWorkerPrompt(taskSpec, { exec });
 
-  // Physical paths so sandbox-exec subpath matching works (/var -> /private/var).
+  // Physical paths so srt allowWrite matching works (/var -> /private/var).
   const wtAbs = realpathSync(worktreeAbs);
   const gitCommonRaw = exec('git', ['-C', worktreeAbs, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
     encoding: 'utf8',
   }).trim();
   const gitCommon = realpathSync(gitCommonRaw);
 
-  const profileFactory = options.makeSandboxProfile ?? makeSandboxProfile;
-  let prof = '';
+  const baselinePath = options.sandboxDomainsPath
+    ?? join(process.env.HOME ?? '', '.local/state/hydra/kimi-sandbox-domains.json');
+  let baselineDomains: unknown;
   try {
-    prof = profileFactory([
+    baselineDomains = (JSON.parse(readFileSync(baselinePath, 'utf8')) as Record<string, unknown>)
+      .allowedDomains;
+  } catch {
+    baselineDomains = undefined;
+  }
+  const taskDomains = yamlList(taskSpec, 'network_domains');
+  const allowedDomains = validStringArray(baselineDomains, true)
+    ? [...new Set([...baselineDomains, ...taskDomains])]
+    : [];
+
+  const settingsPath = join(sessionsAbs, `${agentRunId}.srt-settings.json`);
+  const settingsFactory = options.makeSrtSettings ?? makeSrtSettings;
+  let generatedSettingsPath = '';
+  try {
+    generatedSettingsPath = settingsFactory(settingsPath, [
       wtAbs,
       gitCommon,
       process.env.TMPDIR ?? '/tmp',
       '/private/tmp',
       `${process.env.HOME ?? ''}/.kimi-code`,
-    ]);
+    ], allowedDomains);
   } catch {
-    prof = '';
+    generatedSettingsPath = '';
   }
 
-  // HARD GUARD: never invoke an auto-approving agent without a real profile.
-  let profileReady = false;
+  // HARD GUARD: never invoke an auto-approving agent without valid settings.
+  let settingsReady = false;
   try {
-    profileReady = prof !== '' && existsSync(prof) && readFileSync(prof).length > 0;
+    settingsReady = generatedSettingsPath === settingsPath
+      && existsSync(settingsPath)
+      && readFileSync(settingsPath).length > 0
+      && isValidSrtSettings(JSON.parse(readFileSync(settingsPath, 'utf8')));
   } catch {
-    profileReady = false;
+    settingsReady = false;
   }
-  if (!profileReady) {
-    die('failed to build sandbox profile — refusing to run Kimi (auto-approves tools) unsandboxed');
+  if (!settingsReady) {
+    die('failed to build valid srt settings — refusing to run Kimi (auto-approves tools) unsandboxed');
   }
 
-  log('kimi write role under sandbox-exec (writes confined to worktree + git-common-dir)');
+  log('kimi write role under srt (writes confined to worktree + git-common-dir)');
 
   // `kimi -p` (print mode) ALREADY auto-approves tools — that is exactly why the
   // OS sandbox is mandatory. stdout is parsed for the structured result; stderr
@@ -487,7 +556,16 @@ export async function kimiStart(
   const cliJsonl = join(sessionsAbs, `${agentRunId}.cli.jsonl`);
   const stderrPath = join(sessionsAbs, `${agentRunId}.stderr`);
 
-  await runStreaming('sandbox-exec', ['-f', prof, 'kimi', '-p', prompt, '--output-format', 'stream-json', '--add-dir', worktree], {
+  const kimiCommand = [
+    'kimi',
+    '-p',
+    prompt,
+    '--output-format',
+    'stream-json',
+    '--add-dir',
+    worktree,
+  ].map(shellQuote).join(' ');
+  await runStreaming('srt', ['-s', settingsPath, '-c', kimiCommand], {
     cwd: wtAbs,
     stdoutPath: cliJsonl,
     stderrPath,
@@ -495,13 +573,10 @@ export async function kimiStart(
     spawn: spawnFn,
   });
 
-  // Clean up the profile now that the sandbox has consumed it.
+  // The sessions directory is ephemeral, but remove settings after consumption
+  // so domain and filesystem policy do not linger longer than the worker run.
   try {
-    if (profileFactory === makeSandboxProfile) {
-      rmSync(dirname(prof), { recursive: true, force: true });
-    } else {
-      rmSync(prof, { force: true });
-    }
+    rmSync(settingsPath, { force: true });
   } catch {
     // Best-effort cleanup.
   }
@@ -567,7 +642,7 @@ export async function kimiStart(
 // Backwards-compatible default export for consumers that import the module.
 export default {
   buildWorkerPrompt,
-  makeSandboxProfile,
+  makeSrtSettings,
   kimiVisual,
   kimiStart,
 };

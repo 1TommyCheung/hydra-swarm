@@ -17,7 +17,7 @@ import {
   buildWorkerPrompt,
   kimiStart,
   kimiVisual,
-  makeSandboxProfile,
+  makeSrtSettings,
 } from '../src/adapter-kimi.ts';
 
 const TEST_TMP = join(import.meta.dirname, 'tmp-adapter-kimi');
@@ -81,6 +81,14 @@ function writeTaskSpec(
   });
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${lines.join('\n')}\n`, 'utf8');
+}
+
+function writeBaselineDomains(dir: string): string {
+  const path = join(dir, 'kimi-sandbox-domains.json');
+  writeFileSync(path, JSON.stringify({
+    allowedDomains: ['api.kimi.com', 'api.moonshot.ai', 'api.moonshot.cn'],
+  }), 'utf8');
+  return path;
 }
 
 interface SpawnRecording {
@@ -148,7 +156,7 @@ function adapterExec(
 }
 
 function commandLookup(
-  available: string[] = ['kimi', 'sandbox-exec'],
+  available: string[] = ['kimi', 'srt'],
   calls: string[] = [],
 ): (command: string) => boolean {
   return (command) => {
@@ -202,21 +210,24 @@ describe('buildWorkerPrompt', () => {
   });
 });
 
-describe('makeSandboxProfile', () => {
-  it('writes an SBPL profile allowing writes only under the supplied roots', () => {
-    const dir = makeTempDir('profile');
-    const profilePath = makeSandboxProfile([dir, '/tmp/foo']);
+describe('makeSrtSettings', () => {
+  it('writes valid srt settings with network and write allowlists', () => {
+    const dir = makeTempDir('settings');
+    const settingsPath = join(dir, 'agent.srt-settings.json');
+    const result = makeSrtSettings(
+      settingsPath,
+      [dir, '/tmp/foo'],
+      ['api.kimi.com', 'registry.npmjs.org', 'api.kimi.com'],
+    );
 
-    assert.ok(existsSync(profilePath));
-    const content = readFileSync(profilePath, 'utf8');
-    assert.match(content, /\(version 1\)/);
-    assert.match(content, /\(allow default\)/);
-    assert.match(content, /\(deny file-write\*\)/);
-    assert.match(content, /\(allow file-write\* \(subpath "\/dev"\)\)/);
-    assert.match(content, new RegExp(`\\(allow file-write\\* \\(subpath "${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"\\)\\)`));
-    assert.ok(content.includes('(allow file-write* (subpath "/tmp/foo"))'));
-
-    rmSync(dirname(profilePath), { recursive: true, force: true });
+    assert.equal(result, settingsPath);
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+    assert.deepEqual(settings.network.allowedDomains, ['api.kimi.com', 'registry.npmjs.org']);
+    assert.deepEqual(settings.network.deniedDomains, []);
+    assert.ok(settings.filesystem.allowWrite.includes(dir));
+    assert.ok(settings.filesystem.allowWrite.includes('/tmp/foo'));
+    assert.deepEqual(settings.filesystem.denyWrite, []);
+    assert.deepEqual(settings.filesystem.denyRead, []);
   });
 });
 
@@ -343,7 +354,10 @@ describe('kimiStart', () => {
     });
 
     const taskSpec = join(dir, 'task.yaml');
-    writeTaskSpec(taskSpec, { base_commit: baseCommit });
+    writeTaskSpec(taskSpec, {
+      base_commit: baseCommit,
+      network_domains: ['registry.npmjs.org', 'api.kimi.com'],
+    });
     const inbox = join(dir, 'inbox');
     const sessions = join(dir, 'sessions');
     const agentRunId = 'agent-0019';
@@ -370,14 +384,17 @@ describe('kimiStart', () => {
       JSON.stringify({ session_id: 'sess-write-1' }),
     ];
     const recording: SpawnRecording = {};
-    let profileAtSpawn = '';
+    let settingsAtSpawn: {
+      network: { allowedDomains: string[]; deniedDomains: string[] };
+      filesystem: { allowWrite: string[]; denyWrite: string[]; denyRead: string[] };
+    } | undefined;
     const spawn = fakeSpawn(recording, {
       stdout: stdoutLines.join('\n') + '\n',
       stderr: 'live progress',
       onSpawn: (_command, args) => {
         assert.equal(existsSync(join(worktree, '.hydra-result.json')), false);
-        const profilePath = args[args.indexOf('-f') + 1];
-        profileAtSpawn = readFileSync(profilePath, 'utf8');
+        const settingsPath = args[args.indexOf('-s') + 1];
+        settingsAtSpawn = JSON.parse(readFileSync(settingsPath, 'utf8'));
         // The Bash adapter removes stale results before invoking Kimi. Model the
         // worker creating its fresh result while the injected CLI is running.
         writeFileSync(join(worktree, '.hydra-result.json'), JSON.stringify(workerResult), 'utf8');
@@ -391,20 +408,37 @@ describe('kimiStart', () => {
         spawn,
         exec,
         commandExists: commandLookup(),
+        sandboxDomainsPath: writeBaselineDomains(dir),
       });
       assert.equal(result, agentRunId);
     });
 
-    assert.equal(recording.command, 'sandbox-exec');
-    assert.ok(recording.args?.includes('-f'));
-    const profilePath = recording.args?.[recording.args.indexOf('-f') + 1];
-    assert.ok(profilePath && !existsSync(profilePath));
-    assert.match(profileAtSpawn, /\(deny file-write\*\)/);
-    assert.match(profileAtSpawn, new RegExp(worktree.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-    assert.ok(recording.args?.includes('kimi'));
-    assert.ok(recording.args?.includes('--output-format'));
-    assert.ok(recording.args?.includes('stream-json'));
-    assert.ok(!recording.args?.includes('-y'));
+    assert.equal(recording.command, 'srt');
+    assert.ok(recording.args?.includes('-s'));
+    const settingsPath = recording.args?.[recording.args.indexOf('-s') + 1];
+    assert.equal(settingsPath, join(sessions, `${agentRunId}.srt-settings.json`));
+    assert.ok(settingsPath && !existsSync(settingsPath));
+    assert.deepEqual(settingsAtSpawn?.network.allowedDomains, [
+      'api.kimi.com',
+      'api.moonshot.ai',
+      'api.moonshot.cn',
+      'registry.npmjs.org',
+    ]);
+    assert.deepEqual(settingsAtSpawn?.network.deniedDomains, []);
+    assert.ok(settingsAtSpawn?.filesystem.allowWrite.includes(worktree));
+    assert.ok(settingsAtSpawn?.filesystem.allowWrite.includes(join(repoRoot, '.git')));
+    assert.ok(settingsAtSpawn?.filesystem.allowWrite.includes(process.env.TMPDIR ?? '/tmp'));
+    assert.ok(settingsAtSpawn?.filesystem.allowWrite.includes('/private/tmp'));
+    assert.ok(settingsAtSpawn?.filesystem.allowWrite.includes(`${process.env.HOME}/.kimi-code`));
+    assert.deepEqual(settingsAtSpawn?.filesystem.denyWrite, []);
+    assert.deepEqual(settingsAtSpawn?.filesystem.denyRead, []);
+    assert.ok(recording.args?.includes('-c'));
+    const commandString = recording.args?.[recording.args.indexOf('-c') + 1] ?? '';
+    assert.match(commandString, /^'kimi' '-p' /);
+    assert.match(commandString, /'--output-format' 'stream-json'/);
+    assert.match(commandString, /'--add-dir'/);
+    assert.ok(commandString.includes(`'${worktree}'`));
+    assert.ok(!commandString.includes("'-y'"));
     assert.ok(stderr.includes('live progress'));
 
     const sessionJson = JSON.parse(readFileSync(join(sessions, `${agentRunId}.json`), 'utf8'));
@@ -453,6 +487,7 @@ describe('kimiStart', () => {
       spawn,
       exec,
       commandExists: commandLookup(),
+      sandboxDomainsPath: writeBaselineDomains(dir),
     });
 
     const resultDrop = JSON.parse(readFileSync(join(inbox, 'result.json'), 'utf8'));
@@ -487,6 +522,7 @@ describe('kimiStart', () => {
       spawn,
       exec,
       commandExists: commandLookup(),
+      sandboxDomainsPath: writeBaselineDomains(dir),
     });
 
     const resultDrop = JSON.parse(readFileSync(join(inbox, 'result.json'), 'utf8'));
@@ -513,6 +549,7 @@ describe('kimiStart', () => {
     await kimiStart(taskSpec, worktree, inbox, join(dir, 'sessions'), 'agent-bad-result', {
       commandExists: commandLookup(),
       exec: adapterExec([]),
+      sandboxDomainsPath: writeBaselineDomains(dir),
       spawn: fakeSpawn({}, {
         onSpawn: () => writeFileSync(join(worktree, '.hydra-result.json'), '{broken', 'utf8'),
       }),
@@ -523,7 +560,7 @@ describe('kimiStart', () => {
     assert.deepEqual(resultDrop.risks, ['adapter synthesized a failed drop']);
   });
 
-  it('refuses the write role when sandbox-exec cannot be found without spawning it', async () => {
+  it('refuses the write role when srt cannot be found without spawning it', async () => {
     const dir = makeTempDir('start-no-sandbox');
     const taskSpec = join(dir, 'task.yaml');
     writeTaskSpec(taskSpec);
@@ -537,12 +574,12 @@ describe('kimiStart', () => {
       }),
       /no OS sandbox/,
     );
-    assert.deepEqual(lookups, ['kimi', 'sandbox-exec']);
+    assert.deepEqual(lookups, ['kimi', 'srt']);
     assert.equal(spawned, false);
   });
 
-  it('hard-refuses an empty sandbox profile before the auto-approving worker can spawn', async () => {
-    const dir = makeTempDir('start-empty-profile');
+  it('hard-refuses empty srt settings before the auto-approving worker can spawn', async () => {
+    const dir = makeTempDir('start-empty-settings');
     const repoRoot = join(dir, 'repo');
     initGitRepo(repoRoot);
     const baseCommit = commitFile(repoRoot, 'README.md', '# hi\n');
@@ -559,10 +596,44 @@ describe('kimiStart', () => {
       () => kimiStart(taskSpec, worktree, join(dir, 'inbox'), join(dir, 'sessions'), 'agent', {
         commandExists: commandLookup(),
         exec: adapterExec([]),
-        makeSandboxProfile: () => '',
+        sandboxDomainsPath: writeBaselineDomains(dir),
+        makeSrtSettings: () => '',
         spawn: fakeSpawn({}, { onSpawn: () => { spawned = true; } }),
       }),
-      /failed to build sandbox profile/,
+      /failed to build valid srt settings/,
+    );
+    assert.equal(spawned, false);
+  });
+
+  it('hard-refuses invalid srt settings before spawning', async () => {
+    const dir = makeTempDir('start-invalid-settings');
+    const repoRoot = join(dir, 'repo');
+    initGitRepo(repoRoot);
+    const baseCommit = commitFile(repoRoot, 'README.md', '# hi\n');
+    const worktree = join(dir, 'worktree');
+    execFileSync('git', ['-C', repoRoot, 'worktree', 'add', '--quiet', worktree, baseCommit], {
+      encoding: 'utf8',
+      stdio: 'ignore',
+    });
+    const taskSpec = join(dir, 'task.yaml');
+    writeTaskSpec(taskSpec, { base_commit: baseCommit });
+    let spawned = false;
+
+    await assert.rejects(
+      () => kimiStart(taskSpec, worktree, join(dir, 'inbox'), join(dir, 'sessions'), 'agent', {
+        commandExists: commandLookup(),
+        exec: adapterExec([]),
+        sandboxDomainsPath: writeBaselineDomains(dir),
+        makeSrtSettings: (settingsPath) => {
+          writeFileSync(settingsPath, JSON.stringify({
+            network: { allowedDomains: ['*'], deniedDomains: [] },
+            filesystem: { allowWrite: [worktree], denyWrite: [], denyRead: [] },
+          }), 'utf8');
+          return settingsPath;
+        },
+        spawn: fakeSpawn({}, { onSpawn: () => { spawned = true; } }),
+      }),
+      /failed to build valid srt settings/,
     );
     assert.equal(spawned, false);
   });

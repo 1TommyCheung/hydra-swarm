@@ -5,16 +5,13 @@
 # (screenshots, mockups, video repro) — its headline role is `visual_debugging`,
 # plus mobile/UI implementation and cheap contained loops. Print mode
 # AUTO-APPROVES tools (`-y`, no allowlist), so **Kimi never takes a write role
-# outside a full filesystem/network sandbox**. On macOS we confine it with
-# sandbox-exec: file writes are denied everywhere except the worktree (the
-# strongest enforceable guarantee, trust §4.1), backed by the authoritative
-# post-hoc ownership audit (layer 4).
+# outside a full filesystem/network sandbox**. We confine it with srt (Seatbelt
+# on macOS, bubblewrap on Linux): file writes are denied everywhere except the
+# approved roots, backed by the authoritative post-hoc ownership audit (layer 4).
 #
-# HONEST CAVEAT (Wave 2): Kimi's own API needs network, and sandbox-exec cannot
-# cleanly separate "model shell command network" from "CLI API network", so
-# network is allowed. Filesystem confinement + the diff audit are the boundary;
-# full network isolation is a hardening item. Refuses the write role if no OS
-# sandbox is available — never runs an auto-approving writer unconfined.
+# Kimi's own API needs network, so srt receives a global baseline domain
+# allowlist plus optional task-level network_domains. Refuses the write role if
+# no OS sandbox is available — never runs an auto-approving writer unconfined.
 #
 # Verbs:
 #   start  <task_spec> <worktree> <inbox> <sessions> <agent_run_id> [prior]   (write, sandboxed)
@@ -30,38 +27,33 @@ command -v kimi >/dev/null 2>&1 || hydra_die "kimi CLI not found (Wave 2 depende
 verb="${1:?usage: kimi.sh start|visual ...}"
 shift
 
-# Build an SBPL profile that allows all-but-file-writes, then permits writes only
-# under the given roots. Prints the profile path.
-make_sandbox_profile() {
-  # BSD/macOS mktemp requires the X's at the END of the template. A suffix after
-  # them (e.g. ...-XXXXXX.sb) makes mktemp create a LITERAL file of that name —
-  # which then collides forever ("File exists"), yielding an empty path and a
-  # `sandbox-exec -f ""` invocation. Also strip TMPDIR's trailing slash.
-  local tmpdir="${TMPDIR:-/tmp}"; tmpdir="${tmpdir%/}"
-  local prof; prof="$(mktemp "$tmpdir/hydra-kimi-sb-XXXXXX")" || return 1
-  [ -n "$prof" ] || return 1
-  {
-    echo '(version 1)'
-    echo '(allow default)'
-    echo '(deny file-write*)'
-    # Device nodes are NOT the threat model — the lane is. A blanket
-    # file-write deny also blocks /dev/null, which bash and git open for
-    # read/write on almost every command ("fatal: could not open '/dev/null'"),
-    # silently crippling the worker inside its own sandbox.
-    echo '(allow file-write* (subpath "/dev"))'
-    # The herdr status hook connects to herdr's unix socket to report
-    # working/idle/blocked. Without this the pane shows a stale "idle".
-    if [ -n "${HERDR_SOCKET_DIR:-}" ]; then
-      printf '(allow file-write* (subpath "%s"))\n' "$HERDR_SOCKET_DIR"
-    elif [ -d "$HOME/.config/herdr" ]; then
-      printf '(allow file-write* (subpath "%s/.config/herdr"))\n' "$HOME"
-    fi
-    for root in "$@"; do
-      [ -n "$root" ] || continue
-      printf '(allow file-write* (subpath "%s"))\n' "$root"
-    done
-  } >"$prof"
-  printf '%s' "$prof"
+# Write srt's required network/filesystem policy into the run's session dir.
+make_srt_settings() {
+  local settings_path="$1" task_spec="$2"; shift 2
+  local baseline="$HOME/.local/state/hydra/kimi-sandbox-domains.json"
+  local roots_json task_domains_json
+  local -a roots=("$@")
+
+  # The herdr status hook connects to herdr's unix socket to report
+  # working/idle/blocked. Without this the pane shows a stale "idle".
+  if [ -n "${HERDR_SOCKET_DIR:-}" ]; then
+    roots+=("$HERDR_SOCKET_DIR")
+  elif [ -d "$HOME/.config/herdr" ]; then
+    roots+=("$HOME/.config/herdr")
+  fi
+
+  roots_json="$(printf '%s\n' "${roots[@]}" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique')" || return 1
+  task_domains_json="$(hydra_yaml_list "$task_spec" 'network_domains' | jq -Rsc 'split("\n") | map(select(length > 0))')" || return 1
+  jq --argjson roots "$roots_json" --argjson task "$task_domains_json" '{
+    network: {allowedDomains: ((.allowedDomains + $task) | unique), deniedDomains: []},
+    filesystem: {allowWrite: $roots, denyWrite: [], denyRead: []}
+  }' "$baseline" >"$settings_path"
+}
+
+# Quote one argv value for srt's POSIX-shell-style `-c` command string.
+shell_quote() {
+  local value="${1//\'/\'\\\'\'}"
+  printf "'%s'" "$value"
 }
 
 case "$verb" in
@@ -88,8 +80,8 @@ Image to analyze: $image"
     ;;
 
   start)
-    command -v sandbox-exec >/dev/null 2>&1 \
-      || hydra_die "no OS sandbox (sandbox-exec) — refusing Kimi write role (auto-approves tools)"
+    command -v srt >/dev/null 2>&1 \
+      || hydra_die "no OS sandbox (srt) — refusing Kimi write role (auto-approves tools)"
     task_spec="${1:?}"; worktree="${2:?}"; inbox="${3:?}"; sessions="${4:?}"; agent_run_id="${5:?}"
     result_path="$inbox/result.json"; worker_result="$worktree/.hydra-result.json"
     mkdir -p "$inbox" "$sessions"; rm -f "$worker_result"
@@ -98,14 +90,37 @@ Image to analyze: $image"
     wt_abs="$(cd "$worktree" && pwd -P)"
     # A linked worktree's git metadata lives in the git-common-dir OUTSIDE the
     # worktree; Kimi must write there to commit. Resolve to a physical path so
-    # sandbox-exec subpath matching works (/var -> /private/var).
+    # srt allowWrite matching works (/var -> /private/var).
     git_common="$(cd "$worktree" && cd "$(git rev-parse --path-format=absolute --git-common-dir)" && pwd -P)"
-    prof="$(make_sandbox_profile "$wt_abs" "$git_common" "${TMPDIR:-/tmp}" "/private/tmp" "$HOME/.kimi-code")" || prof=""
-    # HARD GUARD: never invoke an auto-approving agent without a real profile.
-    # `sandbox-exec -f ""` must never happen — refuse the write role instead.
-    [ -n "$prof" ] && [ -s "$prof" ] \
-      || hydra_die "failed to build sandbox profile — refusing to run Kimi (auto-approves tools) unsandboxed"
-    hydra_log "kimi write role under sandbox-exec (writes confined to worktree + git-common-dir)"
+    settings_json="$sessions/$agent_run_id.srt-settings.json"
+    make_srt_settings "$settings_json" "$task_spec" \
+      "$wt_abs" "$git_common" "${TMPDIR:-/tmp}" "/private/tmp" "$HOME/.kimi-code" \
+      || settings_json=""
+    # HARD GUARD: never invoke an auto-approving agent without valid settings.
+    [ -n "$settings_json" ] && [ -s "$settings_json" ] \
+      && jq -e '
+        def valid_domain:
+          type == "string" and
+          ((contains("://") or contains("/") or contains(":")) | not) and
+          if . == "localhost" then true
+          elif startswith("*.") then
+            (.[2:] as $domain |
+              ($domain | contains(".")) and
+              ($domain | startswith(".") | not) and
+              ($domain | endswith(".") | not) and
+              ($domain | split(".") | length >= 2) and
+              ($domain | split(".") | all(.[]; length > 0)))
+          elif contains("*") then false
+          else contains(".") and (startswith(".") | not) and (endswith(".") | not)
+          end;
+        (.network.allowedDomains | type == "array" and length > 0 and all(.[]; valid_domain)) and
+        (.network.deniedDomains | type == "array" and all(.[]; type == "string" and length > 0)) and
+        (.filesystem.allowWrite | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)) and
+        (.filesystem.denyWrite | type == "array" and all(.[]; type == "string" and length > 0)) and
+        (.filesystem.denyRead | type == "array" and all(.[]; type == "string" and length > 0))
+      ' "$settings_json" >/dev/null 2>&1 \
+      || hydra_die "failed to build valid srt settings — refusing to run Kimi (auto-approves tools) unsandboxed"
+    hydra_log "kimi write role under srt (writes confined to worktree + git-common-dir)"
 
     # NOTE: `kimi -p` (print mode) ALREADY auto-approves tools — that is exactly
     # why the OS sandbox is mandatory. `-y` is both redundant and rejected
@@ -114,11 +129,11 @@ Image to analyze: $image"
     # stderr (Kimi's human-readable progress) is TEE'd: captured for forensics
     # AND passed through, so a hosting herdr pane shows live progress. Pane text
     # is still never read as truth — Git + ledger remain authoritative.
-    ( cd "$worktree" && sandbox-exec -f "$prof" \
-        kimi -p "$prompt" --output-format stream-json --add-dir "$worktree" ) \
+    kimi_cmd="$(shell_quote kimi) $(shell_quote -p) $(shell_quote "$prompt") $(shell_quote --output-format) $(shell_quote stream-json) $(shell_quote --add-dir) $(shell_quote "$worktree")"
+    ( cd "$worktree" && srt -s "$settings_json" -c "$kimi_cmd" ) \
       </dev/null >"$sessions/$agent_run_id.cli.jsonl" 2> >(tee "$sessions/$agent_run_id.stderr" >&2) || true
     wait  # let the tee process-substitution flush before parsing the capture
-    rm -f "$prof"
+    rm -f "$settings_json"
 
     session_id="$(jq -rs 'map(.session_id // empty) | map(select(. != "")) | last // empty' "$sessions/$agent_run_id.cli.jsonl" 2>/dev/null || true)"
     jq -n --arg sid "$session_id" --arg aid "$agent_run_id" --arg vendor kimi \
