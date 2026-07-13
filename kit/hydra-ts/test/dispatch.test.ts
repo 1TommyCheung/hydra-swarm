@@ -89,6 +89,7 @@ function ledger(f: Fixture): Array<Record<string, string>> {
 
 class FakeChild extends EventEmitter implements ChildProcessLike {
   killed = false;
+  exited = false;
   readonly pid: number;
 
   constructor(pid = 10_000 + sequence) {
@@ -102,6 +103,7 @@ class FakeChild extends EventEmitter implements ChildProcessLike {
   }
 
   exit(code: number | null, signal: NodeJS.Signals | null = null): void {
+    this.exited = true;
     this.emit('exit', code, signal);
   }
 }
@@ -138,6 +140,7 @@ class FakeHerdr implements HerdrClient {
   paneId: string | undefined = 'pane-1';
   starts: Array<{ label: string; cwd: string; workspace?: string; command: string }> = [];
   closes: string[] = [];
+  onClose?: (paneId: string) => boolean | Promise<boolean>;
 
   isLive(): boolean { return this.live; }
   focusedWorkspace(): string | undefined { return this.workspace; }
@@ -145,9 +148,9 @@ class FakeHerdr implements HerdrClient {
     this.starts.push(options);
     return this.paneId;
   }
-  paneClose(paneId: string): boolean {
+  paneClose(paneId: string): boolean | Promise<boolean> {
     this.closes.push(paneId);
-    return true;
+    return this.onClose?.(paneId) ?? true;
   }
 }
 
@@ -436,7 +439,7 @@ describe('dispatch Bash parity', () => {
     assert.equal(mock.calls[0].args.at(-1), 'session-1');
   });
 
-  it('hosts in an injected herdr pane, captures its sentinel, and reports states', async () => {
+  it('keeps non-opencode vendors hosted in an injected herdr pane', async () => {
     const f = fixture(runId());
     const herdr = new FakeHerdr();
     herdr.live = true;
@@ -465,6 +468,103 @@ describe('dispatch Bash parity', () => {
       ['pane-1', 'claude', 'idle'],
     ]);
     assert.equal(ledger(f).at(-1)?.exit_code, '7');
+  });
+
+  it('records a hosted worker exit before a throwing pane close', async () => {
+    const f = fixture(runId(), { vendor: 'codex' });
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    const expectedId = `${f.runId}-task-a-v1`;
+    const clock = new StepClock(() => {
+      writeFileSync(join(f.sessionsDir, `${expectedId}.exit`), '0');
+    });
+    let exitWasRecordedAtClose = false;
+    herdr.onClose = () => {
+      exitWasRecordedAtClose = ledger(f).at(-1)?.event === 'agent_exited';
+      throw new Error('pane already gone');
+    };
+
+    await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('plain spawn must not run'); }, {
+      env: { HYDRA_HERDR_PANES: '1' },
+      herdr,
+      clock,
+    }));
+
+    assert.equal(exitWasRecordedAtClose, true);
+    assert.deepEqual(herdr.closes, ['pane-1']);
+    assert.equal(ledger(f).at(-1)?.exit_code, '0');
+  });
+
+  it('always runs opencode plainly and uses a decoupled event monitor pane', async () => {
+    const f = fixture(runId(), { vendor: 'opencode' });
+    const expectedId = `${f.runId}-task-a-v1`;
+    const eventsPath = join(f.sessionsDir, `${expectedId}.events.jsonl`);
+    const mock = fakeSpawn({
+      onSpawn: () => writeFileSync(eventsPath, [
+        JSON.stringify({ part: { type: 'text', text: 'Working through it' } }),
+        JSON.stringify({ part: { type: 'tool', tool: 'read', state: { title: 'Inspect dispatch' } } }),
+        JSON.stringify({ part: { type: 'tool', tool: 'bash', state: {} } }),
+      ].join('\n')),
+    });
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    herdr.workspace = 'workspace-monitor';
+    const liveness: boolean[] = [];
+    let exitWasRecordedAtClose = false;
+    herdr.onClose = async () => {
+      exitWasRecordedAtClose = ledger(f).at(-1)?.event === 'agent_exited';
+      throw new Error('monitor pane already closed itself');
+    };
+
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+      env: { HYDRA_HERDR_PANES: '1', HYDRA_OPENCODE_MODEL: 'test/glm' },
+      herdr,
+      buildWorkerPrompt: () => 'the rendered worker prompt',
+      processAlive: () => {
+        const alive = !(mock.calls[0]?.child.exited ?? false);
+        liveness.push(alive);
+        return alive;
+      },
+    }));
+
+    assert.equal(mock.calls.length, 1);
+    assert.equal(mock.calls[0].command, f.adapterPath);
+    assert.equal(herdr.starts.length, 1);
+    assert.equal(herdr.starts[0].workspace, 'workspace-monitor');
+    assert.match(herdr.starts[0].command, /tail -n \+1 -f/);
+    assert.doesNotMatch(herdr.starts[0].command, /opencode\.sh/);
+    assert.equal(exitWasRecordedAtClose, true);
+    assert.deepEqual(herdr.closes, ['pane-1']);
+    assert.equal(liveness.includes(true), true);
+    assert.equal(liveness.at(-1), false);
+
+    const monitor = readFileSync(join(f.sessionsDir, `${expectedId}.monitor.txt`), 'utf8');
+    assert.match(monitor, new RegExp(`OpenCode \\(test/glm\\) starting — run ${f.runId} task task-a`));
+    assert.match(monitor, new RegExp(`worktree: ${f.worktree}`));
+    assert.match(monitor, /the rendered worker prompt/);
+    assert.match(monitor, /Working through it/);
+    assert.match(monitor, /\[tool\] read: Inspect dispatch/);
+    assert.match(monitor, /\[tool\] bash/);
+    assert.deepEqual(ledger(f).map(({ event }) => event), [
+      'task_started',
+      'herdr_pane_started',
+      'agent_exited',
+    ]);
+    assert.equal(ledger(f)[1].mode, 'monitor_only');
+  });
+
+  it('runs opencode plainly without a monitor when panes are disabled', async () => {
+    const f = fixture(runId(), { vendor: 'opencode' });
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    const mock = fakeSpawn();
+
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { herdr }));
+
+    assert.equal(mock.calls.length, 1);
+    assert.deepEqual(herdr.starts, []);
+    assert.deepEqual(herdr.closes, []);
+    assert.deepEqual(ledger(f).map(({ event }) => event), ['task_started', 'agent_exited']);
   });
 
   it('records herdr stalled and hard-cap metrics with Bash precedence', async () => {
