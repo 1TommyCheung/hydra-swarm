@@ -1,0 +1,7 @@
+{
+  "name": "hydra-swarm",
+  "description": "Multi-agent (Claude, Codex, OpenCode/GLM, Kimi) local dev harness: worktree-isolated dispatch, trust-boundary promotion, cross-vendor review, evidence-gated integration.",
+  "author": {
+    "name": "Tommy Cheung"
+  }
+}
