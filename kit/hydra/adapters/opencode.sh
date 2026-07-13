@@ -27,7 +27,17 @@ source "$SELF_DIR/../scripts/lib.sh"
 
 command -v opencode >/dev/null 2>&1 || hydra_die "opencode CLI not found (Wave 1 dependency)"
 
-model="${HYDRA_OPENCODE_MODEL:-zhipu/glm-5.2}"
+model="${HYDRA_OPENCODE_MODEL:-}"
+if [ -z "$model" ]; then
+  model_config="$HOME/.local/state/hydra/opencode-model.json"
+  if [ -e "$model_config" ] || [ -L "$model_config" ]; then
+    if ! model="$(jq -er '.model | select(type == "string" and length > 0)' "$model_config" 2>/dev/null)"; then
+      hydra_warn "invalid or unreadable OpenCode model config ($model_config); using default"
+      model=""
+    fi
+  fi
+  model="${model:-zai-coding-plan/glm-5.2}"
+fi
 
 verb="${1:?usage: opencode.sh explore|review|start ...}"
 

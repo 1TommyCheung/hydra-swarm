@@ -12,6 +12,7 @@ import {
   deriveDropFromGit as libDeriveDropFromGit,
   die,
   log,
+  warn,
   yamlBlock,
   yamlList,
   yamlScalar,
@@ -29,7 +30,7 @@ import {
 // real vendor tooling.
 // ---------------------------------------------------------------------------
 
-const DEFAULT_MODEL = 'zhipu/glm-5.2';
+const DEFAULT_MODEL = 'zai-coding-plan/glm-5.2';
 
 /** Result shape returned by an injected (or default) opencode runner. */
 export interface OpencodeExecResult {
@@ -55,7 +56,7 @@ export type DeriveDropFromGit = (
 ) => boolean;
 
 export interface OpencodeRunOptions {
-  /** Override the OpenCode model (defaults to HYDRA_OPENCODE_MODEL or GLM 5.2). */
+  /** Explicit model override for injected callers and tests. */
   model?: string;
   /** Injected opencode runner for tests. */
   exec?: OpencodeExec;
@@ -63,12 +64,36 @@ export interface OpencodeRunOptions {
   deriveDropFromGit?: DeriveDropFromGit;
   /** Base directory for relative paths (unused, kept for sibling compatibility). */
   cwd?: string;
-  /** Override for the external state root (unused, kept for sibling compatibility). */
+  /** Directory containing the optional global opencode-model.json override. */
   stateRoot?: string;
 }
 
 function resolveModel(options?: OpencodeRunOptions): string {
-  return options?.model ?? (process.env.HYDRA_OPENCODE_MODEL || DEFAULT_MODEL);
+  if (options?.model !== undefined) return options.model;
+
+  const envModel = process.env.HYDRA_OPENCODE_MODEL;
+  if (envModel) return envModel;
+
+  const stateRoot = options?.stateRoot
+    ?? join(process.env.HOME ?? '', '.local/state/hydra');
+  const configPath = join(stateRoot, 'opencode-model.json');
+  let config: unknown;
+  try {
+    config = JSON.parse(readFileSync(configPath, 'utf8'));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      warn(`invalid or unreadable OpenCode model config (${configPath}); using default`);
+    }
+    return DEFAULT_MODEL;
+  }
+
+  if (config !== null && typeof config === 'object' && !Array.isArray(config)) {
+    const model = (config as Record<string, unknown>).model;
+    if (typeof model === 'string' && model.length > 0) return model;
+  }
+
+  warn(`invalid or unreadable OpenCode model config (${configPath}); using default`);
+  return DEFAULT_MODEL;
 }
 
 function defaultExec(

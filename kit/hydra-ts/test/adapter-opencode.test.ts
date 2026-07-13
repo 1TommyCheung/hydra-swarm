@@ -60,6 +60,22 @@ function captureStdout<T>(fn: () => T): { output: string; result: T } {
   }
 }
 
+function captureStderr<T>(fn: () => T): { output: string; result: T } {
+  const chunks: string[] = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    chunks.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+
+  try {
+    const result = fn();
+    return { output: chunks.join(''), result };
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+}
+
 function eventsStdout(...events: Record<string, unknown>[]): string {
   return events.map((e) => JSON.stringify(e)).join('\n') + '\n';
 }
@@ -154,14 +170,17 @@ describe('explore', () => {
     };
 
     const { output, result } = captureStdout(() =>
-      explore(cwd, 'explore this repo', outPrefix, agentRunId, { exec }),
+      explore(cwd, 'explore this repo', outPrefix, agentRunId, {
+        exec,
+        stateRoot: join(TEST_TMP, 'missing-state', agentRunId),
+      }),
     );
 
     assert.equal(capturedCommand, 'opencode');
     assert.deepEqual(capturedArgs, [
       'run',
       '--model',
-      'zhipu/glm-5.2',
+      'zai-coding-plan/glm-5.2',
       '--agent',
       'hydra-reviewer',
       '--format',
@@ -181,7 +200,7 @@ describe('explore', () => {
     const session = readJson(`${outPrefix}.session.json`) as Record<string, unknown>;
     assert.equal(session.agent_run_id, agentRunId);
     assert.equal(session.vendor, 'opencode');
-    assert.equal(session.model, 'zhipu/glm-5.2');
+    assert.equal(session.model, 'zai-coding-plan/glm-5.2');
     assert.equal(session.session_id, 'sess-1');
     assert.deepEqual(session.tokens, { input: 20, output: 5 });
     assert.equal(session.cost, 0.003);
@@ -212,8 +231,96 @@ describe('explore', () => {
       return { exitCode: 0, stdout: '', stderr: '' };
     };
 
-    explore(cwd, 'prompt', outPrefix, agentRunId, { exec });
-    assert.equal(capturedModel, 'zhipu/glm-5.2');
+    explore(cwd, 'prompt', outPrefix, agentRunId, {
+      exec,
+      stateRoot: join(TEST_TMP, 'missing-state', agentRunId),
+    });
+    assert.equal(capturedModel, 'zai-coding-plan/glm-5.2');
+  });
+
+  it('uses a valid model from the durable config file', () => {
+    const { cwd, outPrefix, agentRunId } = makePaths();
+    const stateRoot = join(TEST_TMP, 'state', agentRunId);
+    mkdirSync(stateRoot, { recursive: true });
+    writeFileSync(
+      join(stateRoot, 'opencode-model.json'),
+      JSON.stringify({ model: 'account/model-from-file' }),
+      'utf8',
+    );
+    delete process.env.HYDRA_OPENCODE_MODEL;
+
+    let capturedModel = '';
+    const exec: OpencodeExec = (command, args) => {
+      capturedModel = args[args.indexOf('--model') + 1] ?? '';
+      return { exitCode: 0, stdout: '', stderr: '' };
+    };
+
+    explore(cwd, 'prompt', outPrefix, agentRunId, { exec, stateRoot });
+    assert.equal(capturedModel, 'account/model-from-file');
+  });
+
+  it('prefers HYDRA_OPENCODE_MODEL over the durable config file', () => {
+    const { cwd, outPrefix, agentRunId } = makePaths();
+    const stateRoot = join(TEST_TMP, 'state', agentRunId);
+    mkdirSync(stateRoot, { recursive: true });
+    writeFileSync(
+      join(stateRoot, 'opencode-model.json'),
+      JSON.stringify({ model: 'account/model-from-file' }),
+      'utf8',
+    );
+    process.env.HYDRA_OPENCODE_MODEL = 'one-off/env-model';
+
+    let capturedModel = '';
+    const exec: OpencodeExec = (command, args) => {
+      capturedModel = args[args.indexOf('--model') + 1] ?? '';
+      return { exitCode: 0, stdout: '', stderr: '' };
+    };
+
+    explore(cwd, 'prompt', outPrefix, agentRunId, { exec, stateRoot });
+    assert.equal(capturedModel, 'one-off/env-model');
+  });
+
+  it('warns and uses the default when the durable config file is invalid', () => {
+    const invalidConfigs = ['not JSON', '{}', '{"model":""}', '{"model":42}'];
+
+    for (const [index, rawConfig] of invalidConfigs.entries()) {
+      const { cwd, outPrefix, agentRunId } = makePaths();
+      const stateRoot = join(TEST_TMP, 'invalid-state', `${index}-${agentRunId}`);
+      mkdirSync(stateRoot, { recursive: true });
+      writeFileSync(join(stateRoot, 'opencode-model.json'), rawConfig, 'utf8');
+      delete process.env.HYDRA_OPENCODE_MODEL;
+
+      let capturedModel = '';
+      const exec: OpencodeExec = (command, args) => {
+        capturedModel = args[args.indexOf('--model') + 1] ?? '';
+        return { exitCode: 0, stdout: '', stderr: '' };
+      };
+
+      const { output } = captureStderr(() =>
+        explore(cwd, 'prompt', outPrefix, agentRunId, { exec, stateRoot }),
+      );
+      assert.equal(capturedModel, 'zai-coding-plan/glm-5.2');
+      assert.match(output, /invalid or unreadable OpenCode model config/);
+    }
+  });
+
+  it('warns and uses the default when the durable config file is unreadable', () => {
+    const { cwd, outPrefix, agentRunId } = makePaths();
+    const stateRoot = join(TEST_TMP, 'unreadable-state', agentRunId);
+    mkdirSync(join(stateRoot, 'opencode-model.json'), { recursive: true });
+    delete process.env.HYDRA_OPENCODE_MODEL;
+
+    let capturedModel = '';
+    const exec: OpencodeExec = (command, args) => {
+      capturedModel = args[args.indexOf('--model') + 1] ?? '';
+      return { exitCode: 0, stdout: '', stderr: '' };
+    };
+
+    const { output } = captureStderr(() =>
+      explore(cwd, 'prompt', outPrefix, agentRunId, { exec, stateRoot }),
+    );
+    assert.equal(capturedModel, 'zai-coding-plan/glm-5.2');
+    assert.match(output, /invalid or unreadable OpenCode model config/);
   });
 
   it('allows the model to be overridden via options', () => {
@@ -430,7 +537,10 @@ acceptance_criteria:
     };
 
     const { output, result } = captureStdout(() =>
-      start(spec, worktree, inbox, sessions, agentRunId, { exec }),
+      start(spec, worktree, inbox, sessions, agentRunId, {
+        exec,
+        stateRoot: join(TEST_TMP, 'missing-state', agentRunId),
+      }),
     );
 
     assert.equal(result, agentRunId);
@@ -444,7 +554,7 @@ acceptance_criteria:
     const session = readJson(`${sessions}/${agentRunId}.json`) as Record<string, unknown>;
     assert.equal(session.agent_run_id, agentRunId);
     assert.equal(session.vendor, 'opencode');
-    assert.equal(session.model, 'zhipu/glm-5.2');
+    assert.equal(session.model, 'zai-coding-plan/glm-5.2');
     assert.equal(session.session_id, 'impl-1');
 
     const resultDrop = readJson(join(inbox, 'result.json')) as Record<string, unknown>;
