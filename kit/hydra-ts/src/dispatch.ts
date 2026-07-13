@@ -12,7 +12,7 @@ import {
 } from 'node:fs';
 import { constants, cpus } from 'node:os';
 import { dirname, extname, join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildWorkerPrompt } from './build-worker-prompt.ts';
 import { die, herdrState, killTree, log, now, stateRoot, warn, yamlScalar } from './lib.ts';
 import { recordUsage } from './record-usage.ts';
@@ -1002,9 +1002,13 @@ export async function dispatch(
     ?? env.HYDRA_ADAPTER_RUNTIME
     ?? (env.HYDRA_HARNESS === 'bash' ? 'bash' : 'ts')
   ) === 'bash' ? 'bash' : 'ts';
+  // Adapters are kit-owned assets: resolve self-relative to this file's own
+  // location, not via the target repo root (repo is for git/worktree/state
+  // operations on the TARGET project, which is a different concern).
+  const selfDir = dirname(fileURLToPath(import.meta.url));
   const adapterPath = adapterRuntime === 'ts'
-    ? join(repo, 'hydra-ts', 'src', `adapter-${spec.vendor}.ts`)
-    : join(repo, 'hydra', 'adapters', `${spec.vendor}.sh`);
+    ? join(selfDir, `adapter-${spec.vendor}.ts`)
+    : join(selfDir, '..', '..', 'hydra', 'adapters', `${spec.vendor}.sh`);
   if (!isFile(adapterPath)) die(`no adapter for vendor '${spec.vendor}': ${adapterPath}`);
 
   const resolvedWorktree = spec.worktree ? resolve(cwd, spec.worktree) : '';
