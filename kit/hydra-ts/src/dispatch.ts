@@ -294,15 +294,18 @@ function makeExitRecorder(ctx: WorkerContext): ExitRecorder {
   let resolveCancelled!: () => void;
   const cancelled = new Promise<void>((resolvePromise) => { resolveCancelled = resolvePromise; });
   const cleanups: Array<() => void> = [];
+  const sentinel = join(ctx.sessionsDir, `${ctx.agentRunId}.exit`);
+  rmSync(sentinel, { force: true });
 
   const unregister = (): void => {
     while (cleanups.length > 0) cleanups.pop()?.();
   };
 
-  const finish = (event: string, kvs: string[]): void => {
+  const finish = (event: string, kvs: string[], exitCode: string): void => {
     if (recorded) return;
     recorded = true;
     ctx.appendLedger(ctx.runId, event, 'task_id', ctx.taskId, 'vendor', ctx.vendor, ...kvs);
+    try { writeFileSync(sentinel, exitCode, 'utf8'); } catch { /* ledger and slot cleanup remain authoritative */ }
     releaseSlot(ctx.slotsDir, ctx.agentRunId);
     unregister();
   };
@@ -313,7 +316,7 @@ function makeExitRecorder(ctx: WorkerContext): ExitRecorder {
     if (workerPid !== undefined) {
       try { ctx.killTree(workerPid); } catch { /* best effort */ }
     }
-    finish('agent_cancelled', []);
+    finish('agent_cancelled', [], '130');
     resolveCancelled();
     if (paneId && ctx.env.HYDRA_HERDR_KEEP_PANE !== '1') {
       try {
@@ -330,11 +333,11 @@ function makeExitRecorder(ctx: WorkerContext): ExitRecorder {
     isCancelled: () => wasCancelled,
     setWorkerPid: (pid) => { workerPid = pid; },
     setPaneId: (id) => { paneId = id; },
-    recordExit: (event, rc) => finish(event, rc === undefined ? [] : ['exit_code', rc]),
+    recordExit: (event, rc) => finish(event, rc === undefined ? [] : ['exit_code', rc], rc ?? '0'),
     recordTimeout: (reason, metric) => {
       const extra = ['reason', reason];
       if (metric) extra.push(metric[0], metric[1]);
-      finish('agent_timed_out', extra);
+      finish('agent_timed_out', extra, '124');
     },
     cancel,
     register: (signal, noSignals) => {

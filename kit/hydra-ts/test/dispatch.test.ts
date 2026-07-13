@@ -448,6 +448,7 @@ describe('dispatch Bash parity', () => {
     const nonzero = fixture(runId());
     await dispatch(nonzero.runId, 'task-a', injectedOptions(nonzero, fakeSpawn({ autoExit: 42 }).spawn));
     assert.equal(ledger(nonzero).at(-1)?.exit_code, '42');
+    assert.equal(readFileSync(join(nonzero.sessionsDir, `${nonzero.runId}-task-a-v1.exit`), 'utf8'), '42');
 
     const signalled = fixture(runId());
     await dispatch(signalled.runId, 'task-a', injectedOptions(
@@ -455,6 +456,25 @@ describe('dispatch Bash parity', () => {
       fakeSpawn({ signal: 'SIGTERM' }).spawn,
     ));
     assert.equal(ledger(signalled).at(-1)?.exit_code, '143');
+    assert.equal(readFileSync(join(signalled.sessionsDir, `${signalled.runId}-task-a-v1.exit`), 'utf8'), '143');
+  });
+
+  it('writes resolved exit and timeout sentinels for plain opencode workers', async () => {
+    const exited = fixture(runId(), { vendor: 'opencode' });
+    await dispatch(exited.runId, 'task-a', injectedOptions(
+      exited,
+      fakeSpawn({ autoExit: 23 }).spawn,
+    ));
+    assert.equal(readFileSync(join(exited.sessionsDir, `${exited.runId}-task-a-v1.exit`), 'utf8'), '23');
+
+    const timedOut = fixture(runId(), { vendor: 'opencode', timeoutMinutes: 1 });
+    await dispatch(timedOut.runId, 'task-a', injectedOptions(
+      timedOut,
+      fakeSpawn({ autoExit: false }).spawn,
+      { clock: new StepClock(), pollIntervalMs: 20_000 },
+    ));
+    assert.equal(ledger(timedOut).at(-1)?.reason, 'stalled');
+    assert.equal(readFileSync(join(timedOut.sessionsDir, `${timedOut.runId}-task-a-v1.exit`), 'utf8'), '124');
   });
 
   it('times out after the exact inactivity window without a false first-poll reset', async () => {
@@ -520,6 +540,7 @@ describe('dispatch Bash parity', () => {
 
     assert.deepEqual(options.killed, [mock.calls[0].child.pid]);
     assert.deepEqual(ledger(f).map(({ event }) => event), ['task_started', 'agent_cancelled']);
+    assert.equal(readFileSync(join(f.sessionsDir, `${f.runId}-task-a-v1.exit`), 'utf8'), '130');
     assert.deepEqual(options.usage, []);
   });
 
@@ -726,6 +747,7 @@ describe('dispatch Bash parity', () => {
       'agent_exited',
     ]);
     assert.equal(ledger(f)[1].mode, 'monitor_only');
+    assert.equal(readFileSync(join(f.sessionsDir, `${expectedId}.exit`), 'utf8'), '0');
   });
 
   it('records an opencode exit when monitor banner setup fails', async () => {
@@ -759,6 +781,7 @@ describe('dispatch Bash parity', () => {
     assert.deepEqual(herdr.starts, []);
     assert.deepEqual(herdr.closes, []);
     assert.deepEqual(ledger(f).map(({ event }) => event), ['task_started', 'agent_exited']);
+    assert.equal(readFileSync(join(f.sessionsDir, `${f.runId}-task-a-v1.exit`), 'utf8'), '0');
   });
 
   it('records herdr stalled and hard-cap metrics with Bash precedence', async () => {
@@ -774,6 +797,7 @@ describe('dispatch Bash parity', () => {
     await dispatch(stalled.runId, 'task-a', stalledOptions);
     assert.equal(ledger(stalled).at(-1)?.reason, 'stalled');
     assert.equal(ledger(stalled).at(-1)?.idle_sec, '60');
+    assert.equal(readFileSync(join(stalled.sessionsDir, `${stalled.runId}-task-a-v1.exit`), 'utf8'), '124');
 
     const hard = fixture(runId(), { timeoutMinutes: 1 });
     const hardHerdr = new FakeHerdr();
@@ -787,6 +811,7 @@ describe('dispatch Bash parity', () => {
     await dispatch(hard.runId, 'task-a', hardOptions);
     assert.equal(ledger(hard).at(-1)?.reason, 'hard_cap');
     assert.equal(ledger(hard).at(-1)?.elapsed_sec, '60');
+    assert.equal(readFileSync(join(hard.sessionsDir, `${hard.runId}-task-a-v1.exit`), 'utf8'), '124');
   });
 
   it('falls back to the injected subprocess only when pane launch fails', async () => {
