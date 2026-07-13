@@ -99,7 +99,7 @@ describe('amendTask', () => {
     delete process.env.HYDRA_STATE_ROOT;
   });
 
-  it('amends a task spec and appends a ledger event', () => {
+  it('amends a task spec and appends a ledger event', async () => {
     const runId = '001';
     const taskId = 'task-x';
     setupRun(runId);
@@ -110,7 +110,7 @@ objective: Do work.
 `);
 
     const dispatches: Array<{ runId: string; taskId: string; delivery: string }> = [];
-    amendTask(runId, taskId, 'clarify objective', 'restart', {
+    await amendTask(runId, taskId, 'clarify objective', 'restart', {
       dispatch: (r, t, d) => dispatches.push({ runId: r, taskId: t, delivery: d }),
     });
 
@@ -134,7 +134,7 @@ objective: Do work.
     assert.deepEqual(dispatches[0], { runId, taskId, delivery: 'restart' });
   });
 
-  it('defaults delivery to restart', () => {
+  it('defaults delivery to restart', async () => {
     const runId = '002';
     const taskId = 'task-y';
     setupRun(runId);
@@ -145,7 +145,7 @@ objective: Do work.
 `);
 
     const dispatches: Array<{ delivery: string }> = [];
-    amendTask(runId, taskId, 'reason', undefined, {
+    await amendTask(runId, taskId, 'reason', undefined, {
       dispatch: (r, t, d) => dispatches.push({ delivery: d }),
     });
 
@@ -156,46 +156,78 @@ objective: Do work.
     );
   });
 
-  it('dies when task spec is missing', () => {
-    assert.throws(() => {
-      amendTask('missing', 'task-missing', 'reason', 'restart', { dispatch: () => {} });
-    }, /task spec not found/);
+  it('uses the native TS dispatch for default re-dispatch', async () => {
+    const runId = 'native-dispatch';
+    const taskId = 'task-native';
+    setupRun(runId);
+    const specPath = writeTaskSpec(runId, taskId, `task_id: ${taskId}
+assigned_vendor: native-missing
+worktree: ${TEST_TMP}
+spec_version: 1
+`);
+
+    const originalRuntime = process.env.HYDRA_ADAPTER_RUNTIME;
+    process.env.HYDRA_ADAPTER_RUNTIME = 'ts';
+    try {
+      await assert.rejects(
+        amendTask(runId, taskId, 'exercise native dispatch'),
+        /no adapter for vendor 'native-missing':.*hydra-ts\/src\/adapter-native-missing\.ts/,
+      );
+    } finally {
+      if (originalRuntime === undefined) {
+        delete process.env.HYDRA_ADAPTER_RUNTIME;
+      } else {
+        process.env.HYDRA_ADAPTER_RUNTIME = originalRuntime;
+      }
+    }
+
+    assert.equal(yamlScalar(specPath, 'spec_version'), '2');
   });
 
-  it('dies when spec_version is missing', () => {
+  it('dies when task spec is missing', async () => {
+    await assert.rejects(
+      amendTask('missing', 'task-missing', 'reason', 'restart', { dispatch: () => {} }),
+      /task spec not found/,
+    );
+  });
+
+  it('dies when spec_version is missing', async () => {
     const runId = '003';
     setupRun(runId);
     writeTaskSpec(runId, 'task-z', `task_id: task-z
 objective: No version.
 `);
-    assert.throws(() => {
-      amendTask(runId, 'task-z', 'reason', 'restart', { dispatch: () => {} });
-    }, /task spec has no spec_version/);
+    await assert.rejects(
+      amendTask(runId, 'task-z', 'reason', 'restart', { dispatch: () => {} }),
+      /task spec has no spec_version/,
+    );
   });
 
-  it('dies when spec_version is not numeric', () => {
+  it('dies when spec_version is not numeric', async () => {
     const runId = '004';
     setupRun(runId);
     writeTaskSpec(runId, 'task-w', `task_id: task-w
 spec_version: abc
 `);
-    assert.throws(() => {
-      amendTask(runId, 'task-w', 'reason', 'restart', { dispatch: () => {} });
-    }, /invalid spec_version/);
+    await assert.rejects(
+      amendTask(runId, 'task-w', 'reason', 'restart', { dispatch: () => {} }),
+      /invalid spec_version/,
+    );
   });
 
-  it('rejects a floating-point spec_version', () => {
+  it('rejects a floating-point spec_version', async () => {
     const runId = '005';
     setupRun(runId);
     writeTaskSpec(runId, 'task-float', `task_id: task-float
 spec_version: 3.5
 `);
-    assert.throws(() => {
-      amendTask(runId, 'task-float', 'reason', 'restart', { dispatch: () => {} });
-    }, /invalid spec_version/);
+    await assert.rejects(
+      amendTask(runId, 'task-float', 'reason', 'restart', { dispatch: () => {} }),
+      /invalid spec_version/,
+    );
   });
 
-  it('preserves the original integer literal in supersedes and the ledger', () => {
+  it('preserves the original integer literal in supersedes and the ledger', async () => {
     for (const [runId, taskId, version] of [
       ['006', 'task-hex', '0x3'],
       ['007', 'task-octal', '03'],
@@ -204,7 +236,7 @@ spec_version: 3.5
       const specPath = writeTaskSpec(runId, taskId, `task_id: ${taskId}
 spec_version: ${version}
 `);
-      amendTask(runId, taskId, 'reason', 'restart', { dispatch: () => {} });
+      await amendTask(runId, taskId, 'reason', 'restart', { dispatch: () => {} });
 
       assert.equal(yamlScalar(specPath, 'spec_version'), '4');
       assert.equal(yamlScalar(specPath, 'supersedes'), version);
@@ -214,7 +246,7 @@ spec_version: ${version}
     }
   });
 
-  it('replaces the task spec via a temporary file', () => {
+  it('replaces the task spec via a temporary file', async () => {
     const runId = '008';
     const taskId = 'task-atomic';
     setupRun(runId);
@@ -223,7 +255,7 @@ spec_version: 1
 `);
     const originalInode = statSync(specPath).ino;
 
-    amendTask(runId, taskId, 'reason', 'restart', { dispatch: () => {} });
+    await amendTask(runId, taskId, 'reason', 'restart', { dispatch: () => {} });
 
     assert.notEqual(statSync(specPath).ino, originalInode);
     assert.equal(statSync(specPath).mode & 0o777, 0o600);

@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
@@ -8,11 +7,12 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
+import { dispatch } from './dispatch.ts';
 import { die, ledgerAppend, log, runDir, yamlScalar } from './lib.ts';
 
 // ---------------------------------------------------------------------------
-// Task-spec amendment (TypeScript port of hydra/scripts/amend-task.sh).
+// Task-spec amendment (TypeScript port of the historical shell harness).
 //
 // The lead first edits the instantiated task spec's substantive fields, then
 // calls amendTask() to bump the version, stamp amendment metadata, record a
@@ -20,8 +20,8 @@ import { die, ledgerAppend, log, runDir, yamlScalar } from './lib.ts';
 // ---------------------------------------------------------------------------
 
 export interface AmendTaskOptions {
-  /** Optional override for the re-dispatch step. Defaults to running dispatch.sh. */
-  dispatch?: (runId: string, taskId: string, delivery: string) => void;
+  /** Optional override for the re-dispatch step. Defaults to native TS dispatch. */
+  dispatch?: (runId: string, taskId: string, delivery: string) => void | Promise<void>;
 }
 
 function parseBashInteger(value: string): bigint | undefined {
@@ -96,12 +96,9 @@ function replaceFileAtomically(path: string, content: string): void {
   }
 }
 
-function defaultDispatch(runId: string, taskId: string, delivery: string): void {
-  const selfDir = dirname(fileURLToPath(import.meta.url));
-  const dispatchScript = join(selfDir, '..', '..', 'hydra', 'scripts', 'dispatch.sh');
-  execFileSync(dispatchScript, [runId, taskId], {
+async function defaultDispatch(runId: string, taskId: string, delivery: string): Promise<void> {
+  await dispatch(runId, taskId, {
     env: { ...process.env, HYDRA_DELIVERY: delivery },
-    stdio: 'inherit',
   });
 }
 
@@ -151,13 +148,13 @@ export function rewriteTaskSpec(
  * Usage mirrors amend-task.sh:
  *   amendTask(runId, taskId, reason, delivery = 'restart')
  */
-export function amendTask(
+export async function amendTask(
   runId: string,
   taskId: string,
   reason: string,
   delivery = 'restart',
   options: AmendTaskOptions = {},
-): string {
+): Promise<string> {
   if (!runId) die('usage: amend-task.ts <run_id> <task_id> <reason> [resume|restart]');
   if (!taskId) die('usage: amend-task.ts <run_id> <task_id> <reason> [resume|restart]');
   if (!reason) die('amendment_reason required');
@@ -191,7 +188,7 @@ export function amendTask(
   log(`amended ${taskId} v${fromVStr} -> v${toV} (${delivery}): ${reason}`);
 
   const dispatch = options.dispatch ?? defaultDispatch;
-  dispatch(runId, taskId, delivery);
+  await dispatch(runId, taskId, delivery);
 
   return taskSpec;
 }
@@ -199,14 +196,14 @@ export function amendTask(
 // Backwards-compatible default export for consumers that import the module.
 export default { amendTask, rewriteTaskSpec };
 
-export function main(args: string[] = process.argv.slice(2)): number {
+export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
   try {
     const [runId, taskId, reason, delivery = 'restart'] = args;
     if (!runId || !taskId) {
       die('usage: amend-task.sh <run_id> <task_id> <reason> [resume|restart]');
     }
     if (!reason) die('amendment_reason required');
-    amendTask(runId, taskId, reason, delivery);
+    await amendTask(runId, taskId, reason, delivery);
     return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -219,5 +216,5 @@ const isMain = process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {
-  process.exitCode = main();
+  process.exitCode = await main();
 }
