@@ -492,6 +492,119 @@ function safeHerdrLive(herdr: HerdrClient): boolean {
   }
 }
 
+function vendorLabel(vendor: string): string {
+  switch (vendor) {
+    case 'codex': return 'Codex';
+    case 'claude': return 'Claude';
+    case 'kimi': return 'Kimi';
+    case 'opencode': return 'OpenCode';
+    default: return vendor;
+  }
+}
+
+function buildPaneBanner(ctx: WorkerContext, label: string): string {
+  let prompt: string;
+  try {
+    prompt = ctx.buildWorkerPrompt(ctx.taskSpecPath);
+  } catch {
+    prompt = '(prompt unavailable)\n';
+  }
+  return [
+    `${label} starting — run ${ctx.runId} task ${ctx.taskId}`,
+    `worktree: ${ctx.worktree}`,
+    '--- prompt ---',
+    prompt.replace(/\n$/, ''),
+    '--------------',
+    '',
+    '',
+  ].join('\n');
+}
+
+function writePaneBanner(ctx: WorkerContext, label: string): string {
+  const bannerPath = join(ctx.sessionsDir, `${ctx.agentRunId}.pane-banner.txt`);
+  try {
+    writeFileSync(bannerPath, buildPaneBanner(ctx, label), 'utf8');
+  } catch {
+    // Best effort — the pane command uses `cat ... 2>/dev/null`.
+  }
+  return bannerPath;
+}
+
+function codexEventText(line: string): string | undefined {
+  let event: {
+    type?: string;
+    item?: {
+      type?: string;
+      text?: string;
+      command?: string;
+      changes?: Array<{ path?: string }>;
+      server?: string;
+      tool?: string;
+    };
+  };
+  try {
+    event = JSON.parse(line) as typeof event;
+  } catch {
+    return undefined;
+  }
+  const type = event.type;
+  const item = event.item;
+  if (!item) return undefined;
+
+  if (type === 'item.completed' && item.type === 'agent_message' && item.text) {
+    return item.text;
+  }
+  if (type === 'item.started' && item.type === 'command_execution' && item.command) {
+    const cmd = item.command.split('\n').join(' ').slice(0, 140);
+    return `\n[cmd] ${cmd}`;
+  }
+  if (type === 'item.started' && item.type === 'file_change') {
+    const paths = (item.changes ?? [])
+      .map((change) => {
+        const parts = (change.path ?? '').split('/');
+        return parts[parts.length - 1] ?? '';
+      })
+      .filter((segment) => segment !== '')
+      .join(', ');
+    return `\n[edit] ${paths}`;
+  }
+  if (type === 'item.started' && item.type === 'mcp_tool_call') {
+    return `\n[tool] ${item.server ?? ''}.${item.tool ?? ''}`;
+  }
+  return undefined;
+}
+
+interface JsonlTailState {
+  offset: number;
+}
+
+function pollJsonlFile(
+  eventsPath: string,
+  outputPath: string,
+  parseEvent: (line: string) => string | undefined,
+  state: JsonlTailState,
+  final = false,
+): void {
+  try {
+    const contents = readFileSync(eventsPath);
+    if (contents.length < state.offset) state.offset = 0;
+    const available = contents.subarray(state.offset);
+    const lastNewline = available.lastIndexOf(0x0a);
+    const consumed = final ? available.length : lastNewline + 1;
+    if (consumed > 0) {
+      const lines = available.subarray(0, consumed).toString('utf8').split('\n');
+      for (const line of lines) {
+        if (!line) continue;
+        const text = parseEvent(line);
+        if (text !== undefined) appendFileSync(outputPath, `${text}\n`, 'utf8');
+      }
+      state.offset += consumed;
+    }
+  } catch {
+    // The adapter creates capture files lazily; missing/partial files are normal.
+  }
+}
+
 function monitorEventText(line: string): string | undefined {
   let event: { part?: { type?: unknown; text?: unknown; tool?: unknown; state?: { title?: unknown } } };
   try {
@@ -511,22 +624,12 @@ function openOpencodeMonitor(ctx: WorkerContext, workerPid: number): WorkerMonit
   const eventsPath = join(ctx.sessionsDir, `${ctx.agentRunId}.events.jsonl`);
   const outputPath = join(ctx.sessionsDir, `${ctx.agentRunId}.monitor.txt`);
   const model = ctx.env.HYDRA_OPENCODE_MODEL || 'zhipu/glm-5.2';
-  let prompt: string;
   try {
-    prompt = ctx.buildWorkerPrompt(ctx.taskSpecPath);
+    writeFileSync(outputPath, buildPaneBanner(ctx, `OpenCode (${model})`), 'utf8');
   } catch {
-    prompt = '(prompt unavailable)\n';
+    // Display setup is best effort and must not interrupt worker exit recording.
+    return undefined;
   }
-  const banner = [
-    `OpenCode (${model}) starting — run ${ctx.runId} task ${ctx.taskId}`,
-    `worktree: ${ctx.worktree}`,
-    '--- prompt ---',
-    prompt.replace(/\n$/, ''),
-    '--------------',
-    '',
-    '',
-  ].join('\n');
-  writeFileSync(outputPath, banner, 'utf8');
 
   let workspace: string | undefined;
   let paneId: string | undefined;
@@ -556,29 +659,12 @@ function openOpencodeMonitor(ctx: WorkerContext, workerPid: number): WorkerMonit
   log(`opencode monitor pane ${paneId}: ${label} (worker pid ${workerPid}, lead workspace ${workspace ?? '?'})`);
   try { ctx.herdrState(paneId, ctx.vendor, 'working'); } catch { /* best effort */ }
 
-  let offset = 0;
+  const tailState: JsonlTailState = { offset: 0 };
   let closed = false;
   const poll = (final = false): boolean => {
     let alive = false;
     try { alive = ctx.processAlive(workerPid); } catch { /* treat a failed probe as exited */ }
-    try {
-      const contents = readFileSync(eventsPath);
-      if (contents.length < offset) offset = 0;
-      const available = contents.subarray(offset);
-      const lastNewline = available.lastIndexOf(0x0a);
-      const consumed = final ? available.length : lastNewline + 1;
-      if (consumed > 0) {
-        const lines = available.subarray(0, consumed).toString('utf8').split('\n');
-        for (const line of lines) {
-          if (!line) continue;
-          const text = monitorEventText(line);
-          if (text !== undefined) appendFileSync(outputPath, `${text}\n`, 'utf8');
-        }
-        offset += consumed;
-      }
-    } catch {
-      // The adapter creates the events file lazily; missing/partial files are normal.
-    }
+    pollJsonlFile(eventsPath, outputPath, monitorEventText, tailState, final);
     return alive;
   };
 
@@ -705,6 +791,21 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
   let workspace: string | undefined;
   try { workspace = ctx.herdr.focusedWorkspace(); } catch { /* launch without workspace affinity */ }
   const label = `hydra:${ctx.runId}:${ctx.taskId}:${ctx.vendor}`;
+
+  const bannerPath = writePaneBanner(ctx, vendorLabel(ctx.vendor));
+
+  const isCodex = ctx.vendor === 'codex';
+  const progressPath = join(ctx.sessionsDir, `${ctx.agentRunId}.pane-progress.txt`);
+  const cliJsonlPath = join(ctx.sessionsDir, `${ctx.agentRunId}.cli.jsonl`);
+  if (isCodex) {
+    try { writeFileSync(progressPath, '', 'utf8'); } catch { /* best effort — pane uses touch */ }
+  }
+  const codexTailState: JsonlTailState = { offset: 0 };
+  const pollCodex = (final = false): void => {
+    if (!isCodex) return;
+    pollJsonlFile(cliJsonlPath, progressPath, codexEventText, codexTailState, final);
+  };
+
   const adapterArgs = [
     ctx.adapterPath,
     ctx.verb,
@@ -715,7 +816,29 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
     ctx.agentRunId,
     ctx.priorSession,
   ].map(shellQuote).join(' ');
-  const inner = `echo $$ > ${shellQuote(pidfile)}; ${adapterArgs}; printf '%s' $? > ${shellQuote(sentinel)}`;
+
+  let inner: string;
+  if (isCodex) {
+    inner = [
+      `echo $$ > ${shellQuote(pidfile)}`,
+      `set +e`,
+      `cat ${shellQuote(bannerPath)} 2>/dev/null`,
+      `touch ${shellQuote(progressPath)} 2>/dev/null`,
+      `tail -n +1 -f ${shellQuote(progressPath)} 2>/dev/null & TPID=$!`,
+      `${adapterArgs}`,
+      `RC=$?`,
+      `kill $TPID 2>/dev/null`,
+      `printf '%s' $RC > ${shellQuote(sentinel)}`,
+    ].join('; ');
+  } else {
+    inner = [
+      `echo $$ > ${shellQuote(pidfile)}`,
+      `cat ${shellQuote(bannerPath)} 2>/dev/null`,
+      `${adapterArgs}`,
+      `printf '%s' $? > ${shellQuote(sentinel)}`,
+    ].join('; ');
+  }
+
   let paneId: string | undefined;
   try {
     paneId = ctx.herdr.agentStart({ label, cwd: ctx.worktree, workspace, command: inner });
@@ -768,12 +891,15 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
     if (outcome === 'cancel') return true;
     waited += ctx.pollIntervalMs;
     elapsed += ctx.pollIntervalMs;
+    pollCodex();
     const activity = herdrActivity(ctx.sessionsDir, ctx.agentRunId);
     if (activity !== previousActivity) {
       previousActivity = activity;
       waited = 0;
     }
   }
+
+  pollCodex(true);
 
   if (recorder.isRecorded()) return true;
   if (!existsSync(sentinel)) {
