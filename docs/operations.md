@@ -27,10 +27,31 @@ bash hydra/scripts/integrate.sh 0042 <task-in-dep-order>...# cherry-pick + smoke
 Only `accept` candidates enter `squash`/`integrate`. `revise`/`reject` return to
 the same worktree (amend the spec + re-dispatch).
 
+## Harness runtime selection
+
+The command surface did not change during the TypeScript cutover: continue to
+invoke `bash hydra/scripts/<name>.sh ...`. Every operational shell entry point
+now selects the TypeScript implementation in `hydra-ts/src/` by default.
+
+```bash
+bash hydra/scripts/run-init.sh 0042                 # TypeScript (default)
+HYDRA_HARNESS=ts bash hydra/scripts/run-init.sh 0042
+HYDRA_HARNESS=bash bash hydra/scripts/run-init.sh 0042  # frozen Bash fallback
+```
+
+`HYDRA_HARNESS` supports `ts` and `bash`; unset means `ts`. The switch covers
+the harness and, through dispatch, the vendor-adapter runtime. A lower-level
+`HYDRA_ADAPTER_RUNTIME` override takes precedence inside TypeScript dispatch;
+leave it unset for a whole-harness rollback. The Bash bodies remain in place as
+frozen reference/rollback implementations. Their retirement is a separate
+future decision, not part of the cutover.
+
 ## Environment variables (the operational surface)
 
 | Var | Purpose |
 |---|---|
+| `HYDRA_HARNESS` | Harness runtime: `ts` (default) or `bash` (frozen reference/rollback fallback). |
+| `HYDRA_ADAPTER_RUNTIME` | Advanced mixed-runtime override for TypeScript dispatch: `ts` or `bash`; takes precedence over `HYDRA_HARNESS` for the adapter only. Normally leave unset. |
 | `HYDRA_WAVE` | Wave level; ≥1 activates the `wave_1` bootstrap (gitnexus analyze). Or set `hydra/WAVE`. |
 | `HYDRA_STATE_ROOT` | Override the external state root (tests point this at a throwaway dir). |
 | `HYDRA_WORKTREE_ROOT`, `HYDRA_REPO_ID` | Override worktree parent / repo id. |
@@ -54,6 +75,34 @@ nohup bash hydra/scripts/dispatch.sh 0042 <task> >/tmp/d.log 2>&1 </dev/null & d
 
 (If a dispatch *is* killed, it's safe: the trap records `agent_cancelled`, reaps
 the worker tree, and closes the pane — no dangling `running` task.)
+
+## TypeScript runtime and tests
+
+The TypeScript harness requires Node.js 22.6 or newer. Entry points call
+`hydra_resolve_node()` before starting TypeScript: it accepts a qualifying
+`node` on `PATH`, otherwise checks nvm-managed installs and common Homebrew
+locations, and fails with an actionable message when none qualifies.
+
+The resolver matters on machines where a stale `/usr/local/bin/node` shadows
+nvm's newer Node in login-shell or non-interactive contexts. That exact layout
+made the first shell-to-TypeScript hop fail with Node 17 even though an
+interactive shell selected Node 22. Do not diagnose this from an interactive
+`node --version` alone; reproduce it in the same shell context as the failing
+command. `hydra_resolve_node()` protects Hydra's shell entry points, but npm's
+own scripts still require the invoking shell to resolve Node 22.6+.
+
+From `hydra-ts/`, the standard suite is deliberately split:
+
+```bash
+npm test                 # test:concurrent, then test:promote
+npm run test:concurrent  # all test files except promote.test.ts
+npm run test:promote     # promote.test.ts alone
+```
+
+Keep `promote.test.ts` isolated. Its subprocess-heavy cases exhibited a
+load-dependent concurrency flake in which the concurrent run could silently
+omit the file; isolating it preserves concurrency for the rest of the suite
+while making the promotion gate's 26 tests explicit.
 
 ## Monitoring with herdr (Layer-1)
 
@@ -109,6 +158,7 @@ It's recommend-only — a human pins the role.
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| TypeScript entry point reports `bad option: --experimental-strip-types`, or `npm test` exits 9 | A stale Node (observed: `/usr/local/bin/node` v17.4.0) shadows nvm's Node in a login/non-interactive shell | Current entry points use `hydra_resolve_node()`; update to current code. For npm, invoke it from an environment where `node --version` is ≥22.6, or temporarily use `HYDRA_HARNESS=bash` for Hydra commands. |
 | Worker "completed" but no new commit; head == a prior commit | **Empty objective** (block-scalar not read) — historical, now fixed | `build-worker-prompt.sh` uses `hydra_yaml_block`. If you see it again, dump the prompt: `bash hydra/adapters/build-worker-prompt.sh <spec>` |
 | **Multiple vendors fail identically** | Suspect the harness, not the vendors | Dump the actual worker prompt first; check the drop and stderr under `sessions/` |
 | opencode/GLM: `Unexpected server error` immediately | Transient Z.AI coding-endpoint 500 | Retry; if persistent, `allocate.sh` route around; GLM read-only reviews usually still work |

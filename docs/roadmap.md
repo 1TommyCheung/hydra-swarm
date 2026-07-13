@@ -79,6 +79,29 @@ Dates are the day the wave's exit criteria were met in this repo.
 - Dispatch signal-safety: killed dispatches now record `agent_cancelled` and
   reap the whole worker tree (no dangling `running` tasks, no orphaned agents).
 
+### TypeScript harness cutover + entry-point hardening · 2026-07-13
+
+- **Cutover evidence (run 0036):** a real supervised shakedown ran the unchanged
+  `bash hydra/scripts/<name>.sh` command surface with `HYDRA_HARNESS=ts` through
+  run initialization, worktree creation, a herdr-pane-hosted Codex worker using
+  the TypeScript adapter, promotion, squash, and dependency-ordered integration
+  of two candidates with the combined verification gate. After that run passed,
+  the human-authorized default flipped to TypeScript. Unset now means `ts`;
+  `HYDRA_HARNESS=bash` is the explicit rollback. The Bash bodies remain frozen
+  as reference/rollback code; retirement remains a separate decision.
+- **Post-cutover independent review (run 0038):** the three vendor reviews
+  confirmed broad functional parity but exposed the stale-Node environment risk.
+  Codex reproduced the critical boundary gap directly: all shell wrappers used
+  bare `node`, so `/usr/local/bin/node` v17.4.0 could shadow nvm's Node 22 in a
+  non-interactive environment and fail before TypeScript started. The earlier
+  `process.execPath` fix protected adapter children, not this first hop.
+- **Entry-point hardening (run 0039):** all 26 operational wrappers now call
+  `hydra_resolve_node()`. It requires Node ≥22.6, checks `PATH`, then chooses the
+  highest qualifying nvm install or a common Homebrew install, and emits an
+  actionable error if none exists. The hostile-PATH reproduction passed after
+  the fix; the full suite reported 577 tests. See
+  `../hydra-reports/wave2-ts-cutover.md` and `../../hydra-ts/migration/`.
+
 ## Resolved open decisions (from ledger evidence, 2026-07-13)
 
 1. **External state root** — `~/.local/state/` remains the default; overridable

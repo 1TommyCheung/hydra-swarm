@@ -18,6 +18,15 @@ result(agent_run_id)                      -> path to inbox drop (untrusted)
 
 There is deliberately no `message()` (mid-turn instruction injection): mid-run instructions would exist only in a running context window (invisible to the ledger, unreconstructable, gate-invalidating); delivery mechanisms are vendor-asymmetric; interrupting mid-edit contaminates the worker context with inconsistent instruction sets. Course-correction = `cancel()` or wait for a checkpoint → amend spec (ledger event, version bump) → `resume()`. If a vendor session can't resume, cold-restart against the agent's branch — cheap, because work is committed at checkpoints.
 
+Each production adapter now has two implementations: the frozen Bash adapters
+under `hydra/adapters/` and
+`hydra-ts/src/adapter-{claude,codex,opencode,kimi}.ts`. Dispatch uses the
+TypeScript adapters by default through the normal `hydra/scripts/*.sh` command
+surface; `HYDRA_HARNESS=bash` selects the Bash harness and adapter fallback.
+TypeScript dispatch also supports a lower-level `HYDRA_ADAPTER_RUNTIME`
+mixed-runtime override; it should be left unset for normal operation and full
+rollback. The contract and trust boundaries are the same in both runtimes.
+
 ## 2. CLI capability matrix
 
 | Capability | Claude Code | Codex CLI (GPT‑5.6 Sol) | OpenCode (GLM 5.2) | Kimi Code (kimi/k2.7-code) |
@@ -90,6 +99,13 @@ All guarantees enforced, or the worker takes the subprocess path. Uniform isolat
 **Codex (`adapters/codex.sh`)** — Wave 0. `codex exec` in worktree; sandbox read-only for reviewer role; hooks via adapter script.
 
 **OpenCode / GLM 5.2 (`adapters/opencode.sh`)** — Wave 1 read-only; **implementer role added Wave 2 (open-decision #2 resolved).** Roles: exploration fan-out (cheap, `--format json`, optional `opencode serve` warm server) and **long textual diff review / whole-repo audit** (1M context; `hydra-reviewer` profile, edit/bash deny). The `hydra-implementer` profile (edit/bash allow) gives it a write role — refactoring/standards-adherence is its documented sweet spot — but it is **availability-gated**: the Z.AI coding endpoint returned transient 500s on write workloads. Documented weaknesses (from-scratch generation, marathons) route greenfield elsewhere. Headless requires `--auto`.
+
+OpenCode's herdr integration uses the same decoupled hosting pattern under both
+runtimes: the vendor process always runs as a plain background subprocess and
+is **never hosted directly in a herdr pane**. When live visibility is enabled,
+a separate monitor-only pane tails the adapter capture stream and closes after
+the worker exits. This preserves observability without reintroducing the
+herdr-hosted OpenCode failure mode.
 
 **Kimi / kimi/k2.7-code (`adapters/kimi.sh`)** — Wave 2. Roles: `visual_debugging` (only natively multimodal coder in the pool — screenshots, mockups, video repro), mobile/UI implementation, cheap contained loops. Print mode auto-approves tools → Kimi never takes a write role outside full filesystem/network sandbox. Adapter must retain `reasoning_content` across multi-step tool calls (`preserve_thinking` is mandatory; dropping it causes errors).
 

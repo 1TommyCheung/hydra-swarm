@@ -1,6 +1,6 @@
 # Hydra-Swarm — Documentation Set
 
-**Version:** 3.2 · **Date:** 2026-07-13 · **Status:** **Wave 2 operational** (all four heads). Waves 0–2 delivered; front of the roadmap is packaging + the hardening daemon.
+**Version:** 3.2 · **Date:** 2026-07-13 · **Status:** **Wave 2 operational** (all four heads). Waves 0–2 delivered; the TypeScript harness is the operational default; front of the roadmap is packaging + the hardening daemon.
 **Supersedes:** the single-document specs v1–v3. This document set is self-contained; no prior version is a normative dependency.
 **Evidence:** per-wave completion reports and the Wave 2 exit snapshot live in `../hydra-reports/`. Day-to-day operation is documented in `operations.md`.
 
@@ -8,12 +8,19 @@
 
 **Hydra-Swarm**: a local multi-agent software development system. One lead (the *head* — Claude Code) plans and judges; a deterministic harness owns processes, state, and verification; heterogeneous coding agents (the *swarm* — Claude Code, Codex/GPT‑5.6 Sol, OpenCode/GLM 5.2, Kimi K2.7 Code) implement in isolated Git worktrees; accepted work converges through a controlled integration worktree behind evidence gates. Cut off the head and a new one grows from Git + the state store — lead replacement is a design guarantee, not a recovery hack.
 
+The harness implementation now lives in `hydra-ts/src/*.ts`. Operators continue
+to call the stable `hydra/scripts/<name>.sh` entry points; those wrappers execute
+the TypeScript implementation by default. Set `HYDRA_HARNESS=bash` for the
+frozen Bash reference/rollback implementation. The migration findings, plans,
+reviews, and shakedown history are in `../../hydra-ts/migration/`.
+
 ## Naming conventions (canonical)
 
 | Artifact | Name |
 |---|---|
 | System | Hydra-Swarm |
 | Tracked repo directory | `hydra/` |
+| Default harness implementation | `hydra-ts/src/` (via `hydra/scripts/*.sh`) |
 | Lead skill | `.claude/skills/hydra-protocol/` |
 | Setup/upgrade skill | `.claude/skills/hydra-setup/` |
 | External state root | `~/.local/state/<repo-id>-hydra/` |

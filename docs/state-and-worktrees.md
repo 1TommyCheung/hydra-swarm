@@ -19,8 +19,18 @@
 │   ├── adapters/         # claude.sh, codex.sh  (opencode.sh, kimi.sh in Wave 1/2)
 │   ├── policies/         # ownership.yaml, permissions.yaml, verification.yaml
 │   └── tasks/planned/    # human-reviewed task definitions (pre-run)
+├── hydra-ts/
+│   ├── src/              # default harness + vendor-adapter implementations
+│   ├── test/             # TypeScript harness tests
+│   └── migration/        # cutover plans, findings, reviews, shakedown history
 └── docs/hydra-reports/   # selected final reports only (optional)
 ```
+
+`hydra/scripts/<name>.sh` remains the stable operator command surface, but its
+default execution path is now the corresponding module in `hydra-ts/src/`.
+`HYDRA_HARNESS=bash` selects the frozen Bash body for reference or rollback.
+This runtime cutover did not change the external state root, run-directory
+schema, worktree paths, branch naming, or custody boundaries described below.
 
 ### Domain 2 — External runtime state (never in any worktree, never tracked)
 
