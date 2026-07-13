@@ -5,12 +5,13 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import {
   main,
   promote,
@@ -33,6 +34,25 @@ function cleanTmp(): void {
   if (existsSync(TEST_TMP)) {
     rmSync(TEST_TMP, { recursive: true, force: true });
   }
+}
+
+function worktreeEntriesOutsideTestTmp(): string[] {
+  const top = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+    encoding: 'utf8',
+  }).trim();
+  const entries: string[] = [];
+
+  function visit(dir: string): void {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (path === TEST_TMP) continue;
+      entries.push(relative(top, path));
+      if (entry.isDirectory()) visit(path);
+    }
+  }
+
+  visit(top);
+  return entries.sort();
 }
 
 function initGitRepo(dir: string): void {
@@ -242,8 +262,21 @@ function ledgerPath(stateRoot: string, runId: string): string {
 }
 
 describe('promote', () => {
-  before(() => mkdirSync(TEST_TMP, { recursive: true }));
-  after(cleanTmp);
+  const savedStateRoot = process.env.HYDRA_STATE_ROOT;
+  const initialOutsideEntries = worktreeEntriesOutsideTestTmp();
+
+  before(() => {
+    mkdirSync(TEST_TMP, { recursive: true });
+    process.env.HYDRA_STATE_ROOT = TEST_TMP;
+  });
+  after(() => {
+    cleanTmp();
+    if (savedStateRoot === undefined) {
+      delete process.env.HYDRA_STATE_ROOT;
+    } else {
+      process.env.HYDRA_STATE_ROOT = savedStateRoot;
+    }
+  });
 
   it('throws on missing arguments', async () => {
     for (const args of [
@@ -838,5 +871,15 @@ writable_paths:
     assert.deepEqual(JSON.parse(readFileSync(observed, 'utf8')), [
       { command: 'test pass', status: 'passed' },
     ]);
+  });
+
+  it('does not leak directories or files outside TEST_TMP (regression)', () => {
+    assert.equal(process.env.HYDRA_STATE_ROOT, TEST_TMP);
+
+    const initialSet = new Set(initialOutsideEntries);
+    const leaked = worktreeEntriesOutsideTestTmp()
+      .filter((entry) => !initialSet.has(entry));
+
+    assert.deepEqual(leaked, [], `unexpected paths leaked outside TEST_TMP:\n${leaked.join('\n')}`);
   });
 });
