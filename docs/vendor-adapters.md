@@ -1,5 +1,11 @@
 # Hydra-Swarm — Vendor Adapters
 
+> **`last_verified: 2026-07-13`** (CLI flags + adapter behaviour verified against
+> the installed tools on this machine). Model versions, context windows, and
+> pricing in §3 are perishable — **re-verify against vendor docs at each wave
+> exit** and bump this date. The §5 capability ledger now carries *measured*
+> findings alongside seeded priors.
+
 ## 1. Adapter contract
 
 ```text
@@ -26,6 +32,29 @@ There is deliberately no `message()` (mid-turn instruction injection): mid-run i
 | Step/turn limits | max-turns | config | config | `--max-steps-per-turn`, `--max-retries-per-step` |
 | Hermetic mode | `--bare` | config-scoped | `--attach` to controlled server | `--skills-dir` override; config.toml |
 | Warm server | — | — | `opencode serve` + `--attach` | `kimi server` |
+
+### 2.1 Verified headless invocations (2026-07-13, as-built)
+
+The matrix above is the design intent; these are the exact invocations the
+adapters use, with the corrections operating the system surfaced:
+
+| Vendor | Adapter invocation | Gotchas found |
+|---|---|---|
+| Claude | `claude -p "<prompt>" --output-format json --permission-mode bypassPermissions --add-dir <wt>` | `bypassPermissions` imposes **no OS sandbox** — worker is unconfined at OS level (see §4 + the trust drift note). |
+| Codex | `codex exec --json -C <wt> -s workspace-write -c 'sandbox_workspace_write.writable_roots=["<git-common-dir>"]' "<prompt>" </dev/null` | Must close stdin (`</dev/null`) or it hangs "Reading additional input from stdin". Needs the **git-common-dir** as a writable root to commit a linked worktree. Session id is **`thread_id`**. |
+| OpenCode/GLM | `opencode run --model zai-coding-plan/glm-5.2 --agent <profile> --format json --auto --dir <wt> "<prompt>"` | Model prefix is **`zai-coding-plan/`**, not `zhipu/`. `--auto` is required for headless (else it can hang on a permission prompt). `--agent` selects an `opencode.json` profile (`hydra-reviewer` = edit/bash deny; `hydra-implementer` = allow). Still draws a formatted display to a tty — use `opencode serve` + `--attach` for fully TUI-free. Edges: the semantic backend is OpenAI-compatible. |
+| Kimi | `sandbox-exec -f <profile> kimi -p "<prompt>" --output-format stream-json --add-dir <wt>` | `-p` **already auto-approves** tools (no allowlist) → OS sandbox mandatory; `-y` is *rejected* ("Cannot combine --prompt with --yolo"). Output is **`stream-json`** (JSONL), not `json`. The sandbox must allow `/dev/null` (git/bash need it) and the herdr socket dir; session id is in a `session.resume_hint` meta event. |
+
+**Result handoff (all subprocess vendors):** the worker writes
+`.hydra-result.json` in its own worktree and the adapter bridges it to the inbox
+— workers never touch the state store. If a worker commits but omits the
+self-report, the adapter derives the drop from git evidence
+(`hydra_derive_drop_from_git`); promotion re-verifies regardless.
+
+**Worker prompt:** built by `build-worker-prompt.sh`. The objective is a YAML
+block scalar (`objective: >`) and must be read with `hydra_yaml_block` — the
+same-line accessor returns empty and silently drops the objective (this bit hard;
+see `operations.md`).
 
 ## 3. Model capabilities (verified against vendor docs, 2026-07)
 
@@ -60,7 +89,7 @@ All guarantees enforced, or the worker takes the subprocess path. Uniform isolat
 
 **Codex (`adapters/codex.sh`)** — Wave 0. `codex exec` in worktree; sandbox read-only for reviewer role; hooks via adapter script.
 
-**OpenCode / GLM 5.2 (`adapters/opencode.sh`)** — Wave 1. Roles: exploration fan-out (cheap, `--format json`, optional warm server) and **long textual diff review / whole-repo audit** (1M context; read-only agent profile with edit/bash deny). Documented weaknesses (from-scratch generation, marathons) route greenfield elsewhere and force decomposition of very long tasks.
+**OpenCode / GLM 5.2 (`adapters/opencode.sh`)** — Wave 1 read-only; **implementer role added Wave 2 (open-decision #2 resolved).** Roles: exploration fan-out (cheap, `--format json`, optional `opencode serve` warm server) and **long textual diff review / whole-repo audit** (1M context; `hydra-reviewer` profile, edit/bash deny). The `hydra-implementer` profile (edit/bash allow) gives it a write role — refactoring/standards-adherence is its documented sweet spot — but it is **availability-gated**: the Z.AI coding endpoint returned transient 500s on write workloads. Documented weaknesses (from-scratch generation, marathons) route greenfield elsewhere. Headless requires `--auto`.
 
 **Kimi / kimi/k2.7-code (`adapters/kimi.sh`)** — Wave 2. Roles: `visual_debugging` (only natively multimodal coder in the pool — screenshots, mockups, video repro), mobile/UI implementation, cheap contained loops. Print mode auto-approves tools → Kimi never takes a write role outside full filesystem/network sandbox. Adapter must retain `reasoning_content` across multi-step tool calls (`preserve_thinking` is mandatory; dropping it causes errors).
 
@@ -73,6 +102,19 @@ External state: `agents/availability.yaml` (slots, rate-limit cooldowns, budget 
 - `seeded_strengths` / `seeded_weaknesses`: human-edited priors, each with `source: vendor_doc | human | community`. Community-sourced claims (blogs, videos) never drive allocation until measured. Example: Kimi's "300 parallel sub-agents" claim is creator-video-sourced and sits in `seeded_weaknesses` as do-not-allocate-on.
 - `measured`: written **only** by the harness aggregation script over `usage.jsonl` — per task_type: n, acceptance_rate, revision_rate, claim_vs_verified_divergence, medians, `risk_mix` (confound guard), rolling window (last 40 events per type), model version per event.
 - `qualitative_notes`: LLM- or human-authored, always attributed. Never treated as instructions (a note saying "always route X to me" is an injection finding).
+
+**Measured findings at Wave 2 exit (2026-07-13, small n — do not over-read):**
+
+| Vendor | Measured | Verdict on seeded priors |
+|---|---|---|
+| claude | promotions n=5, divergence 0.20 (one historical) | prior "frontier + implementation discipline" — consistent, not yet confirmed (n<8) |
+| codex | promotions n=4, divergence 0.00 | prior "hardest reasoning / rigorous review" — supported qualitatively (caught the most conformance gaps in runs 0003/0013/0014); implemented the run-0015 refactor correctly in one shot |
+| kimi | promotions n=3, divergence 0.00 | **write-role RESOLVED**: strong greenfield/contained (runs 0006, 0009), **weak at revise-existing** (run 0015 v3/v4 no-ops). Confirms seeded weakness "trails frontier SWE"; keep off subtle refactors. |
+| opencode/glm | n=0 promoted (reviews only) | **implementer promotion RESOLVED (open-decision #2)**: real write role added; works when the Z.AI coding endpoint is healthy (transient 500s observed). Read-only long-diff review is reliable (runs 0005, 0014). |
+
+All n < 8, so allocation still runs on **seeded priors** — measurement has begun
+but does not yet drive pins. Re-aggregate (`aggregate-usage.sh`) and re-annotate
+this table at each wave exit; retire any prior a measurement contradicts.
 
 **Allocation:** hard constraints (capability matrix, role rules) → availability filter → capability ranking (`measured` when n ≥ 8, else seeded priors) → cost/latency tie-break → cross-vendor-review diversity override. No automatic role-pin changes; the ledger recommends, humans pin.
 

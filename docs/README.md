@@ -1,7 +1,8 @@
 # Hydra-Swarm — Documentation Set
 
-**Version:** 3.1 · **Date:** 2026-07-12 · **Status:** Architectural baseline accepted; Wave 0 ready to implement
+**Version:** 3.2 · **Date:** 2026-07-13 · **Status:** **Wave 2 operational** (all four heads). Waves 0–2 delivered; front of the roadmap is packaging + the hardening daemon.
 **Supersedes:** the single-document specs v1–v3. This document set is self-contained; no prior version is a normative dependency.
+**Evidence:** per-wave completion reports and the Wave 2 exit snapshot live in `../hydra-reports/`. Day-to-day operation is documented in `operations.md`.
 
 ## What this is
 
@@ -36,22 +37,37 @@ Reserved prefix rule: no human or agent creates branches under `hydra/` or `hydr
 | `task-result-review-contracts.md` | Task spec, result contract, inbox→promotion, review gates, integration lifecycle, ledger schemas |
 | `code-intelligence.md` | GitNexus and Graphify — Wave 1+ only |
 | `vendor-adapters.md` | Adapter contract, per-vendor capabilities and quirks, capability ledger |
-| `roadmap.md` | Waves 1–2, later hardening (harness daemon), open decisions |
+| `roadmap.md` | Delivered changelog (Waves 0–2), resolved open decisions, Wave 3 + daemon, doc-maintenance checklist |
+| `operations.md` | **Runbook** — start/monitor/kill a run, herdr, the lead-kill drill, common failures + fixes, concurrent-run rules |
 | `packaging.md` | Wave 3: kit extraction, deployment to new repos, global ledger, upgrade protocol |
 
-## Implementing Wave 0?
+## Operating the system? (Wave 2 is live)
 
 Read, in order:
 
-1. `architecture.md`
-2. `wave0-implementation.md`
-3. `trust-and-permissions.md`
-4. `task-result-review-contracts.md`
+1. `../../.claude/skills/hydra-protocol/SKILL.md` — the lead's run loop
+2. `operations.md` — the runbook (start/monitor/kill, herdr, recovery drill, failure modes)
+3. `task-result-review-contracts.md` — the task/result/review/integration contracts
+4. `vendor-adapters.md` — the four heads, capability ledger, allocation
 
-**Do not implement Wave 1 or Wave 2 functionality.** In particular: no GitNexus, no Graphify, no capability profiles, no OpenCode/Kimi adapters, no monitors, no OTel. Wave 0 is Claude + Codex workers and the core evidence-gated integration loop only.
+## Re-installing from scratch or learning how it was built?
 
-## Central hypothesis (what Wave 0 must prove)
+`wave0-implementation.md` is the frozen bootstrap record (historical). For a new
+repo, the `hydra-setup` skill supersedes it (Wave 3 / `packaging.md`).
+
+## Central hypothesis — verdict
 
 > A lead-orchestrated, worktree-isolated, evidence-gated integration process produces more reliable combined code than agents operating directly on one branch.
 
-Every Wave 0 scoping decision serves testing this hypothesis with the smallest credible build.
+**Verdict (2026-07-13): supported, demonstrated — not yet a statistical claim.**
+In the hypothesis run (0002), two candidates each passed their own tests and
+cross-vendor review, integrated with no textual conflict, yet the **combined
+verification gate caught a semantic conflict** (a producer returning dollars, a
+consumer expecting cents) that on a single shared branch would have merged
+silently. That is the failure the whole process exists to catch, and it caught
+it. Supporting evidence across 15 runs: **zero** agent-reported "passed" claims
+were accepted without harness re-verification; the trust boundary rejected 6
+distinct classes of bad candidate; measured claim-vs-verified divergence stayed
+low (Claude 0.20/n=5, Codex 0.00/n=4, Kimi 0.00/n=3). The honest limit: this is
+one planted-conflict demonstration plus small-n operational data, not a
+controlled A/B against a single-branch baseline — see `../hydra-reports/wave2-exit-report.md`.
