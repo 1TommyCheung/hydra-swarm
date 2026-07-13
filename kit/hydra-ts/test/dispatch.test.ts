@@ -288,9 +288,17 @@ describe('dispatch Bash parity', () => {
     const f = fixture(runId());
     rmSync(f.adapterPath);
     const { spawn } = fakeSpawn();
-    await assert.rejects(dispatch(f.runId, 'task-a', injectedOptions(f, spawn)), /no adapter for vendor 'claude'/);
+    await assert.rejects(dispatch(
+      f.runId,
+      'task-a',
+      injectedOptions(f, spawn, { adapterRuntime: 'bash' }),
+    ), /no adapter for vendor 'claude'/);
     mkdirSync(f.adapterPath);
-    await assert.rejects(dispatch(f.runId, 'task-a', injectedOptions(f, spawn)), /no adapter for vendor 'claude'/);
+    await assert.rejects(dispatch(
+      f.runId,
+      'task-a',
+      injectedOptions(f, spawn, { adapterRuntime: 'bash' }),
+    ), /no adapter for vendor 'claude'/);
   });
 
   it('rejects a missing or non-directory worktree', async () => {
@@ -304,7 +312,7 @@ describe('dispatch Bash parity', () => {
   it('dispatches the selected adapter and closes task_started with agent_exited', async () => {
     const f = fixture(runId(), { specVersion: '03' });
     const mock = fakeSpawn();
-    const options = injectedOptions(f, mock.spawn);
+    const options = injectedOptions(f, mock.spawn, { adapterRuntime: 'bash' });
     const { output, value } = await captureStdout(() => dispatch(f.runId, 'task-a', options));
 
     assert.equal(value.agentRunId, `${f.runId}-task-a-v03`);
@@ -323,16 +331,14 @@ describe('dispatch Bash parity', () => {
     assert.deepEqual(options.usage, [[f.runId, 'task-a', 'claude', value.agentRunId]]);
   });
 
-  it('uses the Bash adapter directly when the runtime is unset or unrecognized', async () => {
-    for (const env of [{}, { HYDRA_ADAPTER_RUNTIME: 'python' }]) {
-      const f = fixture(runId());
-      const mock = fakeSpawn();
-      await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { env }));
+  it('defaults to the TypeScript adapter when no runtime is configured', async () => {
+    const f = fixture(runId());
+    const mock = fakeSpawn();
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { env: {} }));
 
-      assert.equal(mock.calls.length, 1);
-      assert.equal(mock.calls[0].command, f.adapterPath);
-      assert.equal(mock.calls[0].args[0], 'start');
-    }
+    assert.equal(mock.calls.length, 1);
+    assert.equal(mock.calls[0].command, process.execPath);
+    assert.equal(mock.calls[0].args[1], f.tsAdapterPath);
   });
 
   it('runs TypeScript adapters through node with the original arguments for multiple vendors', async () => {
@@ -354,22 +360,33 @@ describe('dispatch Bash parity', () => {
     }
   });
 
-  it('treats HYDRA_HARNESS=ts as TypeScript adapter runtime unless explicitly overridden', async () => {
-    const implied = fixture(runId());
-    const impliedMock = fakeSpawn();
-    await dispatch(implied.runId, 'task-a', injectedOptions(implied, impliedMock.spawn, {
-      env: { HYDRA_HARNESS: 'ts' },
+  it('uses the Bash adapter when HYDRA_HARNESS explicitly requests bash', async () => {
+    const f = fixture(runId());
+    const mock = fakeSpawn();
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+      env: { HYDRA_HARNESS: 'bash' },
     }));
-    assert.equal(impliedMock.calls[0].command, process.execPath);
-    assert.equal(impliedMock.calls[0].args[1], implied.tsAdapterPath);
 
-    const overridden = fixture(runId());
-    const overriddenMock = fakeSpawn();
-    await dispatch(overridden.runId, 'task-a', injectedOptions(overridden, overriddenMock.spawn, {
+    assert.equal(mock.calls.length, 1);
+    assert.equal(mock.calls[0].command, f.adapterPath);
+    assert.equal(mock.calls[0].args[0], 'start');
+  });
+
+  it('prefers HYDRA_ADAPTER_RUNTIME over HYDRA_HARNESS for either runtime', async () => {
+    const bash = fixture(runId());
+    const bashMock = fakeSpawn();
+    await dispatch(bash.runId, 'task-a', injectedOptions(bash, bashMock.spawn, {
       env: { HYDRA_HARNESS: 'ts', HYDRA_ADAPTER_RUNTIME: 'bash' },
     }));
-    assert.equal(overriddenMock.calls[0].command, overridden.adapterPath);
-    assert.equal(overriddenMock.calls[0].args[0], 'start');
+    assert.equal(bashMock.calls[0].command, bash.adapterPath);
+
+    const ts = fixture(runId());
+    const tsMock = fakeSpawn();
+    await dispatch(ts.runId, 'task-a', injectedOptions(ts, tsMock.spawn, {
+      env: { HYDRA_HARNESS: 'bash', HYDRA_ADAPTER_RUNTIME: 'ts' },
+    }));
+    assert.equal(tsMock.calls[0].command, process.execPath);
+    assert.equal(tsMock.calls[0].args[1], ts.tsAdapterPath);
   });
 
   it('prefers the adapterRuntime option over HYDRA_ADAPTER_RUNTIME', async () => {
@@ -541,7 +558,10 @@ describe('dispatch Bash parity', () => {
     utimesSync(oldPath, old, old);
     utimesSync(newEmptyPath, recent, recent);
     const mock = fakeSpawn();
-    const options = injectedOptions(f, mock.spawn, { env: { HYDRA_DELIVERY: 'resume' } });
+    const options = injectedOptions(f, mock.spawn, {
+      adapterRuntime: 'bash',
+      env: { HYDRA_DELIVERY: 'resume' },
+    });
     await dispatch(f.runId, 'task-a', options);
 
     assert.equal(mock.calls[0].args[0], 'resume');
@@ -554,6 +574,7 @@ describe('dispatch Bash parity', () => {
     writeFileSync(join(f.sessionsDir, `${f.runId}-task-a-v1.json`), JSON.stringify({ session_id: 'session-1' }));
     const mock = fakeSpawn();
     await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+      adapterRuntime: 'bash',
       env: { HYDRA_DELIVERY: 'resume' },
     }));
     assert.equal(mock.calls[0].args[0], 'start');
@@ -670,6 +691,7 @@ describe('dispatch Bash parity', () => {
     };
 
     await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+      adapterRuntime: 'bash',
       env: { HYDRA_HERDR_PANES: '1', HYDRA_OPENCODE_MODEL: 'test/glm' },
       herdr,
       buildWorkerPrompt: () => 'the rendered worker prompt',
@@ -828,6 +850,7 @@ describe('dispatch Bash parity', () => {
       });
       let spawnCalled = false;
       await dispatch(f.runId, 'task-a', injectedOptions(f, () => { spawnCalled = true; throw new Error('no spawn'); }, {
+        adapterRuntime: 'bash',
         env: { HYDRA_HERDR_PANES: '1' },
         herdr,
         clock,

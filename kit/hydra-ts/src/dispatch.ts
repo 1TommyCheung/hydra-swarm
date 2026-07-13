@@ -982,8 +982,8 @@ export async function dispatch(
   const adapterRuntime = (
     options.adapterRuntime
     ?? env.HYDRA_ADAPTER_RUNTIME
-    ?? (env.HYDRA_HARNESS === 'ts' ? 'ts' : undefined)
-  ) === 'ts' ? 'ts' : 'bash';
+    ?? (env.HYDRA_HARNESS === 'bash' ? 'bash' : 'ts')
+  ) === 'bash' ? 'bash' : 'ts';
   const adapterPath = adapterRuntime === 'ts'
     ? join(repo, 'hydra-ts', 'src', `adapter-${spec.vendor}.ts`)
     : join(repo, 'hydra', 'adapters', `${spec.vendor}.sh`);

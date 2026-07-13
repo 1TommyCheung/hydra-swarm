@@ -21,7 +21,7 @@ set -euo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SELF_DIR/lib.sh"
-if [ "${HYDRA_HARNESS:-bash}" = "ts" ]; then
+if [ "${HYDRA_HARNESS:-ts}" != "bash" ]; then
 exec node --experimental-strip-types "$SELF_DIR/../../hydra-ts/src/graph-impact.ts" "$@"
 fi
 
