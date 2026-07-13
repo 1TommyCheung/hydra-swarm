@@ -1,9 +1,11 @@
 # Hydra-Swarm — Packaging and Multi-Repo Deployment (Wave 3)
 
-> **Status: design spec — nothing in Wave 3 is built yet.** Wave 2 is operational
-> (2026-07-13); this is the plan for the *next* wave. Scope and the preflight
-> matrix below are informed by a portability audit of what actually pins Hydra to
-> the first machine (roadmap → Wave 3). `last_verified: 2026-07-13`.
+> **Status: preflight tooling (`hydra doctor`) is built and tested; kit
+> extraction / install / upgrade machinery is still design-only.** Wave 2 is
+> operational (2026-07-13); the rest of this doc remains the plan for the *next*
+> wave. Scope and the preflight matrix below are informed by a portability audit
+> of what actually pins Hydra to the first machine (roadmap → Wave 3).
+> `last_verified: 2026-07-13`.
 
 Applies only after Wave 2 exit criteria pass on the first repository. Waves 0–2 are the de-risking sequence for building Hydra-Swarm **once**; subsequent repositories install the proven kit at full capability.
 
@@ -43,11 +45,22 @@ before install. `hydra doctor` checks, and refuses to proceed on any miss:
 | Vendor CLIs + auth | `claude`, `codex`, `opencode` (+ Z.AI), `kimi` (+ OAuth) — headless smoke each | dispatch fails; adapter reports it |
 | Code intelligence | `gitnexus`, `graphify` (+ `MOONSHOT_API_KEY`/`ANTHROPIC_API_KEY`) | Wave 1/2 code-intel omitted (advisory, non-fatal) |
 | Observability | `herdr` + `herdr integration install {claude,codex,kimi,opencode}` (global, not cloned) | Layer-1 monitor absent (non-fatal) |
-| **Platform sandbox** | `sandbox-exec` (macOS) **or** `firejail`/`bwrap` (Linux) | **Kimi/auto-approving write roles refused, on the record** — read-only roles still work |
+| **Platform sandbox** | `srt` (Anthropic `sandbox-runtime`, npm package `@anthropic-ai/sandbox-runtime`) — Seatbelt backend on macOS, bubblewrap backend on Linux, identical CLI/config | **Kimi/auto-approving write roles refused, on the record** — read-only roles still work |
 | Timeout | `timeout`/`gtimeout` preferred; perl fallback otherwise | none (fallback is portable) |
 
 Auth is machine-global (`~/.claude`, `~/.codex`, `~/.local/share/opencode`,
 `~/.kimi-code/oauth`) and never ships in the kit.
+
+> **As-built for the preflight only:** `hydra-swarm-plugin/` now contains a real,
+> tested Claude Code plugin skeleton implementing exactly this table. The plugin
+> manifest is at `hydra-swarm-plugin/.claude-plugin/plugin.json`; the slash
+> command is `hydra-swarm-plugin/commands/hydra-doctor.md`; and the script it
+> runs is `hydra-swarm-plugin/kit/scripts/doctor.sh`. The script performs the
+> seven check classes shown above, distinguishes fatal `FAIL` from advisory
+> `WARN`, and exits non-zero only when a fatal check fails (shell version,
+> missing `jq`/`git`/Node, or a broken `srt` sandbox). It does **not** implement
+> Steps 1–5; install, per-project inputs, self-checks, and shakedown remain pure
+> design spec.
 
 ### Step 1 — Install (mechanical)
 `hydra-setup` skill, install mode: copy kit → `hydra/` + `.claude/`; create `~/.local/state/<repo-id>-hydra/` (full Domain-2 layout); link the global agents ledger (§4); write `hydra/WAVE = 2` and `hydra/VERSION = <kit-version>`; add `.gitignore` entries; commit; tag `hydra-wave-2`.

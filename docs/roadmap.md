@@ -102,6 +102,26 @@ Dates are the day the wave's exit criteria were met in this repo.
   the fix; the full suite reported 577 tests. See
   `../hydra-reports/wave2-ts-cutover.md` and `../../hydra-ts/migration/`.
 
+### Wave 3 preflight tooling — first real artifact · 2026-07-13
+
+- **`srt` replaces `sandbox-exec` for Kimi sandboxing** (run 0041, commit
+  `15d48de`) — migrated Kimi's OS sandbox from macOS-only `sandbox-exec` to
+  Anthropic's `srt` (`@anthropic-ai/sandbox-runtime`), which uses Seatbelt on
+  macOS and bubblewrap on Linux behind the identical CLI/config. This closes the
+  Linux portability gap for Kimi's write role; `firejail`/`bwrap` direct support
+  was never implemented.
+- **`hydra-swarm-plugin` skeleton + working `/hydra-doctor`** (commit
+  `b2a1c43`) — a Claude Code plugin skeleton with manifest
+  (`hydra-swarm-plugin/.claude-plugin/plugin.json`), slash command
+  (`hydra-swarm-plugin/commands/hydra-doctor.md`), and a tested preflight script
+  (`hydra-swarm-plugin/kit/scripts/doctor.sh`). The script implements all seven
+  `hydra doctor` check classes (shell, core tools, vendor CLIs, code
+  intelligence, observability, `srt` sandbox, timeout fallback), reports fatal
+  `FAIL` vs advisory `WARN`, and exits non-zero only on fatal failures. The
+  plugin currently contains **only** the doctor script and command; kit
+  extraction, `hydra-setup`/`hydra-init`, policy templates, global ledger
+  migration, and bundle export/import are still not built.
+
 ## Resolved open decisions (from ledger evidence, 2026-07-13)
 
 1. **External state root** — `~/.local/state/` remains the default; overridable
@@ -137,8 +157,10 @@ Dates are the day the wave's exit criteria were met in this repo.
 ### Wave 3 — packaging & portability (`packaging.md`) — **next**
 
 **Goal:** install the proven kit on a *second* repo at full capability, and carry
-measured evidence across machines and repos. Nothing in Wave 3 is built yet;
-`packaging.md` is the design. Scope is informed by a portability audit
+measured evidence across machines and repos. Preflight tooling (`hydra doctor`)
+is now built and tested; the remaining Wave 3 items (kit repo, `hydra-setup`,
+bundle export/import, global ledger, per-project verification floor, retention
+policy) are still design-only. Scope is informed by a portability audit
 (2026-07-13) of what actually pins Hydra to this machine.
 
 **What the audit found (drives Wave 3 scope):**
@@ -147,8 +169,9 @@ measured evidence across machines and repos. Nothing in Wave 3 is built yet;
 - The friction is the *ecosystem*: 10 external CLIs + 4 vendor logins + Graphify
   API keys + the global herdr integrations — none of which clone with the repo.
 - **bash 4+ required** (`mapfile` in 5 scripts); macOS ships 3.2.
-- **Kimi write-role is macOS-only** (`sandbox-exec`); on Linux the adapter fails
-  closed (refuses the write role) — a real cross-platform gap.
+- **Kimi write-role portability** was a real cross-platform gap under
+  `sandbox-exec` (macOS-only); now closed by migrating to `srt`, which works on
+  both macOS and Linux with the same CLI/config.
 - **Run history / measured profiles don't clone** — the recovery bundle is
   documented (`state-and-worktrees` §2) but the export/import scripts don't exist.
 - The **global capability ledger** (`packaging.md` §4) is designed but not built —
@@ -160,11 +183,13 @@ measured evidence across machines and repos. Nothing in Wave 3 is built yet;
    with `kit.manifest.yaml` (checksums + min tested CLI versions).
 2. **`hydra-setup` skill** — install / upgrade / doctor modes; supersedes
    `wave0-implementation.md` for new installs.
-3. **`hydra doctor` preflight** (from the audit) — checks bash ≥ 4; the 10 tools
-   present; each vendor auth reachable (headless smoke per CLI); Graphify key set;
-   herdr integrations installed; a platform sandbox available (`sandbox-exec`
-   macOS / `firejail`|`bwrap` Linux, else Kimi write-role is refused, on the
-   record). Fails loud with the specific gap.
+3. **`hydra doctor` preflight** — **built and tested** as a Claude Code plugin
+   command in `hydra-swarm-plugin/`. Checks bash ≥ 4; `jq`, `git`, and Node ≥ 22.6;
+   each vendor CLI present (headless smoke per CLI, non-fatal individually);
+   Graphify/`gitnexus` present (non-fatal); `herdr` present (non-fatal); `srt`
+   sandbox available and enforcing (Seatbelt on macOS, bubblewrap on Linux, else
+   Kimi write-role is refused, on the record); plus a timeout fallback. Exits
+   non-zero only on fatal failures.
 4. **Run-bundle export/import** (`bundle-export.sh` / `bundle-import.sh`) — closes
    the Tier-3 gap: a sanitized bundle (run.yaml, tasks, promoted results, reviews,
    verification, `events.jsonl`; **excludes** credentials, sessions, raw
@@ -190,8 +215,10 @@ measured evidence across machines and repos. Nothing in Wave 3 is built yet;
    cross-repo confound guard demonstrably suppressing an easy-task-only vendor.
 
 **Wave 3 open decisions:**
-- **Cross-platform sandbox** for the Kimi (and future auto-approving) write role:
-  add `firejail`/`bwrap` on Linux, or keep Kimi read-only off-macOS?
+- **Cross-platform sandbox** — resolved by adopting `srt`
+  (`@anthropic-ai/sandbox-runtime`), which gives a single cross-platform tool
+  with Seatbelt on macOS and bubblewrap on Linux. Direct `firejail`/`bwrap`
+  support is no longer planned.
 - **Kit distribution** — private git repo (clone/tag) vs `npm`/`brew` package.
 - **Global-ledger strictness** — how aggressively cross-repo confound guards
   down-weight a vendor that only saw easy tasks in one repo.
