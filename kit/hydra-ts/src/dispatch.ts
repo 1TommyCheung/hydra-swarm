@@ -13,6 +13,7 @@ import {
 import { constants, cpus } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { buildWorkerPrompt } from './build-worker-prompt.ts';
 import { die, herdrState, killTree, log, now, stateRoot, warn, yamlScalar } from './lib.ts';
 import { recordUsage } from './record-usage.ts';
 
@@ -44,7 +45,7 @@ export interface HerdrClient {
     workspace?: string;
     command: string;
   }): string | undefined;
-  paneClose(paneId: string): boolean;
+  paneClose(paneId: string): boolean | Promise<boolean>;
 }
 
 export interface Clock {
@@ -63,6 +64,8 @@ export interface DispatchOptions {
   herdrState?: (paneId: string, vendor: string, state: string) => void;
   killTree?: (pid: number) => void;
   recordUsage?: (runId: string, taskId: string, vendor: string, agentRunId: string) => void;
+  buildWorkerPrompt?: (taskSpecPath: string) => string;
+  processAlive?: (pid: number) => boolean;
   signal?: AbortSignal;
   background?: boolean;
   maxConcurrency?: number;
@@ -86,6 +89,15 @@ const defaultExecFileSync: ExecFileSyncLike = (file, args, options) =>
 
 const defaultSpawn: SpawnLike = (command, args, options) =>
   spawn(command, args, options as Parameters<typeof spawn>[2]) as unknown as ChildProcessLike;
+
+const defaultProcessAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 class RealHerdrClient implements HerdrClient {
   private readonly run: ExecFileSyncLike;
@@ -261,6 +273,8 @@ interface WorkerContext {
   herdrState: (paneId: string, vendor: string, state: string) => void;
   killTree: (pid: number) => void;
   recordUsage: (runId: string, taskId: string, vendor: string, agentRunId: string) => void;
+  buildWorkerPrompt: (taskSpecPath: string) => string;
+  processAlive: (pid: number) => boolean;
   appendLedger: LedgerAppender;
 }
 
@@ -292,10 +306,18 @@ function makeExitRecorder(ctx: WorkerContext): ExitRecorder {
   const cancel = (): void => {
     if (recorded) return;
     wasCancelled = true;
-    if (workerPid !== undefined) ctx.killTree(workerPid);
-    if (paneId && ctx.env.HYDRA_HERDR_KEEP_PANE !== '1') ctx.herdr.paneClose(paneId);
+    if (workerPid !== undefined) {
+      try { ctx.killTree(workerPid); } catch { /* best effort */ }
+    }
     finish('agent_cancelled', []);
     resolveCancelled();
+    if (paneId && ctx.env.HYDRA_HERDR_KEEP_PANE !== '1') {
+      try {
+        void Promise.resolve(ctx.herdr.paneClose(paneId)).catch(() => undefined);
+      } catch {
+        // Pane cleanup is best effort and always follows the ledger write.
+      }
+    }
   };
 
   return {
@@ -457,7 +479,134 @@ function signalExitCode(signal: NodeJS.Signals | null): string {
   return number === undefined ? '130' : String(128 + number);
 }
 
-async function runWorkerPlain(ctx: WorkerContext, recorder: ExitRecorder): Promise<void> {
+interface WorkerMonitor {
+  poll(final?: boolean): boolean;
+  close(): Promise<void>;
+}
+
+function safeHerdrLive(herdr: HerdrClient): boolean {
+  try {
+    return herdr.isLive();
+  } catch {
+    return false;
+  }
+}
+
+function monitorEventText(line: string): string | undefined {
+  let event: { part?: { type?: unknown; text?: unknown; tool?: unknown; state?: { title?: unknown } } };
+  try {
+    event = JSON.parse(line) as typeof event;
+  } catch {
+    return undefined;
+  }
+  const part = event.part;
+  if (part?.type === 'text' && typeof part.text === 'string' && part.text !== '') return part.text;
+  if (part?.type !== 'tool') return undefined;
+  const tool = typeof part.tool === 'string' && part.tool !== '' ? part.tool : 'tool';
+  const title = typeof part.state?.title === 'string' ? part.state.title : '';
+  return `\n[tool] ${tool}${title ? `: ${title}` : ''}`;
+}
+
+function openOpencodeMonitor(ctx: WorkerContext, workerPid: number): WorkerMonitor | undefined {
+  const eventsPath = join(ctx.sessionsDir, `${ctx.agentRunId}.events.jsonl`);
+  const outputPath = join(ctx.sessionsDir, `${ctx.agentRunId}.monitor.txt`);
+  const model = ctx.env.HYDRA_OPENCODE_MODEL || 'zhipu/glm-5.2';
+  let prompt: string;
+  try {
+    prompt = ctx.buildWorkerPrompt(ctx.taskSpecPath);
+  } catch {
+    prompt = '(prompt unavailable)\n';
+  }
+  const banner = [
+    `OpenCode (${model}) starting — run ${ctx.runId} task ${ctx.taskId}`,
+    `worktree: ${ctx.worktree}`,
+    '--- prompt ---',
+    prompt.replace(/\n$/, ''),
+    '--------------',
+    '',
+    '',
+  ].join('\n');
+  writeFileSync(outputPath, banner, 'utf8');
+
+  let workspace: string | undefined;
+  let paneId: string | undefined;
+  const label = `hydra:${ctx.runId}:${ctx.taskId}:${ctx.vendor}`;
+  try {
+    workspace = ctx.herdr.focusedWorkspace();
+    paneId = ctx.herdr.agentStart({
+      label,
+      cwd: ctx.worktree,
+      workspace,
+      command: `touch ${shellQuote(outputPath)}; tail -n +1 -f ${shellQuote(outputPath)}`,
+    });
+  } catch {
+    return undefined;
+  }
+  if (!paneId) return undefined;
+
+  ctx.appendLedger(
+    ctx.runId,
+    'herdr_pane_started',
+    'task_id', ctx.taskId,
+    'vendor', ctx.vendor,
+    'label', label,
+    'pane', paneId,
+    'mode', 'monitor_only',
+  );
+  log(`opencode monitor pane ${paneId}: ${label} (worker pid ${workerPid}, lead workspace ${workspace ?? '?'})`);
+  try { ctx.herdrState(paneId, ctx.vendor, 'working'); } catch { /* best effort */ }
+
+  let offset = 0;
+  let closed = false;
+  const poll = (final = false): boolean => {
+    let alive = false;
+    try { alive = ctx.processAlive(workerPid); } catch { /* treat a failed probe as exited */ }
+    try {
+      const contents = readFileSync(eventsPath);
+      if (contents.length < offset) offset = 0;
+      const available = contents.subarray(offset);
+      const lastNewline = available.lastIndexOf(0x0a);
+      const consumed = final ? available.length : lastNewline + 1;
+      if (consumed > 0) {
+        const lines = available.subarray(0, consumed).toString('utf8').split('\n');
+        for (const line of lines) {
+          if (!line) continue;
+          const text = monitorEventText(line);
+          if (text !== undefined) appendFileSync(outputPath, `${text}\n`, 'utf8');
+        }
+        offset += consumed;
+      }
+    } catch {
+      // The adapter creates the events file lazily; missing/partial files are normal.
+    }
+    return alive;
+  };
+
+  return {
+    poll,
+    close: async () => {
+      if (closed) return;
+      closed = true;
+      poll(true);
+      try { ctx.herdrState(paneId, ctx.vendor, 'idle'); } catch { /* best effort */ }
+      if (ctx.env.HYDRA_HERDR_KEEP_PANE === '1') {
+        log(`keeping opencode monitor pane ${paneId} (state=idle)`);
+        return;
+      }
+      try {
+        if (await ctx.herdr.paneClose(paneId)) log(`closed opencode monitor pane ${paneId}`);
+      } catch {
+        // Pane cleanup must never invalidate the already-recorded worker exit.
+      }
+    },
+  };
+}
+
+async function runWorkerPlain(
+  ctx: WorkerContext,
+  recorder: ExitRecorder,
+  monitorEnabled = false,
+): Promise<void> {
   const child = ctx.spawn(ctx.adapterPath, [
     ctx.verb,
     ctx.taskSpecPath,
@@ -475,6 +624,7 @@ async function runWorkerPlain(ctx: WorkerContext, recorder: ExitRecorder): Promi
   if (child.pid === undefined) throw new Error('spawned worker has no pid');
   const workerPid = child.pid;
   recorder.setWorkerPid(workerPid);
+  const monitor = monitorEnabled ? openOpencodeMonitor(ctx, workerPid) : undefined;
 
   let exited = false;
   let exitCode: number | null = null;
@@ -493,44 +643,53 @@ async function runWorkerPlain(ctx: WorkerContext, recorder: ExitRecorder): Promi
     });
   });
 
-  const limit = ctx.timeoutMinutes * 60_000;
-  const hardCap = Number(ctx.env.HYDRA_HARD_CAP_MIN || ctx.timeoutMinutes * 6) * 60_000;
-  let waited = 0;
-  let elapsed = 0;
-  let previousActivity = '';
-  let timeout: 'stalled' | 'hard_cap' | undefined;
+  try {
+    const limit = ctx.timeoutMinutes * 60_000;
+    const hardCap = Number(ctx.env.HYDRA_HARD_CAP_MIN || ctx.timeoutMinutes * 6) * 60_000;
+    let waited = 0;
+    let elapsed = 0;
+    let previousActivity = '';
+    let timeout: 'stalled' | 'hard_cap' | undefined;
 
-  while (!exited && !recorder.isRecorded()) {
-    if (waited >= limit) {
-      timeout = 'stalled';
-      break;
+    monitor?.poll();
+    while (!exited && !recorder.isRecorded()) {
+      if (waited >= limit) {
+        timeout = 'stalled';
+        break;
+      }
+      if (elapsed >= hardCap) {
+        timeout = 'hard_cap';
+        break;
+      }
+      const outcome = await Promise.race([
+        exitedPromise.then(() => 'exit' as const),
+        recorder.cancelled.then(() => 'cancel' as const),
+        ctx.clock.sleep(ctx.pollIntervalMs).then(() => 'tick' as const),
+      ]);
+      monitor?.poll(outcome === 'exit');
+      if (outcome !== 'tick') break;
+      waited += ctx.pollIntervalMs;
+      elapsed += ctx.pollIntervalMs;
+      const activity = plainActivity(ctx.sessionsDir, ctx.agentRunId);
+      if (activity !== previousActivity) {
+        previousActivity = activity;
+        waited = 0;
+      }
     }
-    if (elapsed >= hardCap) {
-      timeout = 'hard_cap';
-      break;
-    }
-    const outcome = await Promise.race([
-      exitedPromise.then(() => 'exit' as const),
-      recorder.cancelled.then(() => 'cancel' as const),
-      ctx.clock.sleep(ctx.pollIntervalMs).then(() => 'tick' as const),
-    ]);
-    if (outcome !== 'tick') break;
-    waited += ctx.pollIntervalMs;
-    elapsed += ctx.pollIntervalMs;
-    const activity = plainActivity(ctx.sessionsDir, ctx.agentRunId);
-    if (activity !== previousActivity) {
-      previousActivity = activity;
-      waited = 0;
-    }
-  }
 
-  if (recorder.isRecorded()) return;
-  if (timeout) {
-    ctx.killTree(workerPid);
-    recorder.recordTimeout(timeout);
-    return;
+    if (recorder.isRecorded()) return;
+    if (timeout) {
+      ctx.killTree(workerPid);
+      recorder.recordTimeout(timeout);
+      return;
+    }
+    recorder.recordExit('agent_exited', exitSignal ? signalExitCode(exitSignal) : String(exitCode ?? 0));
+  } catch (error) {
+    recorder.cancel();
+    throw error;
+  } finally {
+    await monitor?.close();
   }
-  recorder.recordExit('agent_exited', exitSignal ? signalExitCode(exitSignal) : String(exitCode ?? 0));
 }
 
 function shellQuote(value: string): string {
@@ -543,7 +702,8 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
   rmSync(sentinel, { force: true });
   rmSync(pidfile, { force: true });
 
-  const workspace = ctx.herdr.focusedWorkspace();
+  let workspace: string | undefined;
+  try { workspace = ctx.herdr.focusedWorkspace(); } catch { /* launch without workspace affinity */ }
   const label = `hydra:${ctx.runId}:${ctx.taskId}:${ctx.vendor}`;
   const adapterArgs = [
     ctx.adapterPath,
@@ -556,7 +716,12 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
     ctx.priorSession,
   ].map(shellQuote).join(' ');
   const inner = `echo $$ > ${shellQuote(pidfile)}; ${adapterArgs}; printf '%s' $? > ${shellQuote(sentinel)}`;
-  const paneId = ctx.herdr.agentStart({ label, cwd: ctx.worktree, workspace, command: inner });
+  let paneId: string | undefined;
+  try {
+    paneId = ctx.herdr.agentStart({ label, cwd: ctx.worktree, workspace, command: inner });
+  } catch {
+    return false;
+  }
   if (!paneId) return false;
 
   recorder.setPaneId(paneId);
@@ -571,13 +736,17 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
   log(`worker hosted in herdr pane ${paneId}: ${label} (lead workspace ${workspace ?? '?'})`);
   try { ctx.herdrState(paneId, ctx.vendor, 'working'); } catch { /* best effort */ }
 
-  const closePane = (): void => {
+  const closePane = async (): Promise<void> => {
     try { ctx.herdrState(paneId, ctx.vendor, 'idle'); } catch { /* best effort */ }
     if (ctx.env.HYDRA_HERDR_KEEP_PANE === '1') {
       log(`keeping herdr pane ${paneId} (state=idle)`);
       return;
     }
-    if (ctx.herdr.paneClose(paneId)) log(`closed herdr pane ${paneId} (${label})`);
+    try {
+      if (await ctx.herdr.paneClose(paneId)) log(`closed herdr pane ${paneId} (${label})`);
+    } catch {
+      // Pane cleanup must never invalidate the already-recorded worker exit.
+    }
   };
 
   const limit = ctx.timeoutMinutes * 60_000;
@@ -617,12 +786,12 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
     } else {
       recorder.recordTimeout('stalled', ['idle_sec', String(Math.floor(waited / 1000))]);
     }
-    closePane();
+    await closePane();
     return true;
   }
 
   recorder.recordExit('agent_exited', readFileSync(sentinel, 'utf8').trim());
-  closePane();
+  await closePane();
   return true;
 }
 
@@ -635,7 +804,14 @@ function safeRecordUsage(ctx: WorkerContext): void {
 }
 
 async function runWorker(ctx: WorkerContext, recorder: ExitRecorder): Promise<void> {
-  if (ctx.env.HYDRA_HERDR_PANES === '1' && ctx.herdr.isLive()) {
+  const panesEnabled = ctx.env.HYDRA_HERDR_PANES === '1';
+  const herdrLive = panesEnabled && safeHerdrLive(ctx.herdr);
+  if (ctx.vendor === 'opencode') {
+    await runWorkerPlain(ctx, recorder, herdrLive);
+    if (!recorder.isCancelled()) safeRecordUsage(ctx);
+    return;
+  }
+  if (herdrLive) {
     const hosted = await runWorkerInHerdrPane(ctx, recorder);
     if (hosted) {
       if (!recorder.isCancelled()) safeRecordUsage(ctx);
@@ -734,6 +910,8 @@ export async function dispatch(
     herdrState: options.herdrState ?? herdrState,
     killTree: options.killTree ?? killTree,
     recordUsage: recordUsageForRoot,
+    buildWorkerPrompt: options.buildWorkerPrompt ?? buildWorkerPrompt,
+    processAlive: options.processAlive ?? defaultProcessAlive,
     appendLedger,
   };
   const recorder = makeExitRecorder(ctx);
