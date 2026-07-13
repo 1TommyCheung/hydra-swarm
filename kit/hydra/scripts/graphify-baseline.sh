@@ -43,7 +43,9 @@ fi
 hydra_log "building Graphify baseline over $src (backend $backend)"
 if [ "$backend" = kimi ] && [ -n "${GRAPHIFY_KIMI_BASE_URL:-}" ]; then
   # In-memory backend override for a coding-plan key; installed package untouched.
-  ( cd "$src" && python3 - "$src" "$out_dir" <<'PY' >/dev/null 2>&1
+  # Use graphify's own interpreter (PATH python3 may lack the package).
+  gpy="$(dirname "$(command -v graphify)")/python3"; [ -x "$gpy" ] || gpy="python3"
+  ( cd "$src" && "$gpy" - "$src" "$out_dir" <<'PY' >/dev/null 2>&1
 import sys, runpy, os
 import graphify.llm as L
 # Point the kimi backend at the coding-plan endpoint the key belongs to.

@@ -13,6 +13,14 @@ Nothing in this document is implemented in Wave 0.
 | Precise changed lines and history | Git |
 | Behavioural correctness | Tests and runtime verification |
 
+**The two graph tools are complementary, not redundant** (see §5 for how the
+harness uses both): GitNexus gives *structure* (AST symbols, call chains,
+blast-radius) but — as-built — only parses **JavaScript** into symbols; the bash
+harness is file-level-only there. Graphify gives *intent* (semantic edges over
+code **and** docs, incl. bash + markdown) with an EXTRACTED/INFERRED/AMBIGUOUS
+confidence audit trail. GitNexus answers "what does this change structurally
+touch"; Graphify answers "does this change still match approved design intent".
+
 ## 2. GitNexus (Wave 1)
 
 ### 2.1 Index custody: harness-generated, post-freeze (normative)
@@ -92,3 +100,47 @@ Baseline identifies pre-existing structure; candidate the branch's result; integ
   untouched) — see `graphify-baseline.sh`. Storage is run-scoped external
   (`indexes/graphify/<repo-id>/run-<id>/`). Confirmed non-blocking end-to-end in
   run 0006 (`graphify_investigation advisory:true`).
+
+## 5. Combined layer — using both together (as-built 2026-07-13)
+
+Two harness scripts make GitNexus and Graphify a single code-intelligence layer.
+
+### 5.1 The standing repo graph — `graphify-repo.sh`
+`graphify-baseline.sh` is run-scoped and ephemeral (one candidate's
+investigation). `graphify-repo.sh` maintains a **persistent** semantic graph over
+the whole repository — code **and** docs, including the bash harness and markdown
+GitNexus can't parse into symbols. Stored in `graphify-out/` (gitignored — the
+tool's default location, so queries need no flags). Verbs: `build` (full semantic
+extraction; LLM-backed, timeout-guarded), `update` (AST-only, cheap), `query`,
+`status` (freshness vs HEAD). This is the substrate for design-to-implementation
+traceability over Hydra itself.
+
+### 5.2 The combined query/audit tool — `code-intel.sh`
+Routes each question to the right tool per §1 and surfaces both, **each labelled
+with its source and authority**:
+
+| Subcommand | GitNexus (structure, RISK INPUT) | Graphify (intent, INVESTIGATION-NOT-VERDICT) |
+|---|---|---|
+| `changed [--base ref]` | `detect-changes` → changed symbols + affected flows (JS) | design-intent edges touching the diff (EXTRACTED→investigate, INFERRED→question) |
+| `impact <symbol>` | blast-radius (JS) | semantic neighbours (all langs + docs) |
+| `query "<q>"` | execution flows | semantic hits |
+| `drift` | (confirms the code side exists) | **docs-vs-code**: EXTRACTED edges linking a `docs/` node to a `hydra/`\|`src/` code node — the design's explicit references to implementation, flagged to confirm |
+
+`drift` is the showcase of "both": Graphify finds the `architecture.md §X →
+promote.sh` design→implementation edges (GitNexus can't — no bash symbols, no
+docs), and GitNexus confirms the code side is structurally real. It is exactly
+the manual drift audit (roadmap doc-maintenance checklist), made queryable.
+
+### 5.3 Authority is unchanged (roadmap success criterion #6)
+Neither tool independently blocks or approves. GitNexus output is a **risk input**
+(§2.4); Graphify is **investigation-not-verdict** (§3) — EXTRACTED opens an
+investigation requiring source/diff/test confirmation, INFERRED is a question.
+`code-intel.sh` presents; the reviewer (lead/human) decides.
+
+### 5.4 Coverage reality
+`gitnexus analyze` indexes all repo files (incl. 32 harness `.sh` files) but
+parses only **JS** into symbols (call-graph/impact is JS-only). Graphify's
+semantic pass covers bash + markdown, so the standing graph is where harness- and
+doc-level reasoning lives. The Graphify build is LLM-backed and endpoint-gated —
+if the semantic backend is unavailable, the standing graph is simply absent and
+`code-intel.sh` degrades to the GitNexus half (never fatal).
