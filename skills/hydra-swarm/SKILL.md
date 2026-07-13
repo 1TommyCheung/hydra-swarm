@@ -14,9 +14,23 @@ state mutation flows through a `hydra/scripts/*.sh` invocation** — never edit
 Current scope: Wave 2 complete (all four vendors — Claude, Codex, OpenCode/GLM,
 Kimi — GitNexus + Graphify code intelligence, herdr terminal-host integration,
 capability profiles). The bash harness in `hydra/scripts/` + `hydra/adapters/`
-is being ported to TypeScript in `hydra-ts/` (see `hydra-ts/migration/`); the
-bash version remains OPERATIONAL until cutover — drive that one, not the TS
-port, unless told otherwise.
+has been fully ported to TypeScript in `hydra-ts/` (565 tests; see
+`hydra-ts/migration/`) — every script now has both a bash original and a
+working `node --experimental-strip-types hydra-ts/src/<name>.ts` CLI entry
+point with the same argument/stdout/exit-code contract.
+
+**Bash remains the DEFAULT — drive that one unless told otherwise.** The TS
+port is genuinely runnable (confirmed live: `dispatch.ts` with
+`HYDRA_ADAPTER_RUNTIME=ts` spawns the real TS adapters and produces real
+commits, process-list-verified), but only `dispatch.ts` + its adapter wiring
+has been live-validated end to end so far — `promote`/`squash`/`integrate`/
+`create-worktree` etc. have TS entry points and pass their unit + e2e-capstone
+tests, but have not yet been exercised together as a full TS-native run loop
+against real (non-throwaway) work. Do not switch the default driving path to
+TS on your own judgment; treat each `hydra-ts/src/<name>.ts` invocation as an
+explicit, opt-in choice (either the human asks for it, or you're doing
+prerequisite validation work like the dispatch.ts wiring above) until a
+session is explicitly dedicated to validating and cutting over the full loop.
 
 ## Ledger read protocol
 - Authoritative state lives under
@@ -94,6 +108,27 @@ short-lived tool-shell (not a persistent terminal) has two real gotchas:
   "full" pool that is actually empty. Diagnose by comparing `.slots/<id>`
   entries against `sessions/<id>.exit` sentinels; any slot with a matching
   exit sentinel is stale and safe to remove.
+
+## TS harness reference (not yet the default)
+Every `hydra/scripts/<name>.sh` and `hydra/adapters/<name>.sh` has a TS
+equivalent at `hydra-ts/src/<name>.ts`, invoked the same way but through
+node: `node --experimental-strip-types hydra-ts/src/<name>.ts <same args>`.
+- `dispatch.ts` additionally takes `HYDRA_ADAPTER_RUNTIME=ts` (env, or
+  `options.adapterRuntime` if calling it programmatically) to spawn the TS
+  adapters (`hydra-ts/src/adapter-<vendor>.ts` via
+  `node --experimental-strip-types`) instead of the bash ones. Unset or any
+  other value = today's bash-adapter behavior, byte-identical.
+- Full test suite: `cd hydra-ts && node --experimental-strip-types --test
+  'test/**/*.test.ts'`. Known flake: occasionally under-reports by exactly
+  `promote.test.ts`'s 26 tests under full concurrent load (resource
+  contention, not a real failure) — rerun before treating a short count as a
+  regression (see `hydra-ts/migration/FINDINGS.md`).
+- When mixing bash and TS commands in the same run (e.g. validating one TS
+  script against state a bash script created), the state layout is identical
+  (`~/.local/state/<repo-id>-hydra/...`) so this works fine — just make sure
+  you invoke the TS CLI directly (`node ... some-script.ts`), not through
+  `hydra/scripts/dispatch.sh`, which knows nothing about
+  `HYDRA_ADAPTER_RUNTIME` or any other TS-side option.
 
 ## Recovery
 If your session is replaced, do NOT rely on conversational memory. Read
