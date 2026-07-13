@@ -354,6 +354,24 @@ describe('dispatch Bash parity', () => {
     }
   });
 
+  it('treats HYDRA_HARNESS=ts as TypeScript adapter runtime unless explicitly overridden', async () => {
+    const implied = fixture(runId());
+    const impliedMock = fakeSpawn();
+    await dispatch(implied.runId, 'task-a', injectedOptions(implied, impliedMock.spawn, {
+      env: { HYDRA_HARNESS: 'ts' },
+    }));
+    assert.equal(impliedMock.calls[0].command, 'node');
+    assert.equal(impliedMock.calls[0].args[1], implied.tsAdapterPath);
+
+    const overridden = fixture(runId());
+    const overriddenMock = fakeSpawn();
+    await dispatch(overridden.runId, 'task-a', injectedOptions(overridden, overriddenMock.spawn, {
+      env: { HYDRA_HARNESS: 'ts', HYDRA_ADAPTER_RUNTIME: 'bash' },
+    }));
+    assert.equal(overriddenMock.calls[0].command, overridden.adapterPath);
+    assert.equal(overriddenMock.calls[0].args[0], 'start');
+  });
+
   it('prefers the adapterRuntime option over HYDRA_ADAPTER_RUNTIME', async () => {
     const bash = fixture(runId());
     const bashMock = fakeSpawn();

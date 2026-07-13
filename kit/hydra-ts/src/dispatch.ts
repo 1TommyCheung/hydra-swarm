@@ -977,7 +977,11 @@ export async function dispatch(
   const spec = readTaskSpec(taskSpecPath);
   const repo = discoverRepoRoot(options, cwd);
   const env = options.env ?? process.env;
-  const adapterRuntime = (options.adapterRuntime ?? env.HYDRA_ADAPTER_RUNTIME) === 'ts' ? 'ts' : 'bash';
+  const adapterRuntime = (
+    options.adapterRuntime
+    ?? env.HYDRA_ADAPTER_RUNTIME
+    ?? (env.HYDRA_HARNESS === 'ts' ? 'ts' : undefined)
+  ) === 'ts' ? 'ts' : 'bash';
   const adapterPath = adapterRuntime === 'ts'
     ? join(repo, 'hydra-ts', 'src', `adapter-${spec.vendor}.ts`)
     : join(repo, 'hydra', 'adapters', `${spec.vendor}.sh`);

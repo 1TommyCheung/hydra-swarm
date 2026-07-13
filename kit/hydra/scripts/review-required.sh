@@ -16,6 +16,9 @@ set -euo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SELF_DIR/lib.sh"
+if [ "${HYDRA_HARNESS:-bash}" = "ts" ]; then
+exec node --experimental-strip-types "$SELF_DIR/../../hydra-ts/src/review-required.ts" "$@"
+fi
 
 impl="${1:?usage: review-required.sh <implementer_vendor> <risk> [label...]}"
 risk="${2:?risk required (low|medium|high|critical)}"; shift 2

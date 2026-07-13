@@ -20,6 +20,9 @@ set -euo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SELF_DIR/lib.sh"
+if [ "${HYDRA_HARNESS:-bash}" = "ts" ]; then
+exec node --experimental-strip-types "$SELF_DIR/../../hydra-ts/src/allocate.ts" "$@"
+fi
 
 role="${1:?usage: allocate.sh <role> <task_type> [risk] [--exclude-vendor <v>]}"
 task_type="${2:?task_type required}"

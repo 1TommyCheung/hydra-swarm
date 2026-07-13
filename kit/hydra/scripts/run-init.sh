@@ -13,6 +13,9 @@ set -euo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SELF_DIR/lib.sh"
+if [ "${HYDRA_HARNESS:-bash}" = "ts" ]; then
+exec node --experimental-strip-types "$SELF_DIR/../../hydra-ts/src/run-init.ts" "$@"
+fi
 
 run_id="${1:?usage: run-init.sh <run_id> [base_commit]}"
 base_commit="${2:-$(git -C "$(hydra_repo_root)" rev-parse HEAD)}"
