@@ -14,23 +14,29 @@ state mutation flows through a `hydra/scripts/*.sh` invocation** — never edit
 Current scope: Wave 2 complete (all four vendors — Claude, Codex, OpenCode/GLM,
 Kimi — GitNexus + Graphify code intelligence, herdr terminal-host integration,
 capability profiles). The bash harness in `hydra/scripts/` + `hydra/adapters/`
-has been fully ported to TypeScript in `hydra-ts/` (565 tests; see
-`hydra-ts/migration/`) — every script now has both a bash original and a
-working `node --experimental-strip-types hydra-ts/src/<name>.ts` CLI entry
-point with the same argument/stdout/exit-code contract.
+has been fully ported to TypeScript in `hydra-ts/` (577 tests; see
+`hydra-ts/migration/`) and **is now the operational default** (see below) —
+every script has both a bash original (frozen, kept as reference/rollback)
+and a `hydra-ts/src/<name>.ts` counterpart with the same argument/stdout/
+exit-code contract.
 
-**Bash remains the DEFAULT — drive that one unless told otherwise.** The TS
-port is genuinely runnable (confirmed live: `dispatch.ts` with
-`HYDRA_ADAPTER_RUNTIME=ts` spawns the real TS adapters and produces real
-commits, process-list-verified), but only `dispatch.ts` + its adapter wiring
-has been live-validated end to end so far — `promote`/`squash`/`integrate`/
-`create-worktree` etc. have TS entry points and pass their unit + e2e-capstone
-tests, but have not yet been exercised together as a full TS-native run loop
-against real (non-throwaway) work. Do not switch the default driving path to
-TS on your own judgment; treat each `hydra-ts/src/<name>.ts` invocation as an
-explicit, opt-in choice (either the human asks for it, or you're doing
-prerequisite validation work like the dispatch.ts wiring above) until a
-session is explicitly dedicated to validating and cutting over the full loop.
+**TypeScript is now the DEFAULT (cutover authorized: 2026-07-13, evidence:
+run 0036).** Every `hydra/scripts/<name>.sh` invocation transparently execs
+into its `hydra-ts/src/<name>.ts` counterpart (and implies
+`HYDRA_ADAPTER_RUNTIME=ts` for vendor adapters too) with ZERO change to your
+own invocation patterns — keep calling `bash hydra/scripts/dispatch.sh ...`
+etc. exactly as before. Cutover evidence: a full real run (0036) — run-init →
+create-worktree → dispatch (through a herdr-pane-hosted vendor, the hardest
+path) → promote → squash → integrate with the combined verification gate
+across 2 dependency-ordered candidates — completed end-to-end via TS, after
+the shakedown itself caught and led to fixing a real bug (stale-node PATH
+resolution inside herdr's login-shell pane hosting; see "TS/bash runtime
+switch" below).
+**Bash is the explicit fallback** — set `HYDRA_HARNESS=bash` if something in
+the TS path misbehaves. Bash is frozen at Wave 2 exit and kept byte-for-byte
+as reference/rollback — never delete it. Retiring bash entirely is a
+separate, later, deliberately-scoped decision (not automatic, not bundled
+with this cutover).
 
 ## Ledger read protocol
 - Authoritative state lives under
@@ -109,26 +115,41 @@ short-lived tool-shell (not a persistent terminal) has two real gotchas:
   entries against `sessions/<id>.exit` sentinels; any slot with a matching
   exit sentinel is stale and safe to remove.
 
-## TS harness reference (not yet the default)
-Every `hydra/scripts/<name>.sh` and `hydra/adapters/<name>.sh` has a TS
-equivalent at `hydra-ts/src/<name>.ts`, invoked the same way but through
-node: `node --experimental-strip-types hydra-ts/src/<name>.ts <same args>`.
-- `dispatch.ts` additionally takes `HYDRA_ADAPTER_RUNTIME=ts` (env, or
-  `options.adapterRuntime` if calling it programmatically) to spawn the TS
-  adapters (`hydra-ts/src/adapter-<vendor>.ts` via
-  `node --experimental-strip-types`) instead of the bash ones. Unset or any
-  other value = today's bash-adapter behavior, byte-identical.
+## TS/bash runtime switch
+`HYDRA_HARNESS` controls which implementation `hydra/scripts/<name>.sh`
+actually runs, via a 3-line preamble in every script: unset or any value
+other than exactly `bash` → **TS** (execs `node --experimental-strip-types
+hydra-ts/src/<name>.ts "$@"`, the default since the 2026-07-13 cutover);
+`HYDRA_HARNESS=bash` → the original bash body, byte-identical to pre-cutover
+behavior. Your own invocations never change — keep calling `bash
+hydra/scripts/dispatch.sh ...` etc.; the switch is transparent.
+- `dispatch.ts`'s adapter selection follows the same rule one layer down:
+  `HYDRA_HARNESS=bash` (or `HYDRA_ADAPTER_RUNTIME=bash`) forces the bash
+  vendor adapters; anything else uses the TS adapters
+  (`hydra-ts/src/adapter-<vendor>.ts`). `HYDRA_ADAPTER_RUNTIME`, when set
+  explicitly, wins over `HYDRA_HARNESS` for this one layer.
+- You can also invoke a `hydra-ts/src/<name>.ts` file directly via node
+  (`node --experimental-strip-types hydra-ts/src/<name>.ts <same args>`) to
+  bypass the bash entry point entirely — useful for isolated testing/
+  debugging, but for normal driving just use the unchanged
+  `hydra/scripts/<name>.sh` invocation and let the switch handle it.
 - Full test suite: `cd hydra-ts && node --experimental-strip-types --test
   'test/**/*.test.ts'`. Known flake: occasionally under-reports by exactly
   `promote.test.ts`'s 26 tests under full concurrent load (resource
-  contention, not a real failure) — rerun before treating a short count as a
-  regression (see `hydra-ts/migration/FINDINGS.md`).
-- When mixing bash and TS commands in the same run (e.g. validating one TS
-  script against state a bash script created), the state layout is identical
-  (`~/.local/state/<repo-id>-hydra/...`) so this works fine — just make sure
-  you invoke the TS CLI directly (`node ... some-script.ts`), not through
-  `hydra/scripts/dispatch.sh`, which knows nothing about
-  `HYDRA_ADAPTER_RUNTIME` or any other TS-side option.
+  contention, not a real failure) — `npm test` runs it isolated from the
+  concurrent glob to avoid this; if you run the raw glob directly, rerun
+  before treating a short count as a regression (see
+  `hydra-ts/migration/FINDINGS.md`).
+- **Machine-level gotcha**: on this machine, a stale system `node`
+  (`/usr/local/bin/node`, v17.4.0) can shadow the correct nvm-managed node
+  (v22.14.0) in non-interactive/login-shell contexts (herdr's `bash -lc`
+  pane hosting, and sometimes a dispatched worker's own sandboxed
+  verification shell) — `--experimental-strip-types`/`--test` then fail with
+  "bad option". The harness code works around this internally
+  (`process.execPath`, never a bare `'node'` string), but if YOU need to run
+  node yourself inside a worker/pane context, use the absolute path
+  `~/.nvm/versions/node/v22.14.0/bin/node` rather than bare `node`/`npm`.
+  See `hydra-ts/migration/FINDINGS.md` for the full diagnosis.
 
 ## When to use a subagent instead of a full Hydra run
 Not everything needs worktree + dispatch + promote + squash + integrate
