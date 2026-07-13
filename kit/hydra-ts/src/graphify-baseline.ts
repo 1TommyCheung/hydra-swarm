@@ -12,6 +12,7 @@ import {
   type Dirent,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   die,
   graphifyDir,
@@ -372,3 +373,30 @@ export function graphifyBaseline(
 }
 
 export default { graphifyBaseline };
+
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    const [runId, source] = args;
+    if (!runId) {
+      die('usage: graphify-baseline.sh <run_id> [source_path] [--backend claude|kimi]');
+    }
+    const backend = args[2] === '--backend' ? (args[3] ?? 'kimi') : 'kimi';
+    const result = graphifyBaseline(
+      runId,
+      source,
+      backend as 'claude' | 'kimi',
+    );
+    return result.status === 'skipped_no_key' ? 8 : 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}

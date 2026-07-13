@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { die, yamlBlock, yamlList, yamlScalar } from './lib.ts';
 
 /**
@@ -105,3 +106,22 @@ harness will verify):
 }
 
 export default buildWorkerPrompt;
+
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    if (!args[0]) die('usage: build-worker-prompt.sh <task_spec>');
+    process.stdout.write(buildWorkerPrompt(args[0]));
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}

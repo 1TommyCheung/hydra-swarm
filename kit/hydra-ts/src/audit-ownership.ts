@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { lstatSync, readlinkSync, statSync } from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { die, pathInGlobs } from './lib.ts';
 
 // ---------------------------------------------------------------------------
@@ -237,3 +238,27 @@ export function auditOwnership(
 }
 
 export default { auditOwnership };
+
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    if (args.length < 4) {
+      die('usage: audit-ownership.sh <worktree> <base> <head> <writable_glob>...');
+    }
+    const result = auditOwnership(args[0], args[1], args[2], args.slice(3));
+    for (const violation of result.violations) {
+      process.stdout.write(`VIOLATION: ${violation}\n`);
+    }
+    return result.clean ? 0 : 3;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}

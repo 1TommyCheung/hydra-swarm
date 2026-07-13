@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   authDir,
   die,
@@ -119,3 +120,23 @@ export function squash(runId: string, taskId: string): SquashResult {
 export default {
   squash,
 };
+
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    const [runId, taskId] = args;
+    if (!runId || !taskId) die('usage: squash.sh <run_id> <task_id>');
+    process.stdout.write(`${squash(runId, taskId).integrationCommit}\n`);
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}

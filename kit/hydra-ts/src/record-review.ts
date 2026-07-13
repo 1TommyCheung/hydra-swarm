@@ -1,5 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { die, ledgerAppend, log, repoRoot, runDir, warn } from './lib.ts';
 
 // ---------------------------------------------------------------------------
@@ -207,3 +208,26 @@ export default {
   recordReview,
   RecordReviewError,
 };
+
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    const [runId, taskId, verdictPath] = args;
+    if (!runId || !taskId || !verdictPath) {
+      die('usage: record-review.sh <run_id> <task_id> <verdict.json>');
+    }
+    recordReview(runId, taskId, verdictPath);
+    return 0;
+  } catch (error) {
+    if (error instanceof RecordReviewError) return error.exitCode;
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}

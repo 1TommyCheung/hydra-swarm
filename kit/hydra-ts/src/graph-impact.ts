@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { die, ledgerAppend, log, runDir, warn, yamlScalar } from './lib.ts';
 
 // ---------------------------------------------------------------------------
@@ -203,3 +203,24 @@ export default {
   computeSignal,
   GraphImpactError,
 };
+
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    const [runId, taskId] = args;
+    if (!runId || !taskId) die('usage: graph-impact.sh <run_id> <task_id>');
+    process.stdout.write(`${graphImpact(runId, taskId)}\n`);
+    return 0;
+  } catch (error) {
+    if (error instanceof GraphImpactError) return error.exitCode;
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}

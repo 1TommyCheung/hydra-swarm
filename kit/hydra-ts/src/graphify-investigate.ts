@@ -5,7 +5,8 @@ import {
   readFileSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   die,
   graphifyDir,
@@ -378,3 +379,30 @@ export default {
   graphifyInvestigate,
   GraphifyInvestigateError,
 };
+
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    const [runId, taskOrFlag] = args;
+    if (!runId) {
+      die('usage: graphify-investigate.sh <run_id> <task_id> | <run_id> --files <f>...');
+    }
+    const taskOrFiles = taskOrFlag === '--files'
+      ? { files: args.slice(2) }
+      : taskOrFlag;
+    if (!taskOrFiles) die('task_id required');
+    process.stdout.write(`${graphifyInvestigate(runId, taskOrFiles)}\n`);
+    return 0;
+  } catch (error) {
+    if (error instanceof GraphifyInvestigateError) return error.exitCode;
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}

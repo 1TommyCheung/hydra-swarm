@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { log, die, runDir, repoId, repoRoot, now, ledgerAppend } from './lib.ts';
 
 /**
@@ -63,3 +65,22 @@ tasks: []
 }
 
 export default runInit;
+
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    if (!args[0]) die('usage: run-init.sh <run_id> [base_commit]');
+    runInit(args[0], args[1]);
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}

@@ -6,7 +6,8 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   deriveDropFromGit as libDeriveDropFromGit,
   die,
@@ -522,3 +523,44 @@ export function start(
 }
 
 export default { explore, review, start, buildWorkerPrompt };
+
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    const [verb, ...rest] = args;
+    if (!verb) die('usage: opencode.sh explore|review|start ...');
+
+    if (verb === 'start') {
+      const [taskSpec, worktree, inbox, sessions, agentRunId] = rest;
+      if (!taskSpec) die('task_spec required');
+      if (!worktree) die('worktree required');
+      if (!inbox) die('inbox required');
+      if (!sessions) die('sessions required');
+      if (!agentRunId) die('agent_run_id required');
+      start(taskSpec, worktree, inbox, sessions, agentRunId);
+      return 0;
+    }
+
+    if (verb === 'explore' || verb === 'review') {
+      const [cwd, prompt, outPrefix, agentRunId] = rest;
+      if (!cwd) die('cwd required');
+      if (!prompt) die('prompt required');
+      if (!outPrefix) die('out_prefix required');
+      if (!agentRunId) die('agent_run_id required');
+      (verb === 'explore' ? explore : review)(cwd, prompt, outPrefix, agentRunId);
+      return 0;
+    }
+
+    die(`opencode.sh: unknown verb '${verb}'`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}

@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { statSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { die, killTree, log, yamlList, yamlScalar } from './lib.ts';
 
 /**
@@ -206,3 +207,25 @@ function signalProcessGroup(
 }
 
 export default verify;
+
+export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
+  try {
+    const [worktree, policy, out] = args;
+    if (!worktree || !policy) {
+      die('usage: verify.sh <worktree> <policy.yaml> [out.json]');
+    }
+    const results = await verify(worktree, policy, out);
+    return results.every((result) => result.status === 'passed') ? 0 : 4;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = await main();
+}
