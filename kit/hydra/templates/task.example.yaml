@@ -1,10 +1,11 @@
-# hydra/templates/task.example.yaml
+# hydra-swarm-plugin/kit/hydra/templates/task.example.yaml
 #
 # A PLANNED task definition (Domain 1, human-reviewed pre-run). The harness
 # instantiates a copy into external state (Domain 2) and fills the operational
 # fields (worktree, branch, resolved base_commit) via create-worktree.sh.
 #
-# See task-result-review-contracts.md §1 and hydra/schemas/task.schema.json.
+# See task-result-review-contracts.md §1 and
+# hydra-swarm-plugin/kit/hydra/schemas/task.schema.json.
 
 task_id: canvas-node-validation
 run_id: "0042"
@@ -22,7 +23,7 @@ read_only_paths:
 inaccessible_paths:
   - .env*
   - secrets/**
-  - hydra/**
+  - hydra-swarm-plugin/**
 objective: >
   Add typed connection validation for canvas nodes.
 acceptance_criteria:
