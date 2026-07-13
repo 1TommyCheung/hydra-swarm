@@ -181,7 +181,7 @@ async function dispatchStubTs(
   for (const entry of spawned) {
     assert.equal(
       entry.command,
-      'node',
+      process.execPath,
       `TS adapter step must spawn only node, got: ${entry.command}`,
     );
     const argv = entry.args.join(' ');

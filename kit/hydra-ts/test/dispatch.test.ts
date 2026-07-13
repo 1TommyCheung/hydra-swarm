@@ -344,7 +344,7 @@ describe('dispatch Bash parity', () => {
       }));
 
       assert.equal(mock.calls.length, 1);
-      assert.equal(mock.calls[0].command, 'node');
+      assert.equal(mock.calls[0].command, process.execPath);
       assert.deepEqual(mock.calls[0].args, [
         '--experimental-strip-types', f.tsAdapterPath,
         'start', f.taskSpecPath, f.worktree,
@@ -360,7 +360,7 @@ describe('dispatch Bash parity', () => {
     await dispatch(implied.runId, 'task-a', injectedOptions(implied, impliedMock.spawn, {
       env: { HYDRA_HARNESS: 'ts' },
     }));
-    assert.equal(impliedMock.calls[0].command, 'node');
+    assert.equal(impliedMock.calls[0].command, process.execPath);
     assert.equal(impliedMock.calls[0].args[1], implied.tsAdapterPath);
 
     const overridden = fixture(runId());
@@ -387,8 +387,44 @@ describe('dispatch Bash parity', () => {
       adapterRuntime: 'ts',
       env: { HYDRA_ADAPTER_RUNTIME: 'bash' },
     }));
-    assert.equal(tsMock.calls[0].command, 'node');
+    assert.equal(tsMock.calls[0].command, process.execPath);
     assert.equal(tsMock.calls[0].args[1], ts.tsAdapterPath);
+  });
+
+  it('uses the injected current node executable for plain and herdr-hosted TypeScript adapters', async () => {
+    const nodeExecutable = '/mock/current-node/bin/node';
+
+    const plain = fixture(runId());
+    const plainMock = fakeSpawn();
+    await dispatch(plain.runId, 'task-a', injectedOptions(plain, plainMock.spawn, {
+      adapterRuntime: 'ts',
+      nodeExecutable,
+    }));
+    assert.equal(plainMock.calls[0].command, nodeExecutable);
+    assert.notEqual(plainMock.calls[0].command, 'node');
+
+    const hosted = fixture(runId());
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    const expectedId = `${hosted.runId}-task-a-v1`;
+    const clock = new StepClock(() => {
+      writeFileSync(join(hosted.sessionsDir, `${expectedId}.exit`), '0');
+    });
+    await dispatch(hosted.runId, 'task-a', injectedOptions(hosted, () => {
+      throw new Error('plain spawn must not run');
+    }, {
+      adapterRuntime: 'ts',
+      nodeExecutable,
+      env: { HYDRA_HERDR_PANES: '1' },
+      herdr,
+      clock,
+    }));
+
+    assert.equal(herdr.starts.length, 1);
+    assert.ok(herdr.starts[0].command.includes(
+      `'${nodeExecutable}' '--experimental-strip-types' '${hosted.tsAdapterPath}'`,
+    ));
+    assert.equal(herdr.starts[0].command.includes("'node' '--experimental-strip-types'"), false);
   });
 
   it('records non-zero and signal-derived worker exit codes', async () => {

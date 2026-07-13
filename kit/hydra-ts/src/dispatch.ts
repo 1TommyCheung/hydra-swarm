@@ -59,6 +59,7 @@ export interface DispatchOptions {
   repoRoot?: string;
   env?: NodeJS.ProcessEnv;
   adapterRuntime?: 'bash' | 'ts';
+  nodeExecutable?: string;
   execFileSync?: ExecFileSyncLike;
   spawn?: SpawnLike;
   herdr?: HerdrClient;
@@ -263,6 +264,7 @@ interface WorkerContext {
   taskSpecPath: string;
   adapterPath: string;
   adapterRuntime: 'bash' | 'ts';
+  nodeExecutable: string;
   verb: 'start' | 'resume';
   priorSession: string;
   timeoutMinutes: number;
@@ -710,7 +712,7 @@ async function runWorkerPlain(
     ctx.agentRunId,
     ctx.priorSession,
   ];
-  const command = ctx.adapterRuntime === 'ts' ? 'node' : ctx.adapterPath;
+  const command = ctx.adapterRuntime === 'ts' ? ctx.nodeExecutable : ctx.adapterPath;
   const args = ctx.adapterRuntime === 'ts'
     ? ['--experimental-strip-types', ctx.adapterPath, ...adapterArgs]
     : adapterArgs;
@@ -820,7 +822,7 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
   };
 
   const adapterArgs = [
-    ...(ctx.adapterRuntime === 'ts' ? ['node', '--experimental-strip-types'] : []),
+    ...(ctx.adapterRuntime === 'ts' ? [ctx.nodeExecutable, '--experimental-strip-types'] : []),
     ctx.adapterPath,
     ctx.verb,
     ctx.taskSpecPath,
@@ -1046,6 +1048,7 @@ export async function dispatch(
     taskSpecPath,
     adapterPath,
     adapterRuntime,
+    nodeExecutable: options.nodeExecutable ?? process.execPath,
     verb: delivery.verb,
     priorSession: delivery.priorSession,
     timeoutMinutes: spec.timeoutMinutes,
