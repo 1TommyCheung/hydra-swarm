@@ -587,6 +587,20 @@ function codexEventText(line: string): string | undefined {
   return undefined;
 }
 
+export function kimiEventText(line: string): string | undefined {
+  let event: { role?: string; content?: unknown };
+  try {
+    event = JSON.parse(line) as typeof event;
+  } catch {
+    return undefined;
+  }
+  if (typeof event !== 'object' || event === null || Array.isArray(event)) return undefined;
+  if (event.role === 'assistant' && typeof event.content === 'string' && event.content !== '') {
+    return event.content;
+  }
+  return undefined;
+}
+
 interface JsonlTailState {
   offset: number;
 }
@@ -812,16 +826,17 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
 
   const bannerPath = writePaneBanner(ctx, vendorLabel(ctx.vendor));
 
-  const isCodex = ctx.vendor === 'codex';
+  const usesLiveProgressPane = ctx.vendor === 'codex' || ctx.vendor === 'kimi';
   const progressPath = join(ctx.sessionsDir, `${ctx.agentRunId}.pane-progress.txt`);
   const cliJsonlPath = join(ctx.sessionsDir, `${ctx.agentRunId}.cli.jsonl`);
-  if (isCodex) {
+  if (usesLiveProgressPane) {
     try { writeFileSync(progressPath, '', 'utf8'); } catch { /* best effort — pane uses touch */ }
   }
-  const codexTailState: JsonlTailState = { offset: 0 };
-  const pollCodex = (final = false): void => {
-    if (!isCodex) return;
-    pollJsonlFile(cliJsonlPath, progressPath, codexEventText, codexTailState, final);
+  const liveProgressTailState: JsonlTailState = { offset: 0 };
+  const parseLiveProgress = ctx.vendor === 'kimi' ? kimiEventText : codexEventText;
+  const pollLiveProgress = (final = false): void => {
+    if (!usesLiveProgressPane) return;
+    pollJsonlFile(cliJsonlPath, progressPath, parseLiveProgress, liveProgressTailState, final);
   };
 
   const adapterArgs = [
@@ -837,7 +852,7 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
   ].map(shellQuote).join(' ');
 
   let inner: string;
-  if (isCodex) {
+  if (usesLiveProgressPane) {
     inner = [
       `echo $$ > ${shellQuote(pidfile)}`,
       `set +e`,
@@ -910,7 +925,7 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
     if (outcome === 'cancel') return true;
     waited += ctx.pollIntervalMs;
     elapsed += ctx.pollIntervalMs;
-    pollCodex();
+    pollLiveProgress();
     const activity = herdrActivity(ctx.sessionsDir, ctx.agentRunId);
     if (activity !== previousActivity) {
       previousActivity = activity;
@@ -918,7 +933,7 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
     }
   }
 
-  pollCodex(true);
+  pollLiveProgress(true);
 
   if (recorder.isRecorded()) return true;
   if (!existsSync(sentinel)) {

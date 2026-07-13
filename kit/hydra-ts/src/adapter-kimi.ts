@@ -551,8 +551,9 @@ export async function kimiStart(
   log('kimi write role under srt (writes confined to worktree + git-common-dir)');
 
   // `kimi -p` (print mode) ALREADY auto-approves tools — that is exactly why the
-  // OS sandbox is mandatory. stdout is parsed for the structured result; stderr
-  // is tee'd so a hosting pane shows live progress.
+  // OS sandbox is mandatory. stdout receives the NDJSON event stream and is
+  // captured to cliJsonl; dispatch.ts polls that file and writes a human-readable
+  // progress feed to the pane. stderr is empty in stream-json mode.
   const cliJsonl = join(sessionsAbs, `${agentRunId}.cli.jsonl`);
   const stderrPath = join(sessionsAbs, `${agentRunId}.stderr`);
 

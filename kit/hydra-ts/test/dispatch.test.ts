@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import {
   dispatch,
+  kimiEventText,
   type ChildProcessLike,
   type Clock,
   type DispatchOptions,
@@ -947,27 +948,113 @@ describe('dispatch Bash parity', () => {
     assert.doesNotMatch(progress, /ignored event|malformed/);
   });
 
-  it('does not create a live progress tail for kimi or claude panes', async () => {
-    for (const vendor of ['kimi', 'claude'] as const) {
-      const f = fixture(runId(), { vendor });
-      const herdr = new FakeHerdr();
-      herdr.live = true;
-      const expectedId = `${f.runId}-task-a-v1`;
-      const clock = new StepClock(() => {
-        writeFileSync(join(f.sessionsDir, `${expectedId}.exit`), '0');
-      });
-      await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('no spawn'); }, {
-        env: { HYDRA_HERDR_PANES: '1' },
-        herdr,
-        clock,
-        buildWorkerPrompt: () => 'prompt',
-      }));
+  it('live-tails kimi progress events from cli.jsonl into the pane', async () => {
+    const f = fixture(runId(), { vendor: 'kimi' });
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    const expectedId = `${f.runId}-task-a-v1`;
+    const cliJsonlPath = join(f.sessionsDir, `${expectedId}.cli.jsonl`);
+    const progressPath = join(f.sessionsDir, `${expectedId}.pane-progress.txt`);
+    const sentinelPath = join(f.sessionsDir, `${expectedId}.exit`);
 
-      const progressPath = join(f.sessionsDir, `${expectedId}.pane-progress.txt`);
-      assert.equal(existsSync(progressPath), false, `${vendor} should not have a progress file`);
-      assert.doesNotMatch(herdr.starts[0].command, /tail -n \+1 -f/);
-      assert.doesNotMatch(herdr.starts[0].command, /TPID/);
-    }
+    const clock = new StepClock((_ms, count) => {
+      if (count === 1) {
+        writeFileSync(cliJsonlPath, [
+          JSON.stringify({ role: 'assistant', content: 'Inspecting the codebase' }),
+          JSON.stringify({ role: 'meta', type: 'session.resume_hint', session_id: 'sid-1', command: 'resume', content: 'hint' }),
+          JSON.stringify({ role: 'assistant', content: 'Planning the fix' }),
+          JSON.stringify({ role: 'assistant', content: '', tool_calls: [{ type: 'function', id: 'tool-1', function: { name: 'Read' } }] }),
+          JSON.stringify({ role: 'tool', tool_call_id: 'tool-1', content: 'tool result' }),
+          '{malformed',
+          '',
+        ].join('\n'));
+      } else {
+        writeFileSync(sentinelPath, '0');
+      }
+    });
+
+    await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('no spawn'); }, {
+      env: { HYDRA_HERDR_PANES: '1' },
+      herdr,
+      clock,
+      buildWorkerPrompt: () => 'the kimi prompt',
+    }));
+
+    assert.match(herdr.starts[0].command, /tail -n \+1 -f/);
+    assert.match(herdr.starts[0].command, /TPID=/);
+    assert.match(herdr.starts[0].command, /kill \$TPID/);
+
+    const progress = readFileSync(progressPath, 'utf8');
+    assert.match(progress, /Inspecting the codebase/);
+    assert.match(progress, /Planning the fix/);
+    assert.doesNotMatch(progress, /hint|tool result|malformed/);
+  });
+
+  it('advances kimi live progress past a bare null JSON line', async () => {
+    const f = fixture(runId(), { vendor: 'kimi' });
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    const expectedId = `${f.runId}-task-a-v1`;
+    const cliJsonlPath = join(f.sessionsDir, `${expectedId}.cli.jsonl`);
+    const progressPath = join(f.sessionsDir, `${expectedId}.pane-progress.txt`);
+    const sentinelPath = join(f.sessionsDir, `${expectedId}.exit`);
+
+    const clock = new StepClock((_ms, count) => {
+      if (count === 1) {
+        writeFileSync(cliJsonlPath, [
+          'null',
+          JSON.stringify({ role: 'assistant', content: 'Recovered after bare null' }),
+          '',
+        ].join('\n'));
+      } else {
+        writeFileSync(sentinelPath, '0');
+      }
+    });
+
+    await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('no spawn'); }, {
+      env: { HYDRA_HERDR_PANES: '1' },
+      herdr,
+      clock,
+      buildWorkerPrompt: () => 'the kimi prompt',
+    }));
+
+    const progress = readFileSync(progressPath, 'utf8');
+    assert.match(progress, /Recovered after bare null/);
+  });
+
+  it('kimiEventText extracts assistant content and ignores other events', () => {
+    assert.equal(kimiEventText(JSON.stringify({ role: 'assistant', content: 'hello world' })), 'hello world');
+    assert.equal(kimiEventText(JSON.stringify({ role: 'assistant', content: '' })), undefined);
+    assert.equal(kimiEventText(JSON.stringify({ role: 'meta', type: 'session.resume_hint', session_id: 's', command: 'c', content: 'hint' })), undefined);
+    assert.equal(kimiEventText(JSON.stringify({ role: 'tool', tool_call_id: 'tool-1', content: 'tool result' })), undefined);
+    assert.equal(kimiEventText('{malformed'), undefined);
+    assert.equal(kimiEventText(''), undefined);
+    assert.equal(kimiEventText('null'), undefined);
+    assert.equal(kimiEventText(JSON.stringify([1, 2, 3])), undefined);
+    assert.equal(kimiEventText('"bare string"'), undefined);
+    assert.equal(kimiEventText('42'), undefined);
+    assert.equal(kimiEventText('true'), undefined);
+  });
+
+  it('does not create a live progress tail for claude panes', async () => {
+    const f = fixture(runId(), { vendor: 'claude' });
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    const expectedId = `${f.runId}-task-a-v1`;
+    const clock = new StepClock(() => {
+      writeFileSync(join(f.sessionsDir, `${expectedId}.exit`), '0');
+    });
+    await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('no spawn'); }, {
+      env: { HYDRA_HERDR_PANES: '1' },
+      herdr,
+      clock,
+      buildWorkerPrompt: () => 'prompt',
+    }));
+
+    const progressPath = join(f.sessionsDir, `${expectedId}.pane-progress.txt`);
+    assert.equal(existsSync(progressPath), false, 'claude should not have a progress file');
+    assert.doesNotMatch(herdr.starts[0].command, /tail -n \+1 -f/);
+    assert.doesNotMatch(herdr.starts[0].command, /TPID/);
   });
 
   it('records a hosted worker exit even when the banner prompt build fails', async () => {
