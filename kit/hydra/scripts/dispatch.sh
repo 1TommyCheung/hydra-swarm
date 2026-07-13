@@ -158,12 +158,29 @@ run_worker_in_herdr_pane() {
       && hydra_log "closed herdr pane $pane_id ($label)"
   }
 
-  # HARNESS-owned timeout: poll for the adapter's exit sentinel.
+  # HARNESS-owned KEEP-ALIVE timeout: poll for the adapter's exit sentinel.
+  # timeout_min is an INACTIVITY window, not a wall-clock cap: while the worker's
+  # session capture files (cli.jsonl / stderr) keep growing, the timer renews —
+  # slow reasoning is not a failure. A worker is killed only after timeout_min
+  # of NO output, or at the absolute hard cap (HYDRA_HARD_CAP_MIN, default 6x)
+  # that backstops a pathological still-writing-forever loop.
   local waited=0 limit=$(( timeout_min * 60 ))
-  while [ ! -f "$sentinel" ] && [ "$waited" -lt "$limit" ]; do sleep 2; waited=$(( waited + 2 )); done
+  local elapsed=0 hard_cap=$(( ${HYDRA_HARD_CAP_MIN:-$(( timeout_min * 6 ))} * 60 ))
+  local act prev_act=""
+  while [ ! -f "$sentinel" ] && [ "$waited" -lt "$limit" ] && [ "$elapsed" -lt "$hard_cap" ]; do
+    sleep 2; waited=$(( waited + 2 )); elapsed=$(( elapsed + 2 ))
+    act="$(wc -c "$sessions_dir/$agent_run_id.cli.jsonl" "$sessions_dir/$agent_run_id.stderr" 2>/dev/null | tail -1)"
+    [ "$act" != "$prev_act" ] && { prev_act="$act"; waited=0; }
+  done
   if [ ! -f "$sentinel" ]; then
     [ -f "$pidfile" ] && hydra_kill_tree "$(cat "$pidfile")"
-    record_exit agent_timed_out
+    if [ "$elapsed" -ge "$hard_cap" ]; then
+      hydra_ledger_append "$run_id" agent_timed_out task_id "$task_id" vendor "$vendor" reason hard_cap elapsed_sec "$elapsed" && exit_recorded=1
+      release_slot
+    else
+      hydra_ledger_append "$run_id" agent_timed_out task_id "$task_id" vendor "$vendor" reason stalled idle_sec "$waited" && exit_recorded=1
+      release_slot
+    fi
     close_pane
     return 0
   fi
@@ -185,13 +202,27 @@ run_worker() {
   # while blocked on a foreground child, so a foreground worker would swallow
   # SIGTERM until it finished — exactly how the dangling task_started arose.
   # `wait` is interruptible, so the trap can fire immediately.
-  hydra_timeout $(( timeout_min * 60 )) \
-    "$adapter" "$verb" "$task_spec" "$worktree" "$inbox" "$sessions_dir" "$agent_run_id" "$prior_session" &
+  # KEEP-ALIVE timeout (same semantics as the pane path): timeout_min is an
+  # inactivity window renewed while session capture files grow; the hard cap
+  # (HYDRA_HARD_CAP_MIN, default 6x) backstops runaways.
+  "$adapter" "$verb" "$task_spec" "$worktree" "$inbox" "$sessions_dir" "$agent_run_id" "$prior_session" &
   worker_pid=$!
-  wait "$worker_pid" || rc=$?
-  if [ "$rc" -eq 124 ]; then
-    record_exit agent_timed_out
+  local waited=0 limit=$(( timeout_min * 60 ))
+  local elapsed=0 hard_cap=$(( ${HYDRA_HARD_CAP_MIN:-$(( timeout_min * 6 ))} * 60 ))
+  local act prev_act="" timed_out=""
+  while kill -0 "$worker_pid" 2>/dev/null; do
+    if [ "$waited" -ge "$limit" ]; then timed_out=stalled; break; fi
+    if [ "$elapsed" -ge "$hard_cap" ]; then timed_out=hard_cap; break; fi
+    sleep 2; waited=$(( waited + 2 )); elapsed=$(( elapsed + 2 ))
+    act="$(wc -c "$sessions_dir/$agent_run_id".* 2>/dev/null | tail -1)"
+    [ "$act" != "$prev_act" ] && { prev_act="$act"; waited=0; }
+  done
+  if [ -n "$timed_out" ]; then
+    hydra_kill_tree "$worker_pid"
+    hydra_ledger_append "$run_id" agent_timed_out task_id "$task_id" vendor "$vendor" reason "$timed_out" && exit_recorded=1
+    release_slot
   else
+    wait "$worker_pid" || rc=$?
     record_exit agent_exited "$rc"
   fi
   # Budget/usage accounting (Wave 1) — parse the adapter session capture.

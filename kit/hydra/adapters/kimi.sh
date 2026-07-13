@@ -110,9 +110,14 @@ Image to analyze: $image"
     # NOTE: `kimi -p` (print mode) ALREADY auto-approves tools — that is exactly
     # why the OS sandbox is mandatory. `-y` is both redundant and rejected
     # ("Cannot combine --prompt with --yolo"), so it is intentionally absent.
+    # stdout (stream-json) is capture-only — parsed for the structured result.
+    # stderr (Kimi's human-readable progress) is TEE'd: captured for forensics
+    # AND passed through, so a hosting herdr pane shows live progress. Pane text
+    # is still never read as truth — Git + ledger remain authoritative.
     ( cd "$worktree" && sandbox-exec -f "$prof" \
         kimi -p "$prompt" --output-format stream-json --add-dir "$worktree" ) \
-      </dev/null >"$sessions/$agent_run_id.cli.jsonl" 2>"$sessions/$agent_run_id.stderr" || true
+      </dev/null >"$sessions/$agent_run_id.cli.jsonl" 2> >(tee "$sessions/$agent_run_id.stderr" >&2) || true
+    wait  # let the tee process-substitution flush before parsing the capture
     rm -f "$prof"
 
     session_id="$(jq -rs 'map(.session_id // empty) | map(select(. != "")) | last // empty' "$sessions/$agent_run_id.cli.jsonl" 2>/dev/null || true)"
