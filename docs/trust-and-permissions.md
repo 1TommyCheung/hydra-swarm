@@ -116,3 +116,30 @@ Repository content, issue text, generated files, comments, and tool output may c
 ```
 
 Vendor files (`CLAUDE.md`, `.codex/config.toml`, `opencode.json`, `.kimi/`) configure adapters but must not contradict `AGENTS.md`.
+
+## 11. As-built drift notes (audit 2026-07-13)
+
+- **§2.1 — "external state store never reachable from any worktree" is not
+  OS-enforced for Claude.** Codex (`workspace-write`) and Kimi (`sandbox-exec`)
+  are OS-confined to the worktree; Claude runs `bypassPermissions` (no OS
+  sandbox). The store is out of reach by *location and convention*, not by kernel
+  enforcement, for Claude workers. Closed by the daemon milestone. (Cross-ref
+  `architecture.md` §9.)
+- **§5 — case-collision check omitted.** `audit-ownership.sh` enforces
+  absolute-path and `..`-traversal hygiene, rename-both-paths, untracked-file,
+  symlink-escape, and submodule rules — but **not** the case-insensitive
+  case-collision check §5 requires. *Code follow-up.*
+- **§6 — verification runs in the dirty worktree**, not a clean checkout of
+  `head_commit`. Consequence: untracked files present at promotion can influence
+  the gate. Two new gates were added (`promote.sh`): `no_commit` (rejects
+  head == base / empty diff — work left uncommitted, §2.1) and `not_completed`
+  (a worker-declared `failed`/`blocked` drop can't promote). These close the
+  "nothing committed" hole; the "untracked file influences verify" hole remains a
+  code follow-up (verify against a clean checkout).
+- **Sandbox allowances (Kimi).** `sandbox-exec` must additionally permit
+  `/dev/null` (git/bash open it read-write) and the herdr socket dir; out-of-lane
+  writes stay denied. The filesystem confinement is the enforced guarantee;
+  network is allowed (the vendor API needs it) — a documented residual, not full
+  network isolation.
+- **§4 layer 4 upheld and strengthened.** The post-hoc Git diff audit remains
+  authoritative; the two new promote gates are additional layer-4 checks.

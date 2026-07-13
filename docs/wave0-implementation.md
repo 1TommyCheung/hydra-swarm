@@ -1,5 +1,14 @@
 # Hydra-Swarm — Wave 0 Implementation
 
+> **FROZEN — historical record. Completed 2026-07-12.** This is the account of
+> how the system was bootstrapped; it is **not maintained** and must not be
+> rewritten (rewriting destroys provenance — the same logic as not letting a
+> worker rewrite its branch history). For operating the live system see
+> `operations.md`; for re-installing into a new repo the `hydra-setup` skill
+> supersedes this file (Wave 3 / `packaging.md`). As-built deviations from this
+> plan are recorded in `roadmap.md` (delivered changelog) and the per-doc
+> drift-audit sections.
+
 **Scope:** Claude Code lead · Claude + Codex workers · core evidence-gated integration loop.
 **Explicitly out:** GitNexus, Graphify, capability profiles, OpenCode/Kimi adapters, monitors (herdr), OTel, automatic budget accounting (a manual run cap suffices), automated cross-vendor review policy (in Wave 0, Codex reviews Claude and vice versa by convention).
 

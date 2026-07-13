@@ -213,3 +213,29 @@ Append-only `authoritative/ledger/events.jsonl`, harness-written:
 ```
 
 The ledger + Git enable full recovery if the lead is interrupted or replaced. Usage/cost events and capability aggregation are Wave 2 (`vendor-adapters.md` §5).
+
+## 8. As-built drift notes (audit 2026-07-13)
+
+- **§2.1 completion rule — now enforced by two gates.** "Completion is invalid
+  if the worker modified files without committing" is enforced at promotion:
+  `no_commit` (head == base or empty `base...head` diff) and the requirement that
+  the drop's `status` is `completed` (`not_completed`). Both were added after a
+  worker left its output *untracked* and every other gate passed.
+- **Result handoff (§2.1) — as-built.** Workers write `.hydra-result.json` in
+  their **own worktree**; the adapter bridges it to the inbox (workers never
+  reach the state store). If a worker commits but omits the self-report, the
+  adapter derives the drop from git evidence (`hydra_derive_drop_from_git`) —
+  head + files are git facts, `verification_claims` stays empty, and promotion
+  re-verifies. This is the "or stdout captured by the adapter" path.
+- **Ledger vocabulary — extended.** Beyond §7's list, the harness now emits
+  `agent_cancelled`, `agent_usage`, `review_started`/`review_completed`,
+  `index_built`, `graph_impact`, `graphify_baseline`/`graphify_investigation`,
+  `herdr_pane_started`, `concurrency_wait`, and `observability_anomaly`.
+- **Review verdicts are advisory; the human authorizes integration.** In run
+  0015 a `revise` verdict was overridden by explicit human authorization to
+  merge (recorded in the merge commit + Design Spec §4.2). "Only `accept`
+  integrates" is the harness default; the human can override, on the record.
+- **Divergence (§2.2) — refined.** `promote.sh` flags divergence only when a
+  worker's claim *contradicts* the harness observation on the **same** command;
+  a worker running its own (different) checks is the expected provenance gap, not
+  a divergence.

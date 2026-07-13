@@ -146,3 +146,23 @@ git worktree remove ~/worktrees/<repo>/run-0042-*   # each
 ```
 
 Removing worktrees never deletes commits already on branches. Worktrees are preserved until the integration branch is accepted or the run is explicitly abandoned. Retention of external run state: open decision (roadmap §Open decisions).
+
+## 7. As-built drift notes (audit 2026-07-13)
+
+- **`.gitignore` additions — as-built.** Beyond `state-and-worktrees §5`, the
+  repo ignores `.gitnexus/`, `.claude/skills/gitnexus/`, `.claude/skills/generated/`,
+  and `graphify-out/` (all derived/rebuildable code-intelligence artifacts).
+- **Per-worktree git excludes.** `create-worktree.sh` appends `.hydra-task.yaml`,
+  `.env.worktree`, `.hydra-result.json`, and `.gitnexus/` to the worktree's
+  `info/exclude`, so harness-injected files never appear as untracked in the
+  ownership audit.
+- **Linked-worktree git metadata.** A linked worktree's `.git` is the
+  git-common-dir *outside* the worktree; OS-sandboxed vendors (Codex, Kimi) must
+  be granted it as a writable root (resolved via `pwd -P`, since `sandbox-exec`
+  and `git worktree` paths differ by the `/var`→`/private/var` symlink) or
+  `git commit` fails in-sandbox.
+- **Retention — still nothing pruned.** 15 runs and their worktrees are retained
+  (open decision #7). No automatic cleanup exists yet.
+- **State-root override.** `HYDRA_STATE_ROOT` / `HYDRA_WORKTREE_ROOT` /
+  `HYDRA_REPO_ID` override the default locations (the boundary tests and recovery
+  drill redirect all state into a throwaway dir this way).

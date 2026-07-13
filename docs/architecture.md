@@ -129,3 +129,36 @@ Task states: `planned, ready, running, blocked, completed_unreviewed, revision_r
 **Failed combined verification:** identify the smallest responsible scope — candidate defect (return to owning worktree), cross-candidate incompatibility (integration defect task), pre-existing failure (document; decide if blocking), environment failure (retry only after ruling out code).
 
 **Lead replacement:** only at a recorded checkpoint. The replacement reconstructs state from Git + the state store; conversational context is never load-bearing.
+
+## 9. As-built drift notes (audit 2026-07-13)
+
+Where the Wave 0–2 implementation diverged from the normative text above. Each
+is either amended here or flagged as a code follow-up (never left silently
+disagreeing).
+
+- **§4.8 / §4.2 — worker OS confinement is vendor-asymmetric.** The claim that
+  workers "cannot reach the state store" is enforced structurally for Codex
+  (`workspace-write` sandbox) and Kimi (`sandbox-exec`, writes confined to the
+  worktree), but **Claude workers run under `--permission-mode bypassPermissions`
+  with no OS sandbox** — a Claude worker could read/write `~/.local/state/...` at
+  the OS level. Today the real boundaries are: the state store is a separate path
+  (not handed to the worker), the post-hoc ownership audit, and no remote
+  credentials in the worker env. *Disposition: honest as a Wave 0–2 "privileged
+  lead + audited worker" model; the daemon milestone closes it. Also amended in
+  `trust-and-permissions.md` §11.*
+- **§4.6 — amendment content is not fully ledgered.** `amend-task.sh` records the
+  version bump (`task_spec_amended`) but the substantive spec edit is a hand edit
+  to the instantiated task file. A recovered lead sees *that* an amendment
+  happened, not its full content. *Disposition: code follow-up (record the spec
+  delta to the ledger); tracked in `roadmap.md` later-enhancements.*
+- **§7 — the run state machine is inferred, not asserted.** `run-init.sh` writes
+  `state: planning` and no script advances it through
+  executing/branch_review/integrating/…; task/run state is *reconstructed from
+  the ledger event stream* (which is faithful and sufficient for recovery), but
+  the enumerated `run.schema.json` states are never emitted as transitions.
+  *Disposition: the doc's intent (every transition is a harness-written ledger
+  event) holds via the event vocabulary; the explicit state field is vestigial —
+  either drive it or drop it from the schema (code follow-up).*
+- **§4.7 — upheld.** Graph intelligence (GitNexus `graph_impact`, Graphify
+  `graphify_investigation`) is emitted `advisory:true` and never gates
+  integration, as specified. Confirmed by the run-0013 self-audit.
