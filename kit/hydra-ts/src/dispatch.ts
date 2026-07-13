@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { constants, cpus } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, extname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { buildWorkerPrompt } from './build-worker-prompt.ts';
 import { die, herdrState, killTree, log, now, stateRoot, warn, yamlScalar } from './lib.ts';
@@ -58,6 +58,7 @@ export interface DispatchOptions {
   stateRoot?: string;
   repoRoot?: string;
   env?: NodeJS.ProcessEnv;
+  adapterRuntime?: 'bash' | 'ts';
   execFileSync?: ExecFileSyncLike;
   spawn?: SpawnLike;
   herdr?: HerdrClient;
@@ -261,6 +262,7 @@ interface WorkerContext {
   slotsDir: string;
   taskSpecPath: string;
   adapterPath: string;
+  adapterRuntime: 'bash' | 'ts';
   verb: 'start' | 'resume';
   priorSession: string;
   timeoutMinutes: number;
@@ -431,7 +433,13 @@ function determineDelivery(
   const priorSession = findPriorSession(runId, taskId, sessionsDir);
   let supportsResume = false;
   try {
-    supportsResume = readFileSync(adapterPath, 'utf8').includes('start|resume');
+    const source = readFileSync(adapterPath, 'utf8');
+    if (extname(adapterPath) === '.ts') {
+      supportsResume = /^\s*export\s+(?:(?:async\s+)?function|(?:const|let|var))\s+resume\b/m.test(source)
+        || /^\s*export\s*\{[^}]*\bresume\b[^}]*\}/m.test(source);
+    } else {
+      supportsResume = source.includes('start|resume');
+    }
   } catch {
     // The adapter existence gate already ran; treat a later read failure as no resume support.
   }
@@ -693,7 +701,7 @@ async function runWorkerPlain(
   recorder: ExitRecorder,
   monitorEnabled = false,
 ): Promise<void> {
-  const child = ctx.spawn(ctx.adapterPath, [
+  const adapterArgs = [
     ctx.verb,
     ctx.taskSpecPath,
     ctx.worktree,
@@ -701,7 +709,12 @@ async function runWorkerPlain(
     ctx.sessionsDir,
     ctx.agentRunId,
     ctx.priorSession,
-  ], {
+  ];
+  const command = ctx.adapterRuntime === 'ts' ? 'node' : ctx.adapterPath;
+  const args = ctx.adapterRuntime === 'ts'
+    ? ['--experimental-strip-types', ctx.adapterPath, ...adapterArgs]
+    : adapterArgs;
+  const child = ctx.spawn(command, args, {
     detached: false,
     stdio: 'ignore',
     cwd: ctx.cwd,
@@ -807,6 +820,7 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
   };
 
   const adapterArgs = [
+    ...(ctx.adapterRuntime === 'ts' ? ['node', '--experimental-strip-types'] : []),
     ctx.adapterPath,
     ctx.verb,
     ctx.taskSpecPath,
@@ -962,7 +976,11 @@ export async function dispatch(
   const taskSpecPath = join(runPath, 'tasks', `${taskId}.yaml`);
   const spec = readTaskSpec(taskSpecPath);
   const repo = discoverRepoRoot(options, cwd);
-  const adapterPath = join(repo, 'hydra', 'adapters', `${spec.vendor}.sh`);
+  const env = options.env ?? process.env;
+  const adapterRuntime = (options.adapterRuntime ?? env.HYDRA_ADAPTER_RUNTIME) === 'ts' ? 'ts' : 'bash';
+  const adapterPath = adapterRuntime === 'ts'
+    ? join(repo, 'hydra-ts', 'src', `adapter-${spec.vendor}.ts`)
+    : join(repo, 'hydra', 'adapters', `${spec.vendor}.sh`);
   if (!isFile(adapterPath)) die(`no adapter for vendor '${spec.vendor}': ${adapterPath}`);
 
   const resolvedWorktree = spec.worktree ? resolve(cwd, spec.worktree) : '';
@@ -977,7 +995,6 @@ export async function dispatch(
   mkdirSync(inbox, { recursive: true });
   mkdirSync(sessionsDir, { recursive: true });
 
-  const env = options.env ?? process.env;
   const delivery = determineDelivery(runId, taskId, sessionsDir, adapterPath, env);
   const ledgerPath = join(runPath, 'authoritative', 'ledger', 'events.jsonl');
   const appendLedger: LedgerAppender = (id, event, ...kvs) => {
@@ -1024,6 +1041,7 @@ export async function dispatch(
     slotsDir,
     taskSpecPath,
     adapterPath,
+    adapterRuntime,
     verb: delivery.verb,
     priorSession: delivery.priorSession,
     timeoutMinutes: spec.timeoutMinutes,
