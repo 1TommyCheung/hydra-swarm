@@ -873,6 +873,30 @@ writable_paths:
     ]);
   });
 
+  it('resolves default schema and verify policy relative to the source file, not cwd', async () => {
+    const originalCwd = process.cwd();
+    process.chdir(tmpdir());
+    try {
+      const f = makeFixture();
+      const options: PromoteOptions = {
+        cwd: process.cwd(),
+        stateRoot: f.stateRoot,
+        audit: () => ({ clean: true, violations: [] }),
+        verify: async (_worktree, _policy, out) => {
+          const observed = [{ command: 'test pass', status: 'passed' as const }];
+          assert.ok(out);
+          writeFileSync(out, `${JSON.stringify(observed)}\n`, 'utf8');
+          return observed;
+        },
+      };
+
+      const result = await promote(f.runId, f.taskId, f.drop, options);
+      assert.equal(existsSync(result.promoted), true);
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
   it('does not leak directories or files outside TEST_TMP (regression)', () => {
     assert.equal(process.env.HYDRA_STATE_ROOT, TEST_TMP);
 

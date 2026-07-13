@@ -25,7 +25,7 @@ impl="${1:?usage: review-required.sh <implementer_vendor> <risk> [label...]}"
 risk="${2:?risk required (low|medium|high|critical)}"; shift 2
 labels=("$@")
 
-policy="$(hydra_repo_root)/hydra/policies/review-policy.yaml"
+policy="$SELF_DIR/../policies/review-policy.yaml"
 risk_at_least="$(hydra_yaml_scalar "$policy" '    risk_at_least')"
 [ -n "$risk_at_least" ] || risk_at_least=high
 mapfile -t trigger_labels < <(hydra_yaml_list "$policy" '    labels_any')

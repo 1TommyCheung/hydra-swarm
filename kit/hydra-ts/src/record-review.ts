@@ -1,6 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { die, ledgerAppend, log, repoRoot, runDir, warn } from './lib.ts';
 
 // ---------------------------------------------------------------------------
@@ -16,6 +16,11 @@ export interface RecordReviewOptions {
 
 export class RecordReviewError extends Error {
   readonly exitCode = 5;
+}
+
+function defaultSchemaPath(): string {
+  const selfDir = dirname(fileURLToPath(import.meta.url));
+  return join(selfDir, '..', '..', 'hydra', 'schemas', 'review.schema.json');
 }
 
 interface SchemaNode {
@@ -161,8 +166,7 @@ export function recordReview(
   }
 
   return withStateRoot(options.stateRoot, () => {
-    const schemaPath =
-      options.schemaPath ?? join(repoRoot(), 'hydra', 'schemas', 'review.schema.json');
+    const schemaPath = options.schemaPath ?? defaultSchemaPath();
 
     let schema: SchemaNode;
     try {

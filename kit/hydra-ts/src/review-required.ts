@@ -1,5 +1,5 @@
-import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { die, repoRoot, yamlList, yamlScalar } from './lib.ts';
 
 // ---------------------------------------------------------------------------
@@ -15,6 +15,11 @@ export interface ReviewDecision {
 export interface ReviewOptions {
   /** Path to the review policy YAML file. Defaults to the repo policy. */
   policyFile?: string;
+}
+
+function defaultPolicyPath(): string {
+  const selfDir = dirname(fileURLToPath(import.meta.url));
+  return join(selfDir, '..', '..', 'hydra', 'policies', 'review-policy.yaml');
 }
 
 function rank(risk: string): number {
@@ -52,8 +57,7 @@ export function reviewRequired(
   labels: string[] = [],
   options: ReviewOptions = {},
 ): ReviewDecision {
-  const policy =
-    options.policyFile ?? join(repoRoot(), 'hydra', 'policies', 'review-policy.yaml');
+  const policy = options.policyFile ?? defaultPolicyPath();
 
   let riskAtLeast = yamlScalar(policy, '    risk_at_least');
   if (!riskAtLeast) riskAtLeast = 'high';

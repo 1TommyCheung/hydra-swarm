@@ -32,7 +32,7 @@ exclude=""
 [ "${4:-}" = "--exclude-vendor" ] && exclude="${5:-}"
 
 repo_root="$(hydra_repo_root)"
-prof_dir="$repo_root/hydra/profiles"
+prof_dir="$SELF_DIR/../profiles"
 measured_dir="$(hydra_state_root)/agents/profiles"
 MIN_N=8   # measured drives ranking only at n>=8 (§5); else seeded priors
 

@@ -11,11 +11,12 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { execFileSync, type ExecFileSyncOptions } from 'node:child_process';
-import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { createWorktree } from '../src/create-worktree.ts';
 import { ledger, yamlScalar } from '../src/lib.ts';
 
-const TEST_TMP = join(import.meta.dirname, 'tmp-create-worktree');
+const TEST_TMP = join(tmpdir(), 'hydra-create-worktree-test');
 
 const ORIGINAL_HYDRA_STATE_ROOT = process.env.HYDRA_STATE_ROOT;
 const ORIGINAL_HYDRA_WORKTREE_ROOT = process.env.HYDRA_WORKTREE_ROOT;
@@ -450,10 +451,31 @@ describe('createWorktree', () => {
     );
   });
 
-  it('reads the wave level from hydra/WAVE when HYDRA_WAVE is unset', () => {
+  it('reads the wave level from the self-relative hydra/WAVE when HYDRA_WAVE is unset', () => {
     const { repoRoot, headCommit } = createGitRepo('wave-file');
     writeBootstrapPolicy(repoRoot, ['true'], ['echo wave_1_step']);
-    writeFileSync(join(repoRoot, 'hydra', 'WAVE'), '2\n', 'utf8');
+
+    // Read the self-relative WAVE file that the implementation resolves to.
+    const selfRelativeWave = resolve(
+      import.meta.dirname,
+      '..',
+      '..',
+      'hydra',
+      'WAVE',
+    );
+    const realWaveLevel = existsSync(selfRelativeWave)
+      ? Number.parseInt(readFileSync(selfRelativeWave, 'utf8').trim(), 10)
+      : 0;
+    const realWaveRunsWave1 = Number.isFinite(realWaveLevel) && realWaveLevel >= 1;
+
+    // Deliberately write the opposite value in the provided repoRoot so that
+    // repoRoot-based resolution would produce a different result than the
+    // self-relative resolution.
+    writeFileSync(
+      join(repoRoot, 'hydra', 'WAVE'),
+      realWaveRunsWave1 ? '0\n' : '2\n',
+      'utf8',
+    );
 
     const runId = 'wave-file';
     const taskId = 'task-wave-file';
@@ -475,7 +497,18 @@ describe('createWorktree', () => {
 
     createWorktree(runId, taskId, undefined, { repoRoot, exec: mockExec });
 
-    assert.ok(wave1Steps.length > 0);
+    if (realWaveRunsWave1) {
+      assert.ok(
+        wave1Steps.length > 0,
+        'expected wave_1 steps to run because self-relative WAVE >= 1',
+      );
+    } else {
+      assert.equal(
+        wave1Steps.length,
+        0,
+        'expected no wave_1 steps because self-relative WAVE == 0',
+      );
+    }
   });
 
   it('does not run wave_1 bootstrap steps when wave level is 0', () => {

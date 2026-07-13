@@ -34,7 +34,7 @@ order=("$@")
 repo_root="$(hydra_repo_root)"
 run_dir="$(hydra_run_dir "$run_id")"
 # The COMBINED gate runs the full policy (incl. cross-component tests, §6).
-verify_policy="${HYDRA_VERIFY_POLICY:-$repo_root/hydra/policies/verification.yaml}"
+verify_policy="${HYDRA_VERIFY_POLICY:-$SELF_DIR/../policies/verification.yaml}"
 # Per-candidate smoke is TASK-SPECIFIC (§5): a candidate's own tests only, no
 # cross-component checks — those belong to the combined gate. Defaults to the
 # full policy when no smoke policy is provided.

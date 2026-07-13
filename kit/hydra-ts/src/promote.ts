@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   auditOwnership,
   type AuditOwnershipOptions,
@@ -20,6 +20,16 @@ import {
 } from './lib.ts';
 import { verify, type VerifyOptions, type VerifyResult } from './verify.ts';
 
+function defaultSchemaPath(): string {
+  const selfDir = dirname(fileURLToPath(import.meta.url));
+  return join(selfDir, '..', '..', 'hydra', 'schemas', 'result.schema.json');
+}
+
+function defaultVerifyPolicyPath(): string {
+  const selfDir = dirname(fileURLToPath(import.meta.url));
+  return join(selfDir, '..', '..', 'hydra', 'policies', 'verification.yaml');
+}
+
 // ---------------------------------------------------------------------------
 // Types.
 // ---------------------------------------------------------------------------
@@ -37,9 +47,9 @@ export interface PromoteOptions {
   cwd?: string;
   /** Hydra state root; defaults to HYDRA_STATE_ROOT or lib.ts stateRoot(). */
   stateRoot?: string;
-  /** Path to result.schema.json; defaults to <repoRoot>/hydra/schemas/result.schema.json. */
+  /** Path to result.schema.json; defaults to the self-relative hydra/schemas/result.schema.json. */
   schema?: string;
-  /** Path to verification policy YAML; defaults to HYDRA_VERIFY_POLICY or <repoRoot>/hydra/policies/verification.yaml. */
+  /** Path to verification policy YAML; defaults to HYDRA_VERIFY_POLICY or the self-relative hydra/policies/verification.yaml. */
   verifyPolicy?: string;
   /** Injected exec implementation for git commands. */
   exec?: ExecLike;
@@ -254,11 +264,10 @@ export async function promote(
   const rDir = runDir(stateRoot, runId);
   const taskSpec = join(rDir, 'tasks', `${taskId}.yaml`);
 
-  const defaultSchema = join(repoRoot(), 'hydra', 'schemas', 'result.schema.json');
+  const defaultSchema = defaultSchemaPath();
   const schema = options.schema ? resolve(cwd, options.schema) : defaultSchema;
 
-  const defaultPolicy =
-    process.env.HYDRA_VERIFY_POLICY ?? join(repoRoot(), 'hydra', 'policies', 'verification.yaml');
+  const defaultPolicy = process.env.HYDRA_VERIFY_POLICY ?? defaultVerifyPolicyPath();
   const verifyPolicy = options.verifyPolicy ? resolve(cwd, options.verifyPolicy) : defaultPolicy;
 
   if (!isFile(drop)) {

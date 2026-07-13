@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { die, repoRoot, stateRoot, yamlScalar } from './lib.ts';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { die, stateRoot, yamlScalar } from './lib.ts';
 
 // ---------------------------------------------------------------------------
 // Allocation RECOMMENDATION (vendor-adapters.md §5).
@@ -18,6 +18,11 @@ import { die, repoRoot, stateRoot, yamlScalar } from './lib.ts';
 // ---------------------------------------------------------------------------
 
 const MIN_N = 8; // measured drives ranking only at n>=8 (§5); else seeded priors
+
+function defaultProfilesDir(): string {
+  const selfDir = dirname(fileURLToPath(import.meta.url));
+  return join(selfDir, '..', '..', 'hydra', 'profiles');
+}
 
 const SEED_FILES: Record<string, string> = {
   claude: 'claude-fable-5.yaml',
@@ -52,8 +57,8 @@ export interface AllocateOptions {
   cwd?: string;
   /** Optional override for the external state root. */
   stateRoot?: string;
-  /** Optional override for the repository root (avoids shelling out to git). */
-  repoRoot?: string;
+  /** Optional override for the seeded profile directory (used by tests). */
+  profilesDir?: string;
   /** Optional execFileSync injection for testing side-effectful calls. */
   exec?: typeof execFileSync;
 }
@@ -75,17 +80,6 @@ function eligible(role: string): string[] {
     default:
       return ['claude', 'codex'];
   }
-}
-
-function resolveRepoRoot(options: AllocateOptions): string {
-  if (options.repoRoot) return options.repoRoot;
-  if (options.exec) {
-    return options.exec('git', ['rev-parse', '--show-toplevel'], {
-      encoding: 'utf8',
-      cwd: options.cwd,
-    }).trim();
-  }
-  return repoRoot();
 }
 
 // Seeded relevance: does any seeded_strength mention the task_type stem or the
@@ -164,10 +158,9 @@ export function allocate(
   if (!taskType) die('task_type required');
 
   const resolvedRisk = risk || 'medium';
-  const repoRootPath = resolveRepoRoot(options);
   const stateRootPath = options.stateRoot ?? stateRoot();
 
-  const profDir = join(repoRootPath, 'hydra', 'profiles');
+  const profDir = options.profilesDir ?? defaultProfilesDir();
   const measuredDir = join(stateRootPath, 'agents', 'profiles');
 
   const candidates = eligible(role).filter((v) => v !== excludeVendor);

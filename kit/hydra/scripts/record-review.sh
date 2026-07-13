@@ -26,7 +26,7 @@ task_id="${2:?usage: record-review.sh <run_id> <task_id> <verdict.json>}"
 verdict="${3:?usage: record-review.sh <run_id> <task_id> <verdict.json>}"
 
 repo_root="$(hydra_repo_root)"
-schema="$repo_root/hydra/schemas/review.schema.json"
+schema="$SELF_DIR/../schemas/review.schema.json"
 run_dir="$(hydra_run_dir "$run_id")"
 [ -f "$verdict" ] || hydra_die "verdict file not found: $verdict"
 

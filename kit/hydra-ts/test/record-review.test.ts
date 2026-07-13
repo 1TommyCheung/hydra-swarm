@@ -1,5 +1,6 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -7,6 +8,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RecordReviewError, recordReview } from '../src/record-review.ts';
 
@@ -354,5 +356,36 @@ describe('recordReview', () => {
     );
 
     assert.deepEqual(readFileSync(result), verdictBytes);
+  });
+
+  it('resolves the default schema relative to the source file, not cwd', () => {
+    const stateRoot = makeStateRoot();
+    createRun(stateRoot, 'run-self-relative');
+    const verdictPath = writeVerdict(validVerdict);
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--no-warnings',
+        '--experimental-strip-types',
+        join(import.meta.dirname, '..', 'src', 'record-review.ts'),
+        'run-self-relative',
+        'task-a',
+        verdictPath,
+      ],
+      {
+        cwd: tmpdir(),
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          HYDRA_STATE_ROOT: stateRoot,
+        },
+      },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    const recordedPath = result.stdout.trim();
+    assert.equal(existsSync(recordedPath), true);
+    assert.equal(recordedPath, reviewPath(stateRoot, 'run-self-relative', 'task-a'));
   });
 });

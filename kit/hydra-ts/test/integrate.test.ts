@@ -407,8 +407,10 @@ describe('integrate', { concurrency: 1 }, () => {
       delete process.env.HYDRA_SMOKE_POLICY;
     }
 
-    const defaultPolicy = join(
-      fixture.repoPath,
+    const defaultPolicy = resolve(
+      import.meta.dirname,
+      '..',
+      '..',
       'hydra',
       'policies',
       'verification.yaml',

@@ -35,7 +35,7 @@ vendor="$(hydra_yaml_scalar "$task_spec" 'assigned_vendor')"
 worktree="$(hydra_yaml_scalar "$task_spec" 'worktree')"
 timeout_min="$(hydra_yaml_scalar "$task_spec" 'timeout_minutes')"
 [ -n "$timeout_min" ] || timeout_min=45
-adapter="$repo_root/hydra/adapters/$vendor.sh"
+adapter="$SELF_DIR/../adapters/$vendor.sh"
 
 [ -f "$adapter" ] || hydra_die "no adapter for vendor '$vendor': $adapter"
 [ -d "$worktree" ] || hydra_die "worktree not created yet (run create-worktree.sh): $worktree"
@@ -139,7 +139,7 @@ _write_pane_banner() {
     printf '%s starting — run %s task %s\n' "$label" "$run_id" "$task_id"
     printf 'worktree: %s\n' "$worktree"
     printf -- '--- prompt ---\n'
-    "$repo_root/hydra/adapters/build-worker-prompt.sh" "$task_spec" 2>/dev/null || printf '(prompt unavailable)\n'
+    "$SELF_DIR/../adapters/build-worker-prompt.sh" "$task_spec" 2>/dev/null || printf '(prompt unavailable)\n'
     printf -- '--------------\n\n'
   } >"$banner_file" 2>/dev/null || true
   printf '%s' "$banner_file"

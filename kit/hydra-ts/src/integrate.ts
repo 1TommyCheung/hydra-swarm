@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   ledgerAppend,
   log,
@@ -31,6 +31,11 @@ export interface IntegrateOptions {
   worktreeRoot?: string;
   exec?: ExecFunction;
   verify?: VerifyFunction;
+}
+
+function defaultVerifyPolicyPath(): string {
+  const selfDir = dirname(fileURLToPath(import.meta.url));
+  return join(selfDir, '..', '..', 'hydra', 'policies', 'verification.yaml');
 }
 
 export class IntegrationError extends Error {
@@ -137,7 +142,7 @@ export function integrate(
 
     const verifyPolicy =
       process.env.HYDRA_VERIFY_POLICY ||
-      join(repoRootPath, 'hydra/policies/verification.yaml');
+      defaultVerifyPolicyPath();
     const smokePolicy = process.env.HYDRA_SMOKE_POLICY || verifyPolicy;
 
     const intBranch = `hydra-integration/${runId}`;

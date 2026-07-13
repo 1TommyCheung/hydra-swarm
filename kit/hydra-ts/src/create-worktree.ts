@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   die,
   ledgerAppend,
@@ -35,6 +35,8 @@ export interface CreateWorktreeOptions {
   stateRoot?: string;
   /** Override for the worktree parent directory (used by tests). */
   worktreeRoot?: string;
+  /** Override for the path to the hydra/WAVE file (used by tests). */
+  wavePath?: string;
   /** Optional exec injection for tests. Defaults to child_process.execFileSync. */
   exec?: typeof execFileSync;
   /** Additional environment variables for bootstrap steps. */
@@ -97,6 +99,11 @@ function resolveRoots(options: CreateWorktreeOptions): ResolvedRoots {
   };
 }
 
+function defaultWavePath(): string {
+  const selfDir = dirname(fileURLToPath(import.meta.url));
+  return join(selfDir, '..', '..', 'hydra', 'WAVE');
+}
+
 function resolvedRunDir(runId: string, roots: ResolvedRoots): string {
   // runDir() uses the process-wide state root; this local equivalent preserves
   // the explicit options.stateRoot override used by callers and tests.
@@ -134,13 +141,12 @@ function runBootstrapSteps(
   return true;
 }
 
-function readWaveLevel(repoRootPath: string, env: Record<string, string> | undefined): number {
+function readWaveLevel(waveFile: string, env: Record<string, string> | undefined): number {
   const waveEnv = env?.HYDRA_WAVE ?? process.env.HYDRA_WAVE;
   if (waveEnv !== undefined) {
     const parsed = Number.parseInt(waveEnv, 10);
     return Number.isNaN(parsed) ? 0 : parsed;
   }
-  const waveFile = join(repoRootPath, 'hydra', 'WAVE');
   if (existsSync(waveFile)) {
     const parsed = Number.parseInt(readFileSync(waveFile, 'utf8').trim(), 10);
     return Number.isNaN(parsed) ? 0 : parsed;
@@ -270,7 +276,8 @@ export function createWorktree(
   // Bootstrap phase.
   let bootstrapStatus = 'ok';
   const bootstrapPolicy = join(roots.repoRoot, 'hydra', 'policies', 'bootstrap.yaml');
-  const waveLevel = readWaveLevel(roots.repoRoot, options.env);
+  const waveFile = options.wavePath ?? defaultWavePath();
+  const waveLevel = readWaveLevel(waveFile, options.env);
 
   if (existsSync(bootstrapPolicy)) {
     if (!runBootstrapSteps(worktree, runId, taskId, 'common', bootstrapPolicy, exec, options.env)) {
