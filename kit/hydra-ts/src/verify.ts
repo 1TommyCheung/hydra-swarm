@@ -109,7 +109,6 @@ export async function verify(
 
   const runCommand = options.exec ?? defaultRunCommand;
   const results: VerifyResult[] = [];
-  let overall = 0;
 
   for (const cmd of commands) {
     if (!cmd) continue;
@@ -119,7 +118,6 @@ export async function verify(
     if (exitCode !== 0) {
       // Match hydra_timeout: only its conventional exit code 124 is a timeout.
       status = exitCode === 124 ? 'timed_out' : 'failed';
-      overall = 4;
     }
     results.push({ command: cmd, status });
   }
@@ -130,7 +128,6 @@ export async function verify(
     writeFileSync(out, `${json}\n`, 'utf8');
   }
 
-  process.exitCode = overall;
   return results;
 }
 

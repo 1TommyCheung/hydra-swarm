@@ -22,7 +22,8 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SELF_DIR/lib.sh"
 if [ "${HYDRA_HARNESS:-ts}" != "bash" ]; then
-exec node --experimental-strip-types "$SELF_DIR/../../hydra-ts/src/review-dispatch.ts" "$@"
+HYDRA_NODE="$(hydra_resolve_node)"
+exec "$HYDRA_NODE" --experimental-strip-types "$SELF_DIR/../../hydra-ts/src/review-dispatch.ts" "$@"
 fi
 
 run_id="${1:?usage: review-dispatch.sh <run_id> <review_id> <vendor> <prompt_file> [--image PATH]}"
