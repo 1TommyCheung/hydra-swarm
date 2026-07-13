@@ -37,6 +37,7 @@ interface Fixture {
   worktree: string;
   repoRoot: string;
   adapterPath: string;
+  tsAdapterPath: string;
   taskSpecPath: string;
 }
 
@@ -47,6 +48,7 @@ function fixture(
     timeoutMinutes?: number;
     specVersion?: number | string;
     adapterContent?: string;
+    tsAdapterContent?: string;
     worktree?: string;
   } = {},
 ): Fixture {
@@ -56,6 +58,7 @@ function fixture(
   const worktree = overrides.worktree ?? join(TEST_TMP, id, 'worktree');
   const repoRoot = join(TEST_TMP, id, 'repo');
   const adapterDir = join(repoRoot, 'hydra', 'adapters');
+  const tsAdapterDir = join(repoRoot, 'hydra-ts', 'src');
   const taskSpecPath = join(runDir, 'tasks', 'task-a.yaml');
   const vendor = overrides.vendor ?? 'claude';
 
@@ -63,6 +66,7 @@ function fixture(
   mkdirSync(sessionsDir, { recursive: true });
   mkdirSync(worktree, { recursive: true });
   mkdirSync(adapterDir, { recursive: true });
+  mkdirSync(tsAdapterDir, { recursive: true });
   writeFileSync(taskSpecPath, [
     'task_id: task-a',
     `run_id: ${id}`,
@@ -75,8 +79,20 @@ function fixture(
     '',
   ].join('\n'));
   const adapterPath = join(adapterDir, `${vendor}.sh`);
+  const tsAdapterPath = join(tsAdapterDir, `adapter-${vendor}.ts`);
   writeFileSync(adapterPath, overrides.adapterContent ?? '#!/usr/bin/env bash\necho ok\n');
-  return { runId: id, stateRoot, runDir, sessionsDir, worktree, repoRoot, adapterPath, taskSpecPath };
+  writeFileSync(tsAdapterPath, overrides.tsAdapterContent ?? 'export function start(): void {}\n');
+  return {
+    runId: id,
+    stateRoot,
+    runDir,
+    sessionsDir,
+    worktree,
+    repoRoot,
+    adapterPath,
+    tsAdapterPath,
+    taskSpecPath,
+  };
 }
 
 function ledger(f: Fixture): Array<Record<string, string>> {
@@ -307,6 +323,56 @@ describe('dispatch Bash parity', () => {
     assert.deepEqual(options.usage, [[f.runId, 'task-a', 'claude', value.agentRunId]]);
   });
 
+  it('uses the Bash adapter directly when the runtime is unset or unrecognized', async () => {
+    for (const env of [{}, { HYDRA_ADAPTER_RUNTIME: 'python' }]) {
+      const f = fixture(runId());
+      const mock = fakeSpawn();
+      await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { env }));
+
+      assert.equal(mock.calls.length, 1);
+      assert.equal(mock.calls[0].command, f.adapterPath);
+      assert.equal(mock.calls[0].args[0], 'start');
+    }
+  });
+
+  it('runs TypeScript adapters through node with the original arguments for multiple vendors', async () => {
+    for (const vendor of ['claude', 'opencode'] as const) {
+      const f = fixture(runId(), { vendor });
+      const mock = fakeSpawn();
+      const handle = await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+        env: { HYDRA_ADAPTER_RUNTIME: 'ts' },
+      }));
+
+      assert.equal(mock.calls.length, 1);
+      assert.equal(mock.calls[0].command, 'node');
+      assert.deepEqual(mock.calls[0].args, [
+        '--experimental-strip-types', f.tsAdapterPath,
+        'start', f.taskSpecPath, f.worktree,
+        join(f.runDir, 'inbox', handle.agentRunId),
+        f.sessionsDir, handle.agentRunId, '',
+      ]);
+    }
+  });
+
+  it('prefers the adapterRuntime option over HYDRA_ADAPTER_RUNTIME', async () => {
+    const bash = fixture(runId());
+    const bashMock = fakeSpawn();
+    await dispatch(bash.runId, 'task-a', injectedOptions(bash, bashMock.spawn, {
+      adapterRuntime: 'bash',
+      env: { HYDRA_ADAPTER_RUNTIME: 'ts' },
+    }));
+    assert.equal(bashMock.calls[0].command, bash.adapterPath);
+
+    const ts = fixture(runId());
+    const tsMock = fakeSpawn();
+    await dispatch(ts.runId, 'task-a', injectedOptions(ts, tsMock.spawn, {
+      adapterRuntime: 'ts',
+      env: { HYDRA_ADAPTER_RUNTIME: 'bash' },
+    }));
+    assert.equal(tsMock.calls[0].command, 'node');
+    assert.equal(tsMock.calls[0].args[1], ts.tsAdapterPath);
+  });
+
   it('records non-zero and signal-derived worker exit codes', async () => {
     const nonzero = fixture(runId());
     await dispatch(nonzero.runId, 'task-a', injectedOptions(nonzero, fakeSpawn({ autoExit: 42 }).spawn));
@@ -429,8 +495,8 @@ describe('dispatch Bash parity', () => {
     assert.equal(ledger(f)[0].delivery, 'resume');
   });
 
-  it('cold-restarts while preserving a discovered prior session when resume is unsupported', async () => {
-    const f = fixture(runId());
+  it('cold-restarts while preserving a discovered prior session when a Bash adapter lacks resume', async () => {
+    const f = fixture(runId(), { vendor: 'codex' });
     writeFileSync(join(f.sessionsDir, `${f.runId}-task-a-v1.json`), JSON.stringify({ session_id: 'session-1' }));
     const mock = fakeSpawn();
     await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
@@ -438,6 +504,38 @@ describe('dispatch Bash parity', () => {
     }));
     assert.equal(mock.calls[0].args[0], 'start');
     assert.equal(mock.calls[0].args.at(-1), 'session-1');
+  });
+
+  it('detects resume support from TypeScript exports', async () => {
+    const supported = fixture(runId(), {
+      vendor: 'claude',
+      tsAdapterContent: readFileSync(join(import.meta.dirname, '../src/adapter-claude.ts'), 'utf8'),
+    });
+    writeFileSync(
+      join(supported.sessionsDir, `${supported.runId}-task-a-v1.json`),
+      JSON.stringify({ session_id: 'session-ts' }),
+    );
+    const supportedMock = fakeSpawn();
+    await dispatch(supported.runId, 'task-a', injectedOptions(supported, supportedMock.spawn, {
+      env: { HYDRA_ADAPTER_RUNTIME: 'ts', HYDRA_DELIVERY: 'resume' },
+    }));
+    assert.equal(supportedMock.calls[0].args[2], 'resume');
+    assert.equal(supportedMock.calls[0].args.at(-1), 'session-ts');
+
+    const unsupported = fixture(runId(), {
+      vendor: 'codex',
+      tsAdapterContent: readFileSync(join(import.meta.dirname, '../src/adapter-codex.ts'), 'utf8'),
+    });
+    writeFileSync(
+      join(unsupported.sessionsDir, `${unsupported.runId}-task-a-v1.json`),
+      JSON.stringify({ session_id: 'session-ts' }),
+    );
+    const unsupportedMock = fakeSpawn();
+    await dispatch(unsupported.runId, 'task-a', injectedOptions(unsupported, unsupportedMock.spawn, {
+      env: { HYDRA_ADAPTER_RUNTIME: 'ts', HYDRA_DELIVERY: 'resume' },
+    }));
+    assert.equal(unsupportedMock.calls[0].args[2], 'start');
+    assert.equal(unsupportedMock.calls[0].args.at(-1), 'session-ts');
   });
 
   it('keeps non-opencode vendors hosted in an injected herdr pane', async () => {
