@@ -26,6 +26,9 @@ set -euo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SELF_DIR/lib.sh"
+if [ "${HYDRA_HARNESS:-bash}" = "ts" ]; then
+exec node --experimental-strip-types "$SELF_DIR/../../hydra-ts/src/graphify-repo.ts" "$@"
+fi
 
 command -v graphify >/dev/null 2>&1 || hydra_die "graphify CLI not found (Wave 2 dependency)"
 repo_root="$(hydra_repo_root)"

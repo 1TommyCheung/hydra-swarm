@@ -17,6 +17,9 @@ set -euo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SELF_DIR/lib.sh"
+if [ "${HYDRA_HARNESS:-bash}" = "ts" ]; then
+exec node --experimental-strip-types "$SELF_DIR/../../hydra-ts/src/dispatch.ts" "$@"
+fi
 
 run_id="${1:?usage: dispatch.sh <run_id> <task_id> [--background]}"
 task_id="${2:?usage: dispatch.sh <run_id> <task_id> [--background]}"

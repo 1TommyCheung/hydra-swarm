@@ -22,6 +22,9 @@ set -euo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SELF_DIR/lib.sh"
+if [ "${HYDRA_HARNESS:-bash}" = "ts" ]; then
+exec node --experimental-strip-types "$SELF_DIR/../../hydra-ts/src/index-candidate.ts" "$@"
+fi
 
 command -v gitnexus >/dev/null 2>&1 || hydra_die "gitnexus CLI not found (Wave 1 dependency)"
 

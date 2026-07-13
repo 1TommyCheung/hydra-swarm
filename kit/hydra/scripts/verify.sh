@@ -27,6 +27,9 @@ set -euo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SELF_DIR/lib.sh"
+if [ "${HYDRA_HARNESS:-bash}" = "ts" ]; then
+exec node --experimental-strip-types "$SELF_DIR/../../hydra-ts/src/verify.ts" "$@"
+fi
 
 worktree="${1:?usage: verify.sh <worktree> <policy.yaml> [out.json]}"
 policy="${2:?usage: verify.sh <worktree> <policy.yaml> [out.json]}"
