@@ -192,6 +192,16 @@ function isDirectory(path: string): boolean {
   }
 }
 
+function readPidfile(path: string): number | undefined {
+  try {
+    const text = readFileSync(path, 'utf8').trim();
+    const pid = text ? Number(text) : NaN;
+    return Number.isNaN(pid) || pid <= 0 ? undefined : pid;
+  } catch {
+    return undefined;
+  }
+}
+
 function readTaskSpec(path: string): TaskSpec {
   if (!isFile(path)) die(`instantiated task spec not found: ${path}`);
   const timeout = yamlScalar(path, 'timeout_minutes');
@@ -504,8 +514,14 @@ function dispatchPidfilePath(sessionsDir: string, agentRunId: string): string {
 function writeAtomic(path: string, content: string): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.tmp.${process.pid}`;
-  writeFileSync(tmp, content, 'utf8');
-  renameSync(tmp, path);
+  try {
+    writeFileSync(tmp, content, 'utf8');
+    renameSync(tmp, path);
+  } finally {
+    // Remove the temp file even if the rename fails (full disk, permissions,
+    // cross-device state root) so no orphan accumulates.
+    rmSync(tmp, { force: true });
+  }
 }
 
 function removeDispatchPidfile(path: string): void {
@@ -941,7 +957,7 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
   async function workerDisappeared(): Promise<boolean> {
     if (existsSync(sentinel)) return false;
     if (!isFile(pidfile)) return false;
-    const pid = Number(readFileSync(pidfile, 'utf8').trim());
+    const pid = readPidfile(pidfile);
     if (!pid) return false;
     let alive = false;
     try { alive = ctx.processAlive(pid); } catch { alive = false; }
@@ -973,10 +989,8 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
       waited = 0;
     }
     if (await workerDisappeared()) {
-      if (isFile(pidfile)) {
-        const pid = Number(readFileSync(pidfile, 'utf8').trim());
-        if (pid) ctx.killTree(pid);
-      }
+      const pid = readPidfile(pidfile);
+      if (pid) ctx.killTree(pid);
       recorder.recordExit('agent_exited', '127', 'reason', 'worker_disappeared');
       await closePane();
       return true;
@@ -987,10 +1001,8 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
 
   if (recorder.isRecorded()) return true;
   if (!existsSync(sentinel)) {
-    if (isFile(pidfile)) {
-      const pid = Number(readFileSync(pidfile, 'utf8').trim());
-      if (pid) ctx.killTree(pid);
-    }
+    const pid = readPidfile(pidfile);
+    if (pid) ctx.killTree(pid);
     if (elapsed >= hardCap) {
       recorder.recordTimeout('hard_cap', ['elapsed_sec', String(Math.floor(elapsed / 1000))]);
     } else {
@@ -1000,7 +1012,9 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
     return true;
   }
 
-  recorder.recordExit('agent_exited', readFileSync(sentinel, 'utf8').trim());
+  let exitCode = '0';
+  try { exitCode = readFileSync(sentinel, 'utf8').trim(); } catch { /* sentinel exists but unreadable; use conservative fallback */ }
+  recorder.recordExit('agent_exited', exitCode);
   await closePane();
   return true;
 }

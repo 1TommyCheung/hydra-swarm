@@ -61,18 +61,20 @@ task_events_all="$(jq -rc "select(.task_id == \"$task_id\")" "$ledger")"
 matching_line="$(echo "$task_events_all" | jq -r --arg agent_run_id "$agent_run_id" 'select(.event == "task_started" and .agent_run_id == $agent_run_id) | input_line_number' | tail -n1)"
 task_events=''
 if [ -n "$matching_line" ]; then
-  task_events="$(echo "$task_events_all" | jq -r --argjson start "$matching_line" 'select(input_line_number >= $start)')"
+  task_events="$(echo "$task_events_all" | jq -c --argjson start "$matching_line" 'select(input_line_number >= $start)')"
 fi
 
 state='unknown'
 if [ -n "$task_events" ]; then
-  if echo "$task_events" | jq -e 'map(.event) | any(. == "agent_exited")' >/dev/null; then
+  if echo "$task_events" | jq -se 'any(.event == "agent_exited" and .reason == "worker_disappeared")' >/dev/null; then
+    state='failed'
+  elif echo "$task_events" | jq -se 'map(.event) | any(. == "agent_exited")' >/dev/null; then
     state='completed'
-  elif echo "$task_events" | jq -e 'map(.event) | any(. == "agent_cancelled")' >/dev/null; then
+  elif echo "$task_events" | jq -se 'map(.event) | any(. == "agent_cancelled")' >/dev/null; then
     state='cancelled'
-  elif echo "$task_events" | jq -e 'map(.event) | any(. == "agent_timed_out")' >/dev/null; then
+  elif echo "$task_events" | jq -se 'map(.event) | any(. == "agent_timed_out")' >/dev/null; then
     state='timed_out'
-  elif echo "$task_events" | jq -e 'map(.event) | any(. == "task_started")' >/dev/null; then
+  elif echo "$task_events" | jq -se 'map(.event) | any(. == "task_started")' >/dev/null; then
     state='running'
   fi
 fi
@@ -90,7 +92,14 @@ started_epoch=''
 started_line="$(echo "$task_events" | jq -r 'select(.event == "task_started") | .time' | head -n1)"
 if [ -n "$started_line" ]; then
   started_time="$started_line"
-  started_epoch="$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "$started_time" '+%s' 2>/dev/null || true)"
+  # Try BSD/macOS date first, then fall back to GNU coreutils date. The
+  # original `date -j -f` form is macOS-only and silently returned null on
+  # Linux because `|| true` swallowed the GNU-date error.
+  started_epoch="$(
+    date -j -f '%Y-%m-%dT%H:%M:%SZ' "$started_time" '+%s' 2>/dev/null \
+    || date -u -d "$started_time" '+%s' 2>/dev/null \
+    || true
+  )"
 fi
 elapsed_seconds=''
 if [ -n "$started_epoch" ]; then
@@ -147,8 +156,8 @@ elif [ -f "$stderr" ]; then
   progress_tail="$(tail -n "$lines" "$stderr")"
 fi
 
-# Last 5 ledger events for this task.
-last_events="$(echo "$task_events_all" | tail -n 5)"
+# Last 5 ledger events for this task (scoped to the current attempt).
+last_events="$(echo "$task_events" | tail -n 5)"
 
 if [ "$json" -eq 1 ]; then
   jq -n \

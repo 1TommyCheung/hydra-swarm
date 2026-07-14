@@ -20,7 +20,7 @@ export interface StatusOptions {
 }
 
 export interface StatusResult {
-  state: 'running' | 'completed' | 'cancelled' | 'timed_out' | 'unknown';
+  state: 'running' | 'completed' | 'failed' | 'cancelled' | 'timed_out' | 'unknown';
   agent_run_id: string;
   vendor: string;
   elapsed_seconds: number | null;
@@ -93,13 +93,17 @@ function readLedger(ledgerPath: string, runId: string): LedgerEntry[] {
   if (!isFile(ledgerPath)) die(`no ledger for run ${runId}`);
   const content = readFileSync(ledgerPath, 'utf8');
   const lines = content.split('\n').filter((line) => line.trim() !== '');
-  return lines.map((line, index) => {
+  const entries: LedgerEntry[] = [];
+  for (const line of lines) {
     try {
-      return JSON.parse(line) as LedgerEntry;
+      entries.push(JSON.parse(line) as LedgerEntry);
     } catch {
-      throw new Error(`malformed ledger line ${index + 1}: ${line}`);
+      // Skip malformed or partial lines rather than aborting the whole read.
+      // This is expected when status reads concurrently with a writer that
+      // has appended data but not yet flushed the trailing newline.
     }
-  });
+  }
+  return entries;
 }
 
 function filterTaskEvents(events: LedgerEntry[], taskId: string): LedgerEntry[] {
@@ -139,7 +143,11 @@ function determineState(events: LedgerEntry[]): StatusResult['state'] {
   if (events.length === 0) return 'unknown';
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const event = events[i].event;
-    if (event === 'agent_exited') return 'completed';
+    if (event === 'agent_exited') {
+      // A pane worker that vanished without writing its exit sentinel is
+      // recorded as agent_exited but must not be reported as a clean success.
+      return events[i].reason === 'worker_disappeared' ? 'failed' : 'completed';
+    }
     if (event === 'agent_cancelled') return 'cancelled';
     if (event === 'agent_timed_out') return 'timed_out';
   }
@@ -391,7 +399,7 @@ export function status(
     lines,
   );
 
-  const lastEvents = taskEvents.slice(-5);
+  const lastEvents = attemptEvents.slice(-5);
 
   return {
     state,

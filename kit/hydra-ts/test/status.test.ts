@@ -154,6 +154,7 @@ describe('status', () => {
     assert.equal(result.agent_run_id, `${f.runId}-task-a-v2`);
     assert.equal(result.elapsed_seconds, 120);
     assert.equal(result.disagreement, null);
+    assert.deepEqual(result.ledger_events.map(({ event }) => event), ['task_started', 'heartbeat']);
   });
 
   it('reports a completed task when agent_exited is present', () => {
@@ -172,6 +173,46 @@ describe('status', () => {
     assert.equal(result.disagreement, null);
     assert.equal(result.dispatch_liveness, null);
     assert.deepEqual(result.ledger_events.at(-1)?.event, 'agent_exited');
+  });
+
+  it('reports a disappeared worker as failed, not completed', () => {
+    const f = fixture(uniqueRunId('disappeared'));
+    writeLedger(f, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:05:00Z', event: 'agent_exited', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', exit_code: '127', reason: 'worker_disappeared' },
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f, {
+      now: () => Date.parse('2024-01-01T00:06:00Z'),
+    }));
+
+    assert.equal(result.state, 'failed');
+    assert.equal(result.elapsed_seconds, 360);
+    assert.equal(result.disagreement, null);
+    assert.equal(result.dispatch_liveness, null);
+    assert.equal(result.ledger_events.at(-1)?.reason, 'worker_disappeared');
+  });
+
+  it('skips malformed or partial ledger lines instead of throwing', () => {
+    const f = fixture(uniqueRunId('partial-ledger'));
+    mkdirSync(dirname(f.ledgerPath), { recursive: true });
+    writeFileSync(
+      f.ledgerPath,
+      [
+        JSON.stringify({ time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` }),
+        JSON.stringify({ time: '2024-01-01T00:05:00Z', event: 'agent_exited', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', exit_code: '0' }),
+        '{"time":"2024-01-01T00:06:00Z","event":"truncated",', // partial, no newline
+      ].join('\n'),
+      'utf8',
+    );
+
+    const result = status(f.runId, 'task-a', baseOptions(f, {
+      now: () => Date.parse('2024-01-01T00:06:00Z'),
+    }));
+
+    assert.equal(result.state, 'completed');
+    assert.equal(result.elapsed_seconds, 360);
+    assert.deepEqual(result.ledger_events.map(({ event }) => event), ['task_started', 'agent_exited']);
   });
 
   it('surfaces disagreement when the ledger says running but the pidfile is missing', () => {

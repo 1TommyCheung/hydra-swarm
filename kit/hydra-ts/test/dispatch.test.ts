@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -10,7 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
@@ -1171,6 +1172,21 @@ describe('dispatch Bash parity', () => {
       assert.equal(existsSync(pidfile), false, 'dispatch pidfile should be removed after completion');
     });
 
+    it('cleans up the temp file when atomic write fails to rename', async () => {
+      const f = fixture(runId());
+      const pidfile = join(f.sessionsDir, 'supervisor', `${f.runId}-task-a-v1.dispatch.pid`);
+      mkdirSync(dirname(pidfile), { recursive: true });
+      mkdirSync(pidfile); // destination exists as directory, so rename will fail
+      const mock = fakeSpawn();
+
+      await assert.rejects(
+        dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { background: true })),
+        /cross-device|ENOTEMPTY|EISDIR|ENAMETOOLONG/i,
+      );
+
+      assert.equal(existsSync(`${pidfile}.tmp.${process.pid}`), false, 'temp file should be removed after rename failure');
+    });
+
     it('does not let supervisor metadata interfere with the plain-activity timeout', async () => {
       const f = fixture(runId(), { timeoutMinutes: 1 });
       const id = `${f.runId}-task-a-v1`;
@@ -1213,6 +1229,75 @@ describe('dispatch Bash parity', () => {
       assert.equal(ledger(f).at(-1)?.dispatch_instance_id, ledger(f)[0].dispatch_instance_id);
       assert.ok(aliveCalls >= 2, 'processAlive should be probed at least twice');
       assert.deepEqual(options.killed, [12345], 'worker tree should be killed when worker disappears');
+      assert.deepEqual(herdr.closes, ['pane-1']);
+    });
+
+    it('does not crash when the exit sentinel exists but cannot be read', async () => {
+      const f = fixture(runId());
+      const herdr = new FakeHerdr();
+      herdr.live = true;
+      const id = `${f.runId}-task-a-v1`;
+      const sentinel = join(f.sessionsDir, `${id}.exit`);
+      let sentinelCreated = false;
+      const clock = new StepClock((_ms, count) => {
+        if (count === 1) {
+          // Create an unreadable sentinel so existsSync succeeds but readFileSync throws.
+          writeFileSync(sentinel, '42\n', 'utf8');
+          chmodSync(sentinel, 0o000);
+          sentinelCreated = true;
+        }
+      });
+
+      try {
+        await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('no spawn'); }, {
+          env: { HYDRA_HERDR_PANES: '1' },
+          herdr,
+          clock,
+        }));
+      } finally {
+        if (sentinelCreated && existsSync(sentinel)) {
+          chmodSync(sentinel, 0o600);
+          rmSync(sentinel, { force: true });
+        }
+      }
+
+      assert.equal(ledger(f).at(-1)?.event, 'agent_exited');
+      assert.equal(ledger(f).at(-1)?.exit_code, '0');
+      assert.deepEqual(herdr.closes, ['pane-1']);
+    });
+
+    it('does not crash when the pane pidfile cannot be read at timeout', async () => {
+      const f = fixture(runId(), { timeoutMinutes: 1 });
+      const herdr = new FakeHerdr();
+      herdr.live = true;
+      const id = `${f.runId}-task-a-v1`;
+      const pidfile = join(f.sessionsDir, `${id}.pid`);
+      let pidfileCreated = false;
+      const clock = new StepClock((_ms, count) => {
+        if (count === 1) {
+          // runWorkerInHerdrPane removes the pidfile at startup, so create it
+          // unreadable after the first loop tick so the timeout branch must
+          // handle a readFileSync failure.
+          writeFileSync(pidfile, '12345\n', 'utf8');
+          chmodSync(pidfile, 0o000);
+          pidfileCreated = true;
+        }
+      });
+
+      try {
+        await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('no spawn'); }, {
+          env: { HYDRA_HERDR_PANES: '1' },
+          herdr,
+          clock,
+        }));
+      } finally {
+        if (pidfileCreated && existsSync(pidfile)) {
+          chmodSync(pidfile, 0o600);
+          rmSync(pidfile, { force: true });
+        }
+      }
+
+      assert.equal(ledger(f).at(-1)?.event, 'agent_timed_out');
       assert.deepEqual(herdr.closes, ['pane-1']);
     });
 
