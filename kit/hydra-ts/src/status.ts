@@ -4,6 +4,11 @@ import { pathToFileURL } from 'node:url';
 import { die, stateRoot, yamlScalar } from './lib.ts';
 import { kimiEventText } from './dispatch.ts';
 import { currentAttemptEvents, type LedgerEntry } from './current-attempt.ts';
+import {
+  defaultListProcessesOrNull,
+  validatedDispatchMatches,
+  type ProcessInfo,
+} from './process-discovery.ts';
 
 export interface StatusOptions {
   /** Override for the external state root (used by tests). */
@@ -12,6 +17,10 @@ export interface StatusOptions {
   cwd?: string;
   /** Override for checking whether a PID is alive (used by tests). */
   processAlive?: (pid: number) => boolean;
+  /** Override for process discovery (used by tests). Returns `null` when the
+   * underlying process listing itself was unavailable (e.g. `ps` denied),
+   * which is distinct from "ran and found zero matches" (`[]`). */
+  listProcesses?: () => ProcessInfo[] | null;
   /** Override for the current time as a UNIX timestamp in milliseconds (used by tests). */
   now?: () => number;
   /** Number of progress lines to include (default 20). */
@@ -264,11 +273,23 @@ function gatherProgressTail(
   return { tail: [], source: null };
 }
 
+/** Outcome of the queued (no-pidfile, concurrency_wait) liveness discovery. */
+type QueuedDiscovery =
+  // A live, validated dispatcher was found — the task is genuinely healthy.
+  | 'alive'
+  // Discovery ran and found NO validated live dispatcher — the dispatcher may
+  // have been killed while queued (the real blind-spot Task #33 closes).
+  | 'dead'
+  // Discovery itself could not run (e.g. `ps` denied). MUST NOT be reported as
+  // a death — that would open the exact false-positive gap Task #33 avoids.
+  | 'unavailable';
+
 function detectDisagreement(
   state: StatusResult['state'],
   liveness: StatusResult['dispatch_liveness'],
   elapsedSeconds: number | null,
   attemptEvents: LedgerEntry[],
+  queuedDiscovery: QueuedDiscovery,
 ): string | null {
   const alive = liveness?.alive ?? false;
   const hasPidfile = liveness !== null;
@@ -280,14 +301,21 @@ function detectDisagreement(
       // brief mkdir/writeAtomic overhead has not elapsed yet, or (b) the task
       // is still queued waiting for a concurrency slot. In the queued case the
       // last event in the current attempt window is concurrency_wait and no
-      // pidfile can exist yet; this is reliable evidence so the suppression is
-      // unbounded. Once any later event appears, the slot has been acquired and
-      // the fixed grace window applies.
+      // pidfile can exist yet. Unlike the old blind-trust suppression, we now
+      // verify the dispatch process is genuinely alive via process discovery —
+      // if the dispatcher was SIGKILLed while queued (OOM-killer, kill -9, host
+      // reboot), no further ledger event is ever appended and the blind
+      // suppression would hide the death forever. However, when discovery
+      // itself was unavailable this tick we must NOT assert dispatcher death —
+      // that would convert a degraded-observability condition into a spurious
+      // disagreement, the precise false positive Task #33 forbids.
       if (elapsedSeconds === null || elapsedSeconds < DISPATCH_PIDFILE_GRACE_SECONDS) {
         return null;
       }
       if (isLastEventConcurrencyWait(attemptEvents)) {
-        return null;
+        if (queuedDiscovery === 'alive') return null;
+        if (queuedDiscovery === 'unavailable') return null;
+        return 'ledger reports queued (concurrency_wait) but no live dispatch process was found; the dispatcher may have been killed while queued';
       }
       return 'ledger reports running but no dispatch pidfile exists';
     }
@@ -387,17 +415,49 @@ export function status(
 
   const sessionsDir = join(runPath, 'sessions');
   const pidfilePath = join(sessionsDir, 'supervisor', `${agentRunId}.dispatch.pid`);
+  const processAlive = options.processAlive ?? defaultProcessAlive;
+  const listProcesses = options.listProcesses ?? defaultListProcessesOrNull;
   let liveness: StatusResult['dispatch_liveness'] = null;
   if (isFile(pidfilePath)) {
     const pidText = readFileSync(pidfilePath, 'utf8').trim();
     const pid = pidText ? Number(pidText) : NaN;
-    const processAlive = options.processAlive ?? defaultProcessAlive;
     if (!Number.isNaN(pid) && pid > 0) {
       liveness = { pid, alive: processAlive(pid), advisory: true };
     }
   }
 
-  const disagreement = detectDisagreement(state, liveness, elapsedSeconds, attemptEvents);
+  // Real liveness check for the queued (no-pidfile, concurrency_wait) case.
+  // If the dispatch process was SIGKILLed while parked in acquireSlot(), no
+  // further ledger event is ever appended — scan live processes for a validated
+  // dispatcher instead of blindly trusting the trailing concurrency_wait event.
+  // Discovery has three distinct outcomes (see QueuedDiscovery): a validated
+  // live dispatcher, a genuine "ran and found nothing" (which IS the death
+  // signal), or discovery itself being unavailable (which is NOT a death
+  // signal and must not produce a false-positive disagreement).
+  let queuedDiscovery: QueuedDiscovery = 'dead';
+  if (
+    state === 'running'
+    && liveness === null
+    && elapsedSeconds !== null
+    && elapsedSeconds >= DISPATCH_PIDFILE_GRACE_SECONDS
+    && isLastEventConcurrencyWait(attemptEvents)
+  ) {
+    const processes = listProcesses();
+    if (processes === null) {
+      queuedDiscovery = 'unavailable';
+    } else {
+      const matches = validatedDispatchMatches(processes, processAlive, runId, taskId);
+      queuedDiscovery = matches.length > 0 ? 'alive' : 'dead';
+    }
+  }
+
+  const disagreement = detectDisagreement(
+    state,
+    liveness,
+    elapsedSeconds,
+    attemptEvents,
+    queuedDiscovery,
+  );
   const loopSuspicion = deriveLoopSuspicion(attemptEvents);
 
   const lines = options.lines ?? 20;

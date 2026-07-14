@@ -124,13 +124,91 @@ fi
 # when either (a) the task just started and the brief mkdir/writeAtomic
 # overhead has not elapsed yet, or (b) the task is still queued waiting for a
 # concurrency slot, evidenced by concurrency_wait being the last event in the
-# current attempt window.
+# current attempt window. In the queued case we verify the dispatch process is
+# genuinely alive via process discovery — if it was SIGKILLed while parked in
+# acquireSlot() (OOM-killer, kill -9, host reboot), no further ledger event is
+# ever appended and blind suppression would hide the death forever. Discovery
+# has three outcomes, mirroring the TypeScript path: a validated live
+# dispatcher, a genuine "ran and found nothing" (which IS the death signal), or
+# discovery itself being unavailable (ps denied/missing — which is NOT a death
+# signal and must not produce a false-positive disagreement).
+
+# Strip a single pair of matching outer quotes, mirroring TypeScript's
+# stripOuterQuotes exactly (only strips when first AND last chars are the same
+# quote type).
+_hydra_strip_outer_quotes() {
+  local s="$1" len=${#1} first last
+  if [ "$len" -ge 2 ]; then
+    first="${s:0:1}"
+    last="${s:len-1:1}"
+    if { [ "$first" = "'" ] && [ "$last" = "'" ]; } \
+      || { [ "$first" = '"' ] && [ "$last" = '"' ]; }; then
+      REPLY="${s:1:len-2}"
+      return
+    fi
+  fi
+  REPLY="$s"
+}
+
+# Mirror of TypeScript's isDispatchCommand(): locate the FIRST dispatch token
+# (dispatch.ts/dispatch.sh basename), then require the exact run_id AND task_id
+# tokens to appear among the arguments AFTER that dispatcher token — not merely
+# anywhere in the command string. This rejects e.g.
+#   python worker.py <run> <task> /tmp/dispatch.sh <other-run> <other-task>
+# which a loose "tokens anywhere" check would wrongly accept.
+command_matches_dispatch() {
+  local command="$1" token i dispatch_index=-1 has_run=0 has_task=0
+  local -a words cleaned=()
+  read -r -a words <<<"$command"
+  for token in "${words[@]}"; do
+    _hydra_strip_outer_quotes "$token"
+    cleaned+=("$REPLY")
+  done
+  for ((i = 0; i < ${#cleaned[@]}; i++)); do
+    case "${cleaned[i]##*/}" in
+      dispatch.ts|dispatch.sh) dispatch_index=$i; break ;;
+    esac
+  done
+  [ "$dispatch_index" -ge 0 ] || return 1
+  for ((i = dispatch_index + 1; i < ${#cleaned[@]}; i++)); do
+    [ "${cleaned[i]}" = "$run_id" ] && has_run=1
+    [ "${cleaned[i]}" = "$task_id" ] && has_task=1
+  done
+  [ "$has_run" -eq 1 ] && [ "$has_task" -eq 1 ]
+}
+
+# Queued-dispatcher discovery. Returns:
+#   0  a live, validated dispatcher was found (healthy)
+#   1  discovery ran but found no validated live dispatcher (may be dead)
+#   2  discovery itself was unavailable (ps failed) — NOT a death signal
+queued_dispatch_check() {
+  local ps_output candidate command
+  if ! ps_output="$(ps -axo pid=,command= 2>/dev/null)"; then
+    return 2
+  fi
+  while read -r candidate command; do
+    [[ "$candidate" =~ ^[0-9]+$ ]] || continue
+    kill -0 "$candidate" 2>/dev/null || continue
+    command_matches_dispatch "$command" && return 0
+  done <<<"$ps_output"
+  return 1
+}
+
 grace_seconds=3
 disagreement=''
 if [ "$state" = 'running' ]; then
   if [ ! -f "$pidfile" ]; then
-    if [ -n "$elapsed_seconds" ] && [ "$elapsed_seconds" -ge "$grace_seconds" ] && [ "$last_event" != 'concurrency_wait' ]; then
-      disagreement='ledger reports running but no dispatch pidfile exists'
+    if [ -n "$elapsed_seconds" ] && [ "$elapsed_seconds" -ge "$grace_seconds" ]; then
+      if [ "$last_event" = 'concurrency_wait' ]; then
+        queued_rc=0
+        queued_dispatch_check || queued_rc=$?
+        if [ "$queued_rc" -eq 1 ]; then
+          disagreement='ledger reports queued (concurrency_wait) but no live dispatch process was found; the dispatcher may have been killed while queued'
+        fi
+        # queued_rc 0 (alive) or 2 (discovery unavailable): suppress, no disagreement.
+      else
+        disagreement='ledger reports running but no dispatch pidfile exists'
+      fi
     fi
   elif [ "$dispatch_alive" = 'false' ]; then
     disagreement='ledger reports running but the dispatch process is not alive'

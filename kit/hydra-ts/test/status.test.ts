@@ -276,9 +276,10 @@ describe('status', () => {
     assert.match(afterGrace.disagreement ?? '', /no dispatch pidfile exists/);
   });
 
-  it('does not report disagreement when the task is still queued on concurrency_wait', () => {
+  it('does not report disagreement when a queued task has a live validated dispatch process', () => {
     const f = fixture(uniqueRunId('queued'));
     const startedTime = '2024-01-01T00:00:00Z';
+    const dispatchPid = 55555;
     writeLedger(f, [
       { time: startedTime, event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
       { time: '2024-01-01T00:00:01Z', event: 'concurrency_wait', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', cap: '2', active: '2' },
@@ -286,11 +287,110 @@ describe('status', () => {
 
     const queued = status(f.runId, 'task-a', baseOptions(f, {
       now: () => Date.parse(startedTime) + 30 * 1000,
+      processAlive: (pid) => pid === dispatchPid,
+      listProcesses: () => [{
+        pid: dispatchPid,
+        command: `/usr/bin/node --experimental-strip-types /repo/kit/hydra-ts/src/dispatch.ts ${f.runId} task-a`,
+      }],
     }));
 
     assert.equal(queued.state, 'running');
     assert.equal(queued.dispatch_liveness, null);
     assert.equal(queued.disagreement, null);
+  });
+
+  it('reports disagreement when a queued task has no live dispatch process (killed while queued)', () => {
+    const f = fixture(uniqueRunId('queued-dead'));
+    const startedTime = '2024-01-01T00:00:00Z';
+    writeLedger(f, [
+      { time: startedTime, event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:00:01Z', event: 'concurrency_wait', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', cap: '2', active: '2' },
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f, {
+      now: () => Date.parse(startedTime) + 30 * 1000,
+      processAlive: () => false,
+      listProcesses: () => [],
+    }));
+
+    assert.equal(result.state, 'running');
+    assert.equal(result.dispatch_liveness, null);
+    assert.match(result.disagreement ?? '', /no live dispatch process was found/);
+    assert.match(result.disagreement ?? '', /killed while queued/);
+  });
+
+  it('reports disagreement when a queued task has a live but non-matching process', () => {
+    const f = fixture(uniqueRunId('queued-nomatch'));
+    const startedTime = '2024-01-01T00:00:00Z';
+    writeLedger(f, [
+      { time: startedTime, event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:00:01Z', event: 'concurrency_wait', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', cap: '2', active: '2' },
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f, {
+      now: () => Date.parse(startedTime) + 30 * 1000,
+      processAlive: () => true,
+      listProcesses: () => [
+        { pid: 111, command: `node cancel-task.ts ${f.runId} task-a` },
+        { pid: 222, command: 'sleep 300' },
+      ],
+    }));
+
+    assert.equal(result.state, 'running');
+    assert.equal(result.dispatch_liveness, null);
+    assert.match(result.disagreement ?? '', /no live dispatch process was found/);
+  });
+
+  it('reports disagreement when a live process runs a dispatcher for the wrong task', () => {
+    // A real dispatch.ts invocation but for a different run_id/task_id than the
+    // one status is checking. isDispatchCommand() requires the exact run/task
+    // tokens AFTER the dispatcher token, so this must be rejected — proving the
+    // exact-identity branch (the one where a looser matcher would diverge).
+    const f = fixture(uniqueRunId('queued-wrong-task'));
+    const startedTime = '2024-01-01T00:00:00Z';
+    writeLedger(f, [
+      { time: startedTime, event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:00:01Z', event: 'concurrency_wait', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', cap: '2', active: '2' },
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f, {
+      now: () => Date.parse(startedTime) + 30 * 1000,
+      processAlive: () => true,
+      listProcesses: () => [
+        { pid: 333, command: `/usr/bin/node /repo/kit/hydra-ts/src/dispatch.ts ${f.runId} task-b` },
+        { pid: 444, command: `/usr/bin/node /repo/kit/hydra-ts/src/dispatch.ts other-run task-a` },
+        // Run/task tokens appear BEFORE the dispatch token — a loose matcher
+        // that accepts them anywhere would wrongly call this healthy.
+        { pid: 555, command: `python worker.py ${f.runId} task-a /tmp/dispatch.sh other-run other-task` },
+      ],
+    }));
+
+    assert.equal(result.state, 'running');
+    assert.equal(result.dispatch_liveness, null);
+    assert.match(result.disagreement ?? '', /no live dispatch process was found/);
+  });
+
+  it('does not report a death disagreement when process discovery itself is unavailable', () => {
+    // If `ps` is denied/fails, discovery returns null — which MUST NOT be
+    // reported as "dispatcher may have been killed" (that would be the exact
+    // false positive Fix 1 closes). The queued disagreement is suppressed, same
+    // as the original blind-trust behavior, in this degraded-observability tick.
+    const f = fixture(uniqueRunId('queued-ps-denied'));
+    const startedTime = '2024-01-01T00:00:00Z';
+    writeLedger(f, [
+      { time: startedTime, event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:00:01Z', event: 'concurrency_wait', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', cap: '2', active: '2' },
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f, {
+      now: () => Date.parse(startedTime) + 30 * 1000,
+      processAlive: () => true,
+      listProcesses: () => null,
+    }));
+
+    assert.equal(result.state, 'running');
+    assert.equal(result.dispatch_liveness, null);
+    assert.equal(result.disagreement, null);
   });
 
   it('reports disagreement once the task progresses past concurrency_wait without a pidfile', () => {

@@ -1,16 +1,20 @@
-import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { die, stateRoot, yamlScalar } from './lib.ts';
 import { currentAttemptEvents, type LedgerEntry } from './current-attempt.ts';
+import {
+  defaultListProcesses,
+  isDispatchCommand,
+  processIsDispatch,
+  safeProcessAlive,
+  validatedDispatchMatches,
+  type ProcessInfo,
+} from './process-discovery.ts';
 
 export type CancelSignal = 'SIGTERM' | 'SIGKILL';
 
-export interface ProcessInfo {
-  pid: number;
-  command: string;
-}
+export { isDispatchCommand, type ProcessInfo };
 
 export interface CancelTaskOptions {
   /** Override for the external state root (used by tests). */
@@ -137,84 +141,8 @@ function readPidfile(path: string): number | undefined {
   }
 }
 
-function defaultListProcesses(): ProcessInfo[] {
-  let output: string;
-  try {
-    output = execFileSync('ps', ['-axo', 'pid=,command='], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    } as ExecFileSyncOptionsWithStringEncoding);
-  } catch {
-    return [];
-  }
-
-  const processes: ProcessInfo[] = [];
-  for (const line of output.split('\n')) {
-    const match = line.match(/^\s*(\d+)\s+(.*)$/);
-    if (!match) continue;
-    processes.push({ pid: Number(match[1]), command: match[2] });
-  }
-  return processes;
-}
-
-function stripOuterQuotes(value: string): string {
-  if (value.length >= 2) {
-    const first = value[0];
-    const last = value[value.length - 1];
-    if ((first === "'" && last === "'") || (first === '"' && last === '"')) {
-      return value.slice(1, -1);
-    }
-  }
-  return value;
-}
-
-/** Validate that a discovered command is a dispatcher for this exact run/task. */
-export function isDispatchCommand(command: string, runId: string, taskId: string): boolean {
-  const tokens = command
-    .trim()
-    .split(/\s+/)
-    .map(stripOuterQuotes);
-  const dispatchIndex = tokens.findIndex((token) => {
-    const basename = token.split('/').at(-1);
-    return basename === 'dispatch.ts' || basename === 'dispatch.sh';
-  });
-  if (dispatchIndex < 0) return false;
-  const args = tokens.slice(dispatchIndex + 1);
-  return args.includes(runId) && args.includes(taskId);
-}
-
 function isLastEventConcurrencyWait(events: LedgerEntry[]): boolean {
   return events.length > 0 && events.at(-1)?.event === 'concurrency_wait';
-}
-
-function safeProcessAlive(processAlive: (pid: number) => boolean, pid: number): boolean {
-  try {
-    return processAlive(pid);
-  } catch {
-    return false;
-  }
-}
-
-function processIsDispatch(
-  processes: ProcessInfo[],
-  pid: number,
-  runId: string,
-  taskId: string,
-): boolean {
-  return processes.some((process) =>
-    process.pid === pid && isDispatchCommand(process.command, runId, taskId));
-}
-
-function validatedDispatchMatches(
-  processes: ProcessInfo[],
-  processAlive: (pid: number) => boolean,
-  runId: string,
-  taskId: string,
-): ProcessInfo[] {
-  return processes.filter(({ pid, command }) =>
-    pid > 0
-    && safeProcessAlive(processAlive, pid)
-    && isDispatchCommand(command, runId, taskId));
 }
 
 function emitTerminal(write: (text: string) => void, entry: LedgerEntry): void {
