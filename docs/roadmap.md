@@ -152,6 +152,20 @@ Dates are the day the wave's exit criteria were met in this repo.
 9. **Daemon trigger** — *still open.* The protocol boundary held through Wave 2;
    the daemon is justified by team size > 1 lead or a multi-tenant state store.
 
+### License decision — MIT, matching CrewAI · 2026-07-14
+- **License:** plain MIT for the core Hydra-Swarm framework. No code-level
+  commercial restriction, no PolyForm/BSL/Elastic carve-out.
+- **Precedent:** CrewAI uses the same model — MIT-licensed core framework with
+  monetization via a separate enterprise/control-plane product, proven at scale
+  (5.2M monthly downloads).
+- **Future monetization:** recorded as a separate enterprise/control-plane
+  product (e.g. managed run history, cross-repo capability ledger dashboard,
+  governance/observability) to be built and licensed separately later — not a
+  restriction on this repo's code.
+- **Reasoning trail:** see run 0002 research consult documents
+  `docs/license-research-codex.md`, `docs/license-research-kimi.md`, and
+  `docs/license-research-opencode.md`.
+
 ## Now: the front of the roadmap
 
 ### Wave 3 — packaging & portability (`packaging.md`) — **next**
