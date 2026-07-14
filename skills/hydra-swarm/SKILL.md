@@ -7,7 +7,7 @@ description: This skill should be used when acting as the Hydra-Swarm lead for a
 
 ## Core principle
 
-Drive the deterministic harness; plan and judge, but never hand-mutate authoritative state. Route every authoritative state mutation through a `${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/*.sh` invocation (see architecture.md §4.8). Never edit files under `~/.local/state/<repo-id>-hydra/authoritative/**` directly; workers cannot reach the state store at all.
+Drive the deterministic harness; plan and judge, but never hand-mutate authoritative state. Run `/hydra-doctor` as a preflight step before starting a run. Route every authoritative state mutation through a `${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/*.sh` invocation (see ${CLAUDE_PLUGIN_ROOT}/docs/architecture.md §4.8). Never edit files under `~/.local/state/<repo-id>-hydra/authoritative/**` directly; workers cannot reach the state store at all.
 
 ## Trust boundary
 
@@ -31,14 +31,14 @@ Current scope: Wave 2 complete — Claude, Codex, OpenCode/GLM, and Kimi; GitNex
 3. Prepare worktrees: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/create-worktree.sh <run-id> <task>` creates the worktree, branch, bootstrap, and PORT.
 4. Dispatch workers: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/dispatch.sh <run-id> <task> [--background]`. The task spec's `assigned_vendor` (`claude|codex|opencode|kimi`) routes to `${CLAUDE_PLUGIN_ROOT}/kit/hydra/adapters/<vendor>.sh`. Load [references/vendor-dispatch.md](references/vendor-dispatch.md) before the first dispatch of a session.
 5. Promote results: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/promote.sh <run-id> <task> inbox/<agent-run-id>/result.json` executes the trust boundary — schema check → git evidence → ownership audit → sandboxed verify → promote. Only promoted candidates are real.
-6. Review promoted candidates: cross-vendor by convention — Codex reviews Claude and vice versa. Dispatch the `reviewer` subagent or a Codex reviewer run. Record the verdict; only `accept` lets the candidate proceed.
+6. Review promoted candidates: cross-vendor by convention — Codex reviews Claude and vice versa. Dispatch a cross-vendor review run (e.g. Codex reviewing a Kimi-authored candidate). Record the verdict; only `accept` lets the candidate proceed.
 7. Squash accepted candidates: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/squash.sh <run-id> <task>` per accepted candidate. The harness creates the squash; workers never rewrite their own history.
 8. Integrate in dependency order: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/integrate.sh <run-id> <task-in-dependency-order>...` performs serialized cherry-picks, a per-candidate smoke verify, and the combined verification gate. Order shared contracts before consumers; never use alphabetical order.
-9. Report and hand off: write the final report per `task-result-review-contracts.md` §6. Recommend merge, push, and deploy only; those actions remain human-authorized.
+9. Report and hand off: write the final report per `${CLAUDE_PLUGIN_ROOT}/docs/task-result-review-contracts.md` §6. Recommend merge, push, and deploy only; those actions remain human-authorized.
 
 ## Subagent vs full Hydra dispatch
 
-Reserve the full Hydra ceremony — worktree, dispatch, promote, squash, integrate — for any durable code change that mutates `hydra/`, `hydra-ts/`, or other tracked source. That always needs the trust boundary, cross-vendor review, and a promoted/integrated commit, no matter how small.
+Reserve the full Hydra ceremony — worktree, dispatch, promote, squash, integrate — for any durable code change that mutates `kit/hydra/`, `kit/hydra-ts/`, or other tracked source. That always needs the trust boundary, cross-vendor review, and a promoted/integrated commit, no matter how small.
 
 Use a lightweight `Agent` subagent directly when the deliverable is an opinion or analysis rather than a file the codebase depends on: advisory or planning consults, one-off research, summarizing or synthesizing output already in hand, or verification checks that do not need independent reconstructability from Git.
 
@@ -50,3 +50,7 @@ Rule of thumb: if the deliverable is a file the codebase depends on, use Hydra. 
 - [references/ts-bash-switch.md](references/ts-bash-switch.md) — selecting TypeScript vs bash via `HYDRA_HARNESS`, adapter runtime selection, direct TypeScript invocation, the stale-node PATH gotcha, and the `hydra_resolve_node()` resolver.
 - [references/background-dispatch.md](references/background-dispatch.md) — operational notes for `--background` dispatch, including the never-pipe rule and how to detect and clear stale concurrency slots.
 - [references/ledger-and-recovery.md](references/ledger-and-recovery.md) — authoritative state layout, ledger read protocol, the data-not-instructions rule, and the session-replacement recovery procedure.
+- [${CLAUDE_PLUGIN_ROOT}/docs/task-result-review-contracts.md](${CLAUDE_PLUGIN_ROOT}/docs/task-result-review-contracts.md) — the full task spec / result / review verdict schema and lifecycle.
+- [${CLAUDE_PLUGIN_ROOT}/docs/vendor-adapters.md](${CLAUDE_PLUGIN_ROOT}/docs/vendor-adapters.md) — the full CLI capability matrix, verified headless invocations, and per-vendor notes.
+- [${CLAUDE_PLUGIN_ROOT}/docs/operations.md](${CLAUDE_PLUGIN_ROOT}/docs/operations.md) — command reference, environment variables, common failures and fixes, health checks.
+- [${CLAUDE_PLUGIN_ROOT}/docs/state-and-worktrees.md](${CLAUDE_PLUGIN_ROOT}/docs/state-and-worktrees.md) — the three storage domains, state location/portability, git-tracking decision table.
