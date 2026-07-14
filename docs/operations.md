@@ -16,6 +16,8 @@ bash hydra/scripts/run-init.sh 0042       # -> run_started; creates the state tr
 # write runs/run-0042/tasks/<task>.yaml per lane (template: hydra/templates/task.example.yaml)
 bash hydra/scripts/create-worktree.sh 0042 <task>          # worktree + branch + bootstrap + PORT
 bash hydra/scripts/dispatch.sh 0042 <task>                 # runs the assigned vendor worker
+bash hydra/scripts/status.sh 0042 <task>                   # one-shot read-only task status
+bash hydra/scripts/cancel-task.sh 0042 <task>              # clean cancellation of a running task
 bash hydra/scripts/promote.sh 0042 <task> \
      ~/.local/state/<repo>-hydra/runs/run-0042/inbox/0042-<task>-v1/result.json   # THE trust boundary
 bash hydra/scripts/review-dispatch.sh 0042 <rev> <vendor> <prompt-file>   # cross-vendor review (read-only)
@@ -59,6 +61,7 @@ future decision, not part of the cutover.
 | `HYDRA_SMOKE_POLICY` | Per-candidate smoke policy for `integrate.sh` (task-specific; no cross-component tests). |
 | `HYDRA_DELIVERY` | `start` (default) or `resume` — resume uses the captured session id where the adapter supports it. |
 | `HYDRA_MAX_CONCURRENCY` | Backgrounded-dispatch slot cap (default `min(16, cores-2)`). |
+| `HYDRA_LOOP_DETECTOR` | Loop-thinking detector. Enabled by default (`1` or unset); set to `0` to disable for a task/session where false positives are expected (e.g., legitimately long silent reasoning phases). |
 | `HYDRA_HERDR_PANES=1` | Host each worker/reviewer in a herdr pane (Layer-1 live monitor). |
 | `HYDRA_HERDR_KEEP_PANE=1` | Don't auto-close panes on completion (for inspection). |
 | `HYDRA_REVIEW_TIMEOUT_MIN` | Harness timeout for a pane-hosted review (default 15). |
@@ -170,6 +173,7 @@ It's recommend-only — a human pins the role.
 | `command not found: timeout` | macOS has no GNU `timeout` | `hydra_timeout` falls back to a perl shim; `brew install coreutils` gives `gtimeout` |
 | Codex: `Reading additional input from stdin...` (hang) | non-TTY stdin | adapters close stdin (`</dev/null`) |
 | Codex/Kimi can't `git commit` in-sandbox | linked worktree's `.git` is in the git-common-dir, outside the worktree | adapters add the git-common-dir to writable roots (resolved via `pwd -P`) |
+| A running task needs to be cancelled | Operator needs to stop a dispatched worker | Use `bash hydra/scripts/cancel-task.sh <run> <task>`. This is the only supported clean cancellation path. Never `kill -9` a dispatch process directly: it bypasses the clean path and can leave a dangling `running` ledger entry. |
 
 ## Concurrent runs
 
