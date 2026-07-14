@@ -1,0 +1,457 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { die, stateRoot, yamlScalar } from './lib.ts';
+import { kimiEventText } from './dispatch.ts';
+
+export interface StatusOptions {
+  /** Override for the external state root (used by tests). */
+  stateRoot?: string;
+  /** Override for the current working directory. */
+  cwd?: string;
+  /** Override for checking whether a PID is alive (used by tests). */
+  processAlive?: (pid: number) => boolean;
+  /** Override for the current time as a UNIX timestamp in milliseconds (used by tests). */
+  now?: () => number;
+  /** Number of progress lines to include (default 20). */
+  lines?: number;
+  /** Emit JSON instead of human-readable text. */
+  json?: boolean;
+}
+
+export interface StatusResult {
+  state: 'running' | 'completed' | 'cancelled' | 'timed_out' | 'unknown';
+  agent_run_id: string;
+  vendor: string;
+  elapsed_seconds: number | null;
+  timeout_minutes: number;
+  hard_cap_minutes: number;
+  dispatch_liveness: {
+    pid: number | null;
+    alive: boolean;
+    advisory: true;
+  } | null;
+  disagreement: string | null;
+  progress_tail: string[];
+  progress_source: string | null;
+  ledger_events: Array<Record<string, unknown>>;
+}
+
+interface TaskSpec {
+  vendor: string;
+  timeoutMinutes: number;
+  specVersion: string;
+}
+
+interface LedgerEntry {
+  time?: string;
+  event?: string;
+  run_id?: string;
+  task_id?: string;
+  [key: string]: unknown;
+}
+
+const TERMINAL_EVENTS = ['agent_exited', 'agent_cancelled', 'agent_timed_out'];
+
+// Grace window after task_started before we treat a missing dispatch pidfile as
+// a disagreement. task_started is appended before the pidfile is written, and
+// once a concurrency slot is acquired there is a brief mkdir/writeAtomic
+// overhead before the pidfile appears. This constant covers that fast path;
+// the still-queued case is covered by checking for a trailing concurrency_wait
+// event in the current attempt window.
+const DISPATCH_PIDFILE_GRACE_SECONDS = 3;
+
+const defaultProcessAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+function isFile(path: string): boolean {
+  try {
+    return readFileSync(path) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+function readTaskSpec(path: string): TaskSpec {
+  if (!isFile(path)) die(`instantiated task spec not found: ${path}`);
+  const timeout = yamlScalar(path, 'timeout_minutes');
+  const version = yamlScalar(path, 'spec_version');
+  return {
+    vendor: yamlScalar(path, 'assigned_vendor'),
+    timeoutMinutes: timeout ? Number(timeout) : 45,
+    specVersion: version || '1',
+  };
+}
+
+function readLedger(ledgerPath: string, runId: string): LedgerEntry[] {
+  if (!isFile(ledgerPath)) die(`no ledger for run ${runId}`);
+  const content = readFileSync(ledgerPath, 'utf8');
+  const lines = content.split('\n').filter((line) => line.trim() !== '');
+  return lines.map((line, index) => {
+    try {
+      return JSON.parse(line) as LedgerEntry;
+    } catch {
+      throw new Error(`malformed ledger line ${index + 1}: ${line}`);
+    }
+  });
+}
+
+function filterTaskEvents(events: LedgerEntry[], taskId: string): LedgerEntry[] {
+  return events.filter((entry) => entry.task_id === taskId);
+}
+
+/**
+ * Isolate the event window for the current attempt. A task_id can be retried
+ * with a new spec_version, leaving terminal events from earlier attempts in the
+ * ledger. Only events at or after the task_started entry whose agent_run_id
+ * matches the current agentRunId are considered when deriving state and elapsed
+ * time. Terminal events from prior attempts are ignored.
+ */
+function currentAttemptEvents(
+  events: LedgerEntry[],
+  agentRunId: string,
+): { events: LedgerEntry[]; startedEntry: LedgerEntry | undefined } {
+  // Scan backward so a duplicate task_started for the same agent_run_id uses
+  // the most recent one as the window boundary.
+  let startIndex = -1;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    if (events[i].event === 'task_started' && events[i].agent_run_id === agentRunId) {
+      startIndex = i;
+      break;
+    }
+  }
+  if (startIndex < 0) return { events: [], startedEntry: undefined };
+  return { events: events.slice(startIndex), startedEntry: events[startIndex] };
+}
+
+function isLastEventConcurrencyWait(events: LedgerEntry[]): boolean {
+  if (events.length === 0) return false;
+  return events[events.length - 1].event === 'concurrency_wait';
+}
+
+function determineState(events: LedgerEntry[]): StatusResult['state'] {
+  if (events.length === 0) return 'unknown';
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i].event;
+    if (event === 'agent_exited') return 'completed';
+    if (event === 'agent_cancelled') return 'cancelled';
+    if (event === 'agent_timed_out') return 'timed_out';
+  }
+  const hasStarted = events.some((entry) => entry.event === 'task_started');
+  return hasStarted ? 'running' : 'unknown';
+}
+
+function parseEventTime(time: string | undefined): Date | null {
+  if (!time) return null;
+  const parsed = Date.parse(time);
+  return Number.isNaN(parsed) ? null : new Date(parsed);
+}
+
+function formatElapsed(seconds: number): string {
+  const hrs = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  const parts: string[] = [];
+  if (hrs > 0) parts.push(`${hrs}h`);
+  if (mins > 0 || hrs > 0) parts.push(`${mins}m`);
+  parts.push(`${secs}s`);
+  return parts.join(' ');
+}
+
+function tailLines(path: string, n: number): string[] {
+  const content = readFileSync(path, 'utf8');
+  const lines = content.split('\n');
+  // Drop a trailing empty line so it doesn't count against the limit.
+  if (lines[lines.length - 1] === '') lines.pop();
+  return lines.slice(-n);
+}
+
+function codexEventText(line: string): string | undefined {
+  let event: {
+    type?: string;
+    item?: {
+      type?: string;
+      text?: string;
+      command?: string;
+      changes?: Array<{ path?: string }>;
+      server?: string;
+      tool?: string;
+    };
+  };
+  try {
+    event = JSON.parse(line) as typeof event;
+  } catch {
+    return undefined;
+  }
+  const type = event.type;
+  const item = event.item;
+  if (!item) return undefined;
+
+  if (type === 'item.completed' && item.type === 'agent_message' && item.text) {
+    return item.text;
+  }
+  if (type === 'item.started' && item.type === 'command_execution' && item.command) {
+    const cmd = item.command.split('\n').join(' ').slice(0, 140);
+    return `\n[cmd] ${cmd}`;
+  }
+  if (type === 'item.started' && item.type === 'file_change') {
+    const paths = (item.changes ?? [])
+      .map((change) => {
+        const parts = (change.path ?? '').split('/');
+        return parts[parts.length - 1] ?? '';
+      })
+      .filter((segment) => segment !== '')
+      .join(', ');
+    return `\n[edit] ${paths}`;
+  }
+  if (type === 'item.started' && item.type === 'mcp_tool_call') {
+    return `\n[tool] ${item.server ?? ''}.${item.tool ?? ''}`;
+  }
+  return undefined;
+}
+
+function extractProgressLine(line: string, vendor: string): string | undefined {
+  if (vendor === 'kimi') return kimiEventText(line);
+  if (vendor === 'codex') return codexEventText(line);
+  return undefined;
+}
+
+function gatherProgressTail(
+  sessionsDir: string,
+  agentRunId: string,
+  vendor: string,
+  lines: number,
+): { tail: string[]; source: string | null } {
+  const cliJsonl = join(sessionsDir, `${agentRunId}.cli.jsonl`);
+  if (isFile(cliJsonl)) {
+    const raw = tailLines(cliJsonl, lines);
+    const extracted = raw
+      .map((line) => extractProgressLine(line, vendor))
+      .filter((text): text is string => text !== undefined);
+    return {
+      tail: extracted.length > 0 ? extracted : raw,
+      source: 'cli.jsonl',
+    };
+  }
+
+  const eventsJsonl = join(sessionsDir, `${agentRunId}.events.jsonl`);
+  if (isFile(eventsJsonl)) {
+    return { tail: tailLines(eventsJsonl, lines), source: 'events.jsonl' };
+  }
+
+  const stderr = join(sessionsDir, `${agentRunId}.stderr`);
+  if (isFile(stderr)) {
+    return { tail: tailLines(stderr, lines), source: 'stderr' };
+  }
+
+  return { tail: [], source: null };
+}
+
+function detectDisagreement(
+  state: StatusResult['state'],
+  liveness: StatusResult['dispatch_liveness'],
+  elapsedSeconds: number | null,
+  attemptEvents: LedgerEntry[],
+): string | null {
+  const alive = liveness?.alive ?? false;
+  const hasPidfile = liveness !== null;
+
+  if (state === 'running') {
+    if (!hasPidfile) {
+      // task_started is written before the pidfile. Suppress the missing-
+      // pidfile disagreement when either (a) the task just started and the
+      // brief mkdir/writeAtomic overhead has not elapsed yet, or (b) the task
+      // is still queued waiting for a concurrency slot. In the queued case the
+      // last event in the current attempt window is concurrency_wait and no
+      // pidfile can exist yet; this is reliable evidence so the suppression is
+      // unbounded. Once any later event appears, the slot has been acquired and
+      // the fixed grace window applies.
+      if (elapsedSeconds === null || elapsedSeconds < DISPATCH_PIDFILE_GRACE_SECONDS) {
+        return null;
+      }
+      if (isLastEventConcurrencyWait(attemptEvents)) {
+        return null;
+      }
+      return 'ledger reports running but no dispatch pidfile exists';
+    }
+    if (!alive) {
+      return 'ledger reports running but the dispatch process is not alive';
+    }
+  } else if (state !== 'unknown' && hasPidfile && alive) {
+    return `ledger reports ${state} but the dispatch process is still alive`;
+  }
+
+  return null;
+}
+
+function renderHuman(result: StatusResult): string {
+  const lines: string[] = [];
+  lines.push(`state: ${result.state}`);
+  lines.push(`agent_run_id: ${result.agent_run_id}`);
+  lines.push(`vendor: ${result.vendor}`);
+  lines.push(`elapsed: ${result.elapsed_seconds !== null ? formatElapsed(result.elapsed_seconds) : 'n/a'}`);
+  lines.push(`timeout_minutes: ${result.timeout_minutes}`);
+  lines.push(`hard_cap_minutes: ${result.hard_cap_minutes}`);
+
+  if (result.dispatch_liveness) {
+    const { pid, alive } = result.dispatch_liveness;
+    lines.push(`dispatch_pid: ${pid ?? 'none'} (${alive ? 'alive' : 'dead'}, advisory)`);
+  } else {
+    lines.push('dispatch_pid: none (advisory)');
+  }
+
+  if (result.disagreement) {
+    lines.push(`disagreement: ${result.disagreement}`);
+  }
+
+  lines.push(`progress_tail (${result.progress_source ?? 'none'}):`);
+  if (result.progress_tail.length === 0) {
+    lines.push('  (no progress capture files found)');
+  } else {
+    for (const line of result.progress_tail) {
+      lines.push(`  ${line}`);
+    }
+  }
+
+  lines.push('ledger_events:');
+  if (result.ledger_events.length === 0) {
+    lines.push('  (no ledger events for this task)');
+  } else {
+    for (const entry of result.ledger_events) {
+      const time = entry.time ?? '?';
+      const event = entry.event ?? '?';
+      const detail = Object.entries(entry)
+        .filter(([key]) => key !== 'time' && key !== 'event' && key !== 'run_id' && key !== 'task_id')
+        .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+        .join('  ');
+      lines.push(`  ${time}  ${event}${detail ? `  ${detail}` : ''}`);
+    }
+  }
+
+  return `${lines.join('\n')}\n`;
+}
+
+export function status(
+  runId: string,
+  taskId: string,
+  options: StatusOptions = {},
+): StatusResult {
+  if (!runId || !taskId) die('usage: status <run_id> <task_id> [--lines N] [--json]');
+
+  const cwd = options.cwd ?? process.cwd();
+  const root = options.stateRoot ? resolve(cwd, options.stateRoot) : stateRoot();
+  const runPath = join(root, 'runs', `run-${runId}`);
+  const taskSpecPath = join(runPath, 'tasks', `${taskId}.yaml`);
+  const spec = readTaskSpec(taskSpecPath);
+
+  const agentRunId = `${runId}-${taskId}-v${spec.specVersion}`;
+  const timeoutMinutes = spec.timeoutMinutes;
+  const hardCapMinutes = Number(process.env.HYDRA_HARD_CAP_MIN || timeoutMinutes * 6);
+
+  const ledgerPath = join(runPath, 'authoritative', 'ledger', 'events.jsonl');
+  const allEvents = readLedger(ledgerPath, runId);
+  const taskEvents = filterTaskEvents(allEvents, taskId);
+  const { events: attemptEvents, startedEntry } = currentAttemptEvents(
+    taskEvents,
+    agentRunId,
+  );
+  const state = determineState(attemptEvents);
+
+  const startedTime = parseEventTime(startedEntry?.time);
+  const nowFn = options.now ?? (() => Date.now());
+  const elapsedSeconds = startedTime !== null
+    ? Math.max(0, Math.floor((nowFn() - startedTime.getTime()) / 1000))
+    : null;
+
+  const sessionsDir = join(runPath, 'sessions');
+  const pidfilePath = join(sessionsDir, 'supervisor', `${agentRunId}.dispatch.pid`);
+  let liveness: StatusResult['dispatch_liveness'] = null;
+  if (isFile(pidfilePath)) {
+    const pidText = readFileSync(pidfilePath, 'utf8').trim();
+    const pid = pidText ? Number(pidText) : NaN;
+    const processAlive = options.processAlive ?? defaultProcessAlive;
+    if (!Number.isNaN(pid) && pid > 0) {
+      liveness = { pid, alive: processAlive(pid), advisory: true };
+    }
+  }
+
+  const disagreement = detectDisagreement(state, liveness, elapsedSeconds, attemptEvents);
+
+  const lines = options.lines ?? 20;
+  const { tail: progressTail, source: progressSource } = gatherProgressTail(
+    sessionsDir,
+    agentRunId,
+    spec.vendor,
+    lines,
+  );
+
+  const lastEvents = taskEvents.slice(-5);
+
+  return {
+    state,
+    agent_run_id: agentRunId,
+    vendor: spec.vendor,
+    elapsed_seconds: elapsedSeconds,
+    timeout_minutes: timeoutMinutes,
+    hard_cap_minutes: hardCapMinutes,
+    dispatch_liveness: liveness,
+    disagreement,
+    progress_tail: progressTail,
+    progress_source: progressSource,
+    ledger_events: lastEvents as Array<Record<string, unknown>>,
+  };
+}
+
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    let runId = '';
+    let taskId = '';
+    let lines: number | undefined;
+    let json = false;
+
+    for (let i = 0; i < args.length; i += 1) {
+      const arg = args[i];
+      if (arg === '--lines') {
+        const next = args[i + 1];
+        if (next === undefined || !/^\d+$/.test(next)) {
+          throw new Error('hydra: error: usage: status <run_id> <task_id> [--lines N] [--json]');
+        }
+        lines = Number(next);
+        i += 1;
+      } else if (arg === '--json') {
+        json = true;
+      } else if (!arg.startsWith('-') && runId === '') {
+        runId = arg;
+      } else if (!arg.startsWith('-') && taskId === '') {
+        taskId = arg;
+      } else {
+        throw new Error('hydra: error: usage: status <run_id> <task_id> [--lines N] [--json]');
+      }
+    }
+
+    const result = status(runId, taskId, { lines, json });
+    if (json) {
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    } else {
+      process.stdout.write(renderHuman(result));
+    }
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
+}
