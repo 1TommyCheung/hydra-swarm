@@ -7,7 +7,7 @@ description: This skill should be used when acting as the Hydra-Swarm lead for a
 
 ## Core principle
 
-Drive the deterministic harness; plan and judge, but never hand-mutate authoritative state. Run `/hydra-doctor` as a preflight step before starting a run. Route every authoritative state mutation through a `${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/*.sh` invocation (see ${CLAUDE_PLUGIN_ROOT}/docs/architecture.md §4.8). Never edit files under `~/.local/state/<repo-id>-hydra/authoritative/**` directly; workers cannot reach the state store at all.
+Drive the deterministic harness; plan and judge, but never hand-mutate authoritative state. Run `/hydra-doctor` as a preflight step before starting a run. Route every authoritative state mutation through a `${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/*.sh` invocation (see ${CLAUDE_PLUGIN_ROOT}/docs/architecture.md §4.8). Never edit files under `${XDG_STATE_HOME:-$HOME/.local/state}/<repo-id>-hydra/authoritative/**` directly. The state-root default is `${XDG_STATE_HOME:-$HOME/.local/state}/<repo-id>-hydra`; set `HYDRA_STATE_ROOT` to override it entirely. Worker confinement is vendor-asymmetric: Codex and Kimi are sandboxed away from the state store, but Claude runs with `--permission-mode bypassPermissions` and no OS sandbox, so its real boundary is structural separation plus the post-hoc ownership audit, not process confinement.
 
 ## Trust boundary
 
@@ -22,15 +22,15 @@ Bash remains frozen at Wave 2 exit and kept byte-for-byte as reference/rollback 
 
 ## Scope
 
-Current scope: Wave 2 complete — Claude, Codex, OpenCode/GLM, and Kimi; GitNexus + Graphify code intelligence; herdr terminal-host integration; capability profiles. The bash harness in `${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/` plus `${CLAUDE_PLUGIN_ROOT}/kit/hydra/adapters/` has a TypeScript counterpart in `${CLAUDE_PLUGIN_ROOT}/kit/hydra-ts/src/` with the same argument/stdout/exit-code contract.
+Current scope: Wave 2 complete — Claude, Codex, OpenCode/GLM, and Kimi; GitNexus + Graphify code intelligence; herdr terminal-host integration; capability profiles. The bash harness in `${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/` plus `${CLAUDE_PLUGIN_ROOT}/kit/hydra/adapters/` has a TypeScript counterpart in `${CLAUDE_PLUGIN_ROOT}/kit/hydra-ts/src/` with the same argument/stdout/exit-code contract, except that the loop-thinking detector and the `loop_suspicion` status field are TypeScript-only.
 
 ## The run loop
 
 1. Initialize the run: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/run-init.sh <run-id>` creates run state and emits `run_started`.
-2. Create task specs: instantiate one task spec per lane into `runs/run-<id>/tasks/<task>.yaml`, using `${CLAUDE_PLUGIN_ROOT}/kit/hydra/templates/task.example.yaml` as the template. Assign each writer a disjoint `writable_paths` lane; never let two writers share a tree.
+2. Create task specs: instantiate one task spec per lane into `runs/run-<id>/tasks/<task>.yaml`, using `${CLAUDE_PLUGIN_ROOT}/kit/hydra/templates/task.example.yaml` as the template. The example template's vendor comment is stale; set `assigned_vendor` to any of `claude|codex|opencode|kimi` (dispatch resolves all four). Assign each writer a disjoint `writable_paths` lane; never let two writers share a tree.
 3. Prepare worktrees: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/create-worktree.sh <run-id> <task>` creates the worktree, branch, bootstrap, and PORT.
-4. Dispatch workers: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/dispatch.sh <run-id> <task> [--background]`. The task spec's `assigned_vendor` (`claude|codex|opencode|kimi`) routes to `${CLAUDE_PLUGIN_ROOT}/kit/hydra/adapters/<vendor>.sh`. Load [references/vendor-dispatch.md](references/vendor-dispatch.md) before the first dispatch of a session.
-5. Promote results: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/promote.sh <run-id> <task> inbox/<agent-run-id>/result.json` executes the trust boundary — schema check → git evidence → ownership audit → sandboxed verify → promote. Only promoted candidates are real.
+4. Dispatch workers: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/dispatch.sh <run-id> <task> [--background]`. The task spec's `assigned_vendor` (`claude|codex|opencode|kimi`) routes to the TypeScript adapter at `${CLAUDE_PLUGIN_ROOT}/kit/hydra-ts/src/adapter-<vendor>.ts` by default; `HYDRA_HARNESS=bash` or `HYDRA_ADAPTER_RUNTIME=bash` forces the bash adapter at `${CLAUDE_PLUGIN_ROOT}/kit/hydra/adapters/<vendor>.sh`. Load [references/vendor-dispatch.md](references/vendor-dispatch.md) before the first dispatch of a session.
+5. Promote results: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/promote.sh <run-id> <task> ${XDG_STATE_HOME:-$HOME/.local/state}/<repo-id>-hydra/runs/run-<run-id>/inbox/<agent-run-id>/result.json` executes the trust boundary — schema check → git evidence → ownership audit → sandboxed verify → promote. Only promoted candidates are real.
 6. Review promoted candidates: cross-vendor by convention — Codex reviews Claude and vice versa. Dispatch a cross-vendor review run (e.g. Codex reviewing a Kimi-authored candidate). Record the verdict; only `accept` lets the candidate proceed.
 7. Squash accepted candidates: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/squash.sh <run-id> <task>` per accepted candidate. The harness creates the squash; workers never rewrite their own history.
 8. Integrate in dependency order: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/integrate.sh <run-id> <task-in-dependency-order>...` performs serialized cherry-picks, a per-candidate smoke verify, and the combined verification gate. Order shared contracts before consumers; never use alphabetical order.
@@ -46,7 +46,7 @@ Three harness-owned commands are available while a task is running or after it h
 bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/status.sh <run_id> <task_id> [--lines N] [--json]
 ```
 
-Read-only status for a task. Reports ledger-derived state (`running`, `completed`, `failed`, `cancelled`, `timed_out`, `unknown`), `agent_run_id`, vendor, elapsed time, `timeout_minutes`, `hard_cap_minutes`, advisory dispatch-process liveness, ledger-vs-process disagreement warnings, loop-suspicion status, a progress-capture tail (default 20 lines), and the last 5 ledger events.
+Read-only status for a task. Reports ledger-derived state (`running`, `completed`, `failed`, `cancelled`, `timed_out`, `unknown`), `agent_run_id`, vendor, elapsed time, `timeout_minutes`, `hard_cap_minutes`, advisory dispatch-process liveness, ledger-vs-process disagreement warnings, TypeScript-only `loop_suspicion` status, a progress-capture tail (default 20 lines), and the last 5 ledger events. Note that `completed` does not mean the adapter succeeded: inspect the `exit_code` field in the ledger events for the real success/failure signal.
 
 Use this instead of tailing a pane or guessing at state. The ledger is authoritative; pidfile liveness is advisory and may disagree during the brief startup window or while a task is still queued for a concurrency slot.
 
@@ -60,11 +60,11 @@ The ONLY supported way to cancel a running dispatch cleanly. The command never m
 
 Never `kill -9` a dispatch process directly. Doing so bypasses the clean path and can leave a dangling `running` ledger entry. A real incident earlier in this project's history required a manual out-of-band ledger correction to recover from exactly that.
 
-### Loop-thinking detector
+### Loop-thinking detector (TypeScript harness only)
 
-Every dispatch of a Codex/Kimi/OpenCode task is automatically monitored for repeated-failure or repeated-event-cycle patterns while the Git worktree shows no real progress. Claude is excluded entirely because it does not produce streaming capture the detector can read.
+TypeScript dispatches of a Codex/Kimi/OpenCode task are automatically monitored for repeated-failure or repeated-event-cycle patterns while the Git worktree shows no real progress. Claude is excluded entirely because it does not produce streaming capture the detector can read. The frozen Bash fallback does not run the detector and does not produce a `loop_suspicion` field in `status.sh` output.
 
-On detection the harness appends a nonterminal `agent_loop_suspected` ledger event (surfaced by `status.sh`). If the pattern persists through a confirmation window, it appends `agent_loop_confirmed` and auto-cancels the task via the same clean cancellation path as `cancel-task.sh`.
+On detection the TypeScript harness appends a nonterminal `agent_loop_suspected` ledger event (surfaced by `status.sh`). If the pattern persists through a confirmation window, it appends `agent_loop_confirmed` and auto-cancels the task via the same clean cancellation path as `cancel-task.sh`.
 
 Set `HYDRA_LOOP_DETECTOR=0` to disable it for a task or session where false positives are expected — for example, a task with legitimately long silent reasoning phases.
 

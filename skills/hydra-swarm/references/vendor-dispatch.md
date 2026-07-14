@@ -1,6 +1,6 @@
 # Vendor dispatch notes
 
-Keep `HYDRA_HERDR_PANES=1` as the default. Herdr pane hosting is reliable for all four vendors since the OpenCode monitor-pane fix; do not reflexively unset it.
+Keep `HYDRA_HERDR_PANES=1` as a recommended operating default. The harness treats pane hosting as strictly opt-in (`HYDRA_HERDR_PANES=1` must be set explicitly; unset does not enable it). Herdr pane hosting is reliable for all four vendors since the OpenCode monitor-pane fix; do not reflexively unset it.
 
 Allow `dispatch.sh` to choose the hosting shape automatically per vendor:
 

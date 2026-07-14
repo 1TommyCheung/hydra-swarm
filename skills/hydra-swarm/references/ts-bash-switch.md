@@ -23,9 +23,9 @@ For normal driving, use the bash entry point and let the switch handle it.
 Run the full test suite with:
 
 ```bash
-cd hydra-swarm-plugin/kit/hydra-ts && node --experimental-strip-types --test 'test/**/*.test.ts'
+cd ${CLAUDE_PLUGIN_ROOT}/kit/hydra-ts && npm test
 ```
 
-Expect occasional flake: under full concurrent load the glob can under-report by exactly `promote.test.ts`'s 26 tests. `npm test` isolates that file to avoid the flake; rerun the raw glob before treating a short count as a regression.
+`npm test` deliberately runs the non-promotion files first and then `promote.test.ts` separately to avoid a known concurrent-load flake in the promotion tests. Use the raw `node --experimental-strip-types --test 'test/**/*.test.ts'` glob only when you need to verify a short count is not a regression.
 
 Beware the stale-node PATH gotcha: on this machine, a stale system `node` (`/usr/local/bin/node`, v17.4.0) can shadow the correct nvm-managed node (v22.14.0) in non-interactive/login-shell contexts, such as herdr's `bash -lc` pane hosting and a dispatched worker's sandboxed verification shell. `--experimental-strip-types`/`--test` then fail with "bad option". The harness protects its own entry points via `hydra_resolve_node()` in `${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/lib.sh`: it requires Node ≥22.6, checks `PATH`, then chooses the highest qualifying nvm install or a common Homebrew install, and emits an actionable error if none qualifies. Use the absolute path it returns rather than a bare `node`/`npm` when running node manually inside a worker or pane context.

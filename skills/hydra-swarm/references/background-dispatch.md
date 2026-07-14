@@ -2,7 +2,7 @@
 
 ## Recommended pattern: blocking dispatch + caller backgrounding
 
-`dispatch.sh --background` only controls whether the `dispatch.sh` CLI process waits for the worker before returning; it does not change how the worker itself runs. The preferred pattern for a lead running in an environment with its own background-execution capability (e.g. a tool call that runs a command in the background and notifies on completion) is to call:
+The preferred pattern for a lead running in an environment with its own background-execution capability (e.g. a tool call that runs a command in the background and notifies on completion) is to call:
 
 ```bash
 bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/dispatch.sh <run> <task>
@@ -19,11 +19,17 @@ nohup bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/dispatch.sh <run> <task> \
   >"$log" 2>&1 </dev/null & disown
 ```
 
-## Legacy `--background` flag notes
+## `--background` flag behavior
 
-When dispatching with `--background` from a short-lived tool-shell (not a persistent terminal), follow these rules:
+What `--background` does depends on which harness runtime is selected:
 
-- Never pipe `dispatch.sh` output (`| tail`, `| grep`, etc.). The backgrounded worker inherits the pipe's stdout, so the pipe never closes and the caller hangs. Always redirect to a file:
+- **TypeScript harness (default).** `dispatch.sh` returns an in-process completion handle without awaiting the worker, but the same CLI process retains the live child process and polling timers until the work finishes. The shell does **not** regain control merely because the exported `dispatch()` promise has resolved; the process stays resident as the supervisor. This is why the recommended caller-backgrounded blocking pattern above is preferred.
+
+- **Bash fallback (`HYDRA_HARNESS=bash`).** `dispatch.sh` backgrounds `run_worker` inside the script and exits immediately, returning control to the shell.
+
+When dispatching with `--background` from a short-lived tool-shell (not a persistent terminal), follow these rules regardless of runtime:
+
+- Never pipe `dispatch.sh` output (`| tail`, `| grep`, etc.). A backgrounded worker may inherit the pipe's stdout, so the pipe never closes and the caller hangs. Always redirect to a file:
 
   ```bash
   bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/dispatch.sh <run> <task> --background >/tmp/x.log 2>&1 & disown
