@@ -166,6 +166,36 @@ Dates are the day the wave's exit criteria were met in this repo.
   `docs/license-research-codex.md`, `docs/license-research-kimi.md`, and
   `docs/license-research-opencode.md`.
 
+### Task #31 — async completion trigger + hang detection · 2026-07-14
+- **Async completion trigger:** replaced watcher-script polling with blocking
+  dispatch plus caller backgrounding. `dispatch.sh --background` now only selects
+  whether the CLI process awaits the worker; it does not change how the worker
+  itself runs. The recommended pattern is to call `dispatch.sh <run> <task>`
+  without `--background` and let the caller's own background-execution mechanism
+  carry the command. This removes stale-sentinel false completions (a real
+  failure mode: a watcher matched a leftover `.exit` file from a prior round).
+- **Operational commands:** added `status.sh` (`kit/hydra/scripts/status.sh`) for
+  read-only, one-shot status (ledger state, elapsed time vs timeout/hard-cap
+  budgets, advisory dispatch liveness, progress tail, recent ledger events), and
+  `cancel-task.sh` (`kit/hydra/scripts/cancel-task.sh`) as the only supported
+  clean cancellation path. `cancel-task.sh` resolves the dispatch process via
+  pidfile or validated process discovery, sends SIGTERM, waits for the
+  dispatcher's terminal ledger write, and escalates to SIGKILL only as a last
+  resort. It never mutates state itself.
+- **Loop-thinking detector:** automatic two-stage monitoring for Codex/Kimi/OpenCode
+  dispatches, comparing streaming capture patterns against Git worktree progress.
+  On detection it appends `agent_loop_suspected`; if the pattern persists through
+  a confirmation window it appends `agent_loop_confirmed` and auto-cancels via the
+  same clean path as manual cancellation. Claude is excluded because it has no
+  streaming capture. Set `HYDRA_LOOP_DETECTOR=0` to disable for sessions where
+  false positives are expected.
+- **Cross-vendor adversarial review:** three rounds of review for the
+  auto-cancellation feature, closing stale Stage-2 clock, Rule-B failure
+  recency, and untracked-file fail-open paths before release.
+- **Reasoning trail:** see `docs/async-trigger-design-codex.md`,
+  `docs/async-trigger-design-kimi.md`, `docs/loop-detector-design-codex.md`,
+  and `docs/codex-review-loop-detector-fix2.md`.
+
 ## Now: the front of the roadmap
 
 ### Wave 3 — packaging & portability (`packaging.md`) — **next**

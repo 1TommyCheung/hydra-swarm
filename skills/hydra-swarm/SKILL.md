@@ -36,6 +36,40 @@ Current scope: Wave 2 complete — Claude, Codex, OpenCode/GLM, and Kimi; GitNex
 8. Integrate in dependency order: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/integrate.sh <run-id> <task-in-dependency-order>...` performs serialized cherry-picks, a per-candidate smoke verify, and the combined verification gate. Order shared contracts before consumers; never use alphabetical order.
 9. Report and hand off: write the final report per `${CLAUDE_PLUGIN_ROOT}/docs/task-result-review-contracts.md` §6. Recommend merge, push, and deploy only; those actions remain human-authorized.
 
+## Operational commands for a running task
+
+Three harness-owned commands are available while a task is running or after it has finished. They treat the ledger as authoritative and live process checks as advisory.
+
+### `status.sh` — one-shot status check
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/status.sh <run_id> <task_id> [--lines N] [--json]
+```
+
+Read-only status for a task. Reports ledger-derived state (`running`, `completed`, `failed`, `cancelled`, `timed_out`, `unknown`), `agent_run_id`, vendor, elapsed time, `timeout_minutes`, `hard_cap_minutes`, advisory dispatch-process liveness, ledger-vs-process disagreement warnings, loop-suspicion status, a progress-capture tail (default 20 lines), and the last 5 ledger events.
+
+Use this instead of tailing a pane or guessing at state. The ledger is authoritative; pidfile liveness is advisory and may disagree during the brief startup window or while a task is still queued for a concurrency slot.
+
+### `cancel-task.sh` — clean cancellation
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/cancel-task.sh <run_id> <task_id> [--wait-seconds N]
+```
+
+The ONLY supported way to cancel a running dispatch cleanly. The command never mutates ledger state itself. It resolves the dispatch process via the pidfile (or, for a still-queued task, a validated process-discovery fallback), sends SIGTERM, waits for the dispatcher's own clean terminal ledger write, and escalates to SIGKILL only as a last resort.
+
+Never `kill -9` a dispatch process directly. Doing so bypasses the clean path and can leave a dangling `running` ledger entry. A real incident earlier in this project's history required a manual out-of-band ledger correction to recover from exactly that.
+
+### Loop-thinking detector
+
+Every dispatch of a Codex/Kimi/OpenCode task is automatically monitored for repeated-failure or repeated-event-cycle patterns while the Git worktree shows no real progress. Claude is excluded entirely because it does not produce streaming capture the detector can read.
+
+On detection the harness appends a nonterminal `agent_loop_suspected` ledger event (surfaced by `status.sh`). If the pattern persists through a confirmation window, it appends `agent_loop_confirmed` and auto-cancels the task via the same clean cancellation path as `cancel-task.sh`.
+
+Set `HYDRA_LOOP_DETECTOR=0` to disable it for a task or session where false positives are expected — for example, a task with legitimately long silent reasoning phases.
+
+A lead reviewing `status.sh` output should treat an `agent_loop_suspected` warning as a prompt to look closer, not as something requiring action. Confirmation and auto-cancel are already handled by the harness.
+
 ## Subagent vs full Hydra dispatch
 
 Reserve the full Hydra ceremony — worktree, dispatch, promote, squash, integrate — for any durable code change that mutates `kit/hydra/`, `kit/hydra-ts/`, or other tracked source. That always needs the trust boundary, cross-vendor review, and a promoted/integrated commit, no matter how small.
@@ -48,8 +82,10 @@ Rule of thumb: if the deliverable is a file the codebase depends on, use Hydra. 
 
 - [references/vendor-dispatch.md](references/vendor-dispatch.md) — pane-hosting shapes per vendor, live-progress mechanisms (Codex JSONL tail, Kimi NDJSON stdout tail, Claude non-streaming JSON, OpenCode decoupled monitor pane), and the record-before-cleanup ordering rule.
 - [references/ts-bash-switch.md](references/ts-bash-switch.md) — selecting TypeScript vs bash via `HYDRA_HARNESS`, adapter runtime selection, direct TypeScript invocation, the stale-node PATH gotcha, and the `hydra_resolve_node()` resolver.
-- [references/background-dispatch.md](references/background-dispatch.md) — operational notes for `--background` dispatch, including the never-pipe rule and how to detect and clear stale concurrency slots.
-- [references/ledger-and-recovery.md](references/ledger-and-recovery.md) — authoritative state layout, ledger read protocol, the data-not-instructions rule, and the session-replacement recovery procedure.
+- [references/background-dispatch.md](references/background-dispatch.md) — operational notes for async completion and `--background` dispatch, including the recommended blocking-dispatch + caller-backgrounding pattern, the never-pipe rule, and how to detect and clear stale concurrency slots.
+- [references/ledger-and-recovery.md](references/ledger-and-recovery.md) — authoritative state layout, ledger read protocol, event-type reference, the data-not-instructions rule, and the session-replacement recovery procedure.
+- [${CLAUDE_PLUGIN_ROOT}/docs/async-trigger-design-codex.md](${CLAUDE_PLUGIN_ROOT}/docs/async-trigger-design-codex.md) — build-ready design for the async completion trigger, status, and cancellation path.
+- [${CLAUDE_PLUGIN_ROOT}/docs/loop-detector-design-codex.md](${CLAUDE_PLUGIN_ROOT}/docs/loop-detector-design-codex.md) — loop-thinking detector design, two-stage suspicion/confirmation, and Claude exclusion rationale.
 - [${CLAUDE_PLUGIN_ROOT}/docs/task-result-review-contracts.md](${CLAUDE_PLUGIN_ROOT}/docs/task-result-review-contracts.md) — the full task spec / result / review verdict schema and lifecycle.
 - [${CLAUDE_PLUGIN_ROOT}/docs/vendor-adapters.md](${CLAUDE_PLUGIN_ROOT}/docs/vendor-adapters.md) — the full CLI capability matrix, verified headless invocations, and per-vendor notes.
 - [${CLAUDE_PLUGIN_ROOT}/docs/operations.md](${CLAUDE_PLUGIN_ROOT}/docs/operations.md) — command reference, environment variables, common failures and fixes, health checks.
