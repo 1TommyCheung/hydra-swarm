@@ -278,7 +278,7 @@ open_opencode_monitor_pane() {
   ws="$(herdr pane list 2>/dev/null | jq -r '.result.panes[]|select(.focused)|.workspace_id' | head -1)"
   label="hydra:${run_id}:${task_id}:${vendor}"
   local events_file="$sessions_dir/$agent_run_id.events.jsonl"
-  local model="${HYDRA_OPENCODE_MODEL:-zhipu/glm-5.2}"
+  local model="${HYDRA_OPENCODE_MODEL:-zai-coding-plan/glm-5.2}"
 
   # Starting banner + the actual prompt so the pane answers "what is this worker
   # even doing" before the first token streams. Reuses the shared banner builder

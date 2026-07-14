@@ -732,7 +732,7 @@ function monitorEventText(line: string): string | undefined {
 function openOpencodeMonitor(ctx: WorkerContext, workerPid: number): WorkerMonitor | undefined {
   const eventsPath = join(ctx.sessionsDir, `${ctx.agentRunId}.events.jsonl`);
   const outputPath = join(ctx.sessionsDir, `${ctx.agentRunId}.monitor.txt`);
-  const model = ctx.env.HYDRA_OPENCODE_MODEL || 'zhipu/glm-5.2';
+  const model = ctx.env.HYDRA_OPENCODE_MODEL || 'zai-coding-plan/glm-5.2';
   try {
     writeFileSync(outputPath, buildPaneBanner(ctx, `OpenCode (${model})`), 'utf8');
   } catch {

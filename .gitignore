@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Environment / secrets
+.env*
+.env.agent
+.env.worktree
+
+# Derived code-intelligence artifacts (state-and-worktrees.md §5, §7)
+.gitnexus/
+graphify-out/
+.claude/skills/gitnexus/
+.claude/skills/generated/
+
+# Worker/agent outputs
+*.agent-result.json
+
+# Logs
+*.log

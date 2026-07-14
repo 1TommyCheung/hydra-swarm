@@ -66,7 +66,7 @@ printf 'PORT=%s\n' "$port" >"$worktree/.env.worktree"
 # index built here is for the worker's OWN navigation; review indexes are rebuilt
 # post-freeze by index-candidate.sh.
 bootstrap_status=ok
-bootstrap_policy="$repo_root/hydra/policies/bootstrap.yaml"  # per-project config; keep in parity with hydra-ts/src/create-worktree.ts
+bootstrap_policy="$repo_root/kit/hydra/policies/bootstrap.yaml"  # per-project config; keep in parity with hydra-ts/src/create-worktree.ts
 wave_level="${HYDRA_WAVE:-$( [ -f "$SELF_DIR/../WAVE" ] && cat "$SELF_DIR/../WAVE" || echo 0 )}"
 run_bootstrap_steps() {
   local key="$1"

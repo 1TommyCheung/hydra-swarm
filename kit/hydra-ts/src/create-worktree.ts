@@ -275,7 +275,7 @@ export function createWorktree(
 
   // Bootstrap phase.
   let bootstrapStatus = 'ok';
-  const bootstrapPolicy = join(roots.repoRoot, 'hydra', 'policies', 'bootstrap.yaml');
+  const bootstrapPolicy = join(roots.repoRoot, 'kit', 'hydra', 'policies', 'bootstrap.yaml');
   const waveFile = options.wavePath ?? defaultWavePath();
   const waveLevel = readWaveLevel(waveFile, options.env);
 

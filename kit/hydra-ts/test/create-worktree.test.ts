@@ -97,7 +97,7 @@ function writeBootstrapPolicy(
   common: string[],
   wave1: string[],
 ): void {
-  const dir = join(repoRoot, 'hydra', 'policies');
+  const dir = join(repoRoot, 'kit', 'hydra', 'policies');
   mkdirSync(dir, { recursive: true });
   const lines = ['bootstrap:'];
   lines.push('  common:');
@@ -384,6 +384,53 @@ describe('createWorktree', () => {
     assert.equal(readAllocatedPort(runId, taskId), expectedPortFromCksum(runId, taskId));
   });
 
+  it('executes the bootstrap policy only when it exists at the correct kit/hydra/policies path', () => {
+    const { repoRoot, headCommit } = createGitRepo('bootstrap-path');
+
+    // Deliberately write the policy at the OLD (wrong) path to prove the
+    // implementation does not silently skip a missing-at-correct-path policy.
+    const oldDir = join(repoRoot, 'hydra', 'policies');
+    mkdirSync(oldDir, { recursive: true });
+    writeFileSync(
+      join(oldDir, 'bootstrap.yaml'),
+      'bootstrap:\n  common:\n    - "echo old_path_step"\n',
+      'utf8',
+    );
+
+    // Write the real policy at the current repo layout path.
+    writeBootstrapPolicy(repoRoot, ['echo correct_path_step'], []);
+
+    const runId = 'bootstrap-path';
+    const taskId = 'task-bootstrap-path';
+    writeTaskSpec(runId, taskId, `task_id: ${taskId}\nrun_id: ${runId}\nbase_commit: ${headCommit}\n`);
+
+    const commonSteps: string[] = [];
+    const mockExec = (
+      command: string,
+      args: string[],
+      options?: ExecFileSyncOptions,
+    ): string | Buffer => {
+      if (command === 'bash') {
+        commonSteps.push(args[1] ?? '');
+        return '';
+      }
+      return execFileSync(command, args, options);
+    };
+
+    createWorktree(runId, taskId, undefined, { repoRoot, exec: mockExec });
+
+    // The implementation must find and run the policy at the new path, not the
+    // old one. A file-exists-only test would miss a stale-path bug.
+    assert.ok(
+      commonSteps.some((step) => step.includes('correct_path_step')),
+      'expected the common bootstrap step from kit/hydra/policies/bootstrap.yaml to execute',
+    );
+    assert.ok(
+      !commonSteps.some((step) => step.includes('old_path_step')),
+      'did not expect the stale hydra/policies/bootstrap.yaml path to be used',
+    );
+  });
+
   it('dies when bootstrap common steps fail', () => {
     const { repoRoot, headCommit } = createGitRepo('bootstrap-fail');
     writeBootstrapPolicy(repoRoot, ['false'], []);
@@ -471,6 +518,7 @@ describe('createWorktree', () => {
     // Deliberately write the opposite value in the provided repoRoot so that
     // repoRoot-based resolution would produce a different result than the
     // self-relative resolution.
+    mkdirSync(join(repoRoot, 'hydra'), { recursive: true });
     writeFileSync(
       join(repoRoot, 'hydra', 'WAVE'),
       realWaveRunsWave1 ? '0\n' : '2\n',
