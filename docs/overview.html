@@ -1,0 +1,571 @@
+<title>Hydra-Swarm — Overview</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --bg-elevated: #12151d;
+    --bg-card: #151824;
+    --text: #e7e4dc;
+    --text-dim: #8b90a0;
+    --text-faint: #565c6e;
+    --accent: #4fc4b0;
+    --accent-dim: #2e756a;
+    --warn: #e0a83e;
+    --border: rgba(231, 228, 220, 0.1);
+    --border-strong: rgba(231, 228, 220, 0.2);
+    --claude: #e2896f;
+    --codex: #8b93e0;
+    --opencode: #c77da8;
+    --kimi: #a3b15c;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", "JetBrains Mono", Consolas, monospace;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --radius: 3px;
+  }
+
+  :root[data-theme="light"] {
+    --bg: #f0f1f4;
+    --bg-elevated: #e7e8ec;
+    --bg-card: #ffffff;
+    --text: #14161d;
+    --text-dim: #4b5061;
+    --text-faint: #8a8f9e;
+    --accent: #1c8577;
+    --accent-dim: #d4efec;
+    --warn: #9a6a17;
+    --border: rgba(20, 22, 29, 0.1);
+    --border-strong: rgba(20, 22, 29, 0.2);
+    --claude: #c2593a;
+    --codex: #4c53b8;
+    --opencode: #9c4b76;
+    --kimi: #5c6b2c;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f0f1f4;
+      --bg-elevated: #e7e8ec;
+      --bg-card: #ffffff;
+      --text: #14161d;
+      --text-dim: #4b5061;
+      --text-faint: #8a8f9e;
+      --accent: #1c8577;
+      --accent-dim: #d4efec;
+      --warn: #9a6a17;
+      --border: rgba(20, 22, 29, 0.1);
+      --border-strong: rgba(20, 22, 29, 0.2);
+      --claude: #c2593a;
+      --codex: #4c53b8;
+      --opencode: #9c4b76;
+      --kimi: #5c6b2c;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--serif);
+    font-size: 17px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .wrap {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 0 32px;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .eyebrow::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+    flex: none;
+  }
+
+  h1, h2, h3 {
+    font-family: var(--mono);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  p { max-width: 62ch; color: var(--text); }
+  p.dim { color: var(--text-dim); }
+
+  code, .mono { font-family: var(--mono); }
+
+  /* ---------- Hero ---------- */
+
+  header.hero {
+    position: relative;
+    padding: 96px 0 72px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .hero-glyph {
+    position: absolute;
+    top: 40px;
+    right: 32px;
+    width: 120px;
+    height: 120px;
+    opacity: 0.55;
+  }
+
+  .wordmark {
+    font-size: clamp(40px, 7vw, 68px);
+    line-height: 1;
+    margin-top: 20px;
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+  }
+  .wordmark .h { color: var(--accent); }
+  .wordmark .cursor {
+    display: inline-block;
+    width: 0.5ch;
+    height: 0.85em;
+    background: var(--accent);
+    margin-left: 6px;
+    animation: blink 1.1s steps(1) infinite;
+  }
+  @media (prefers-reduced-motion: reduce) { .wordmark .cursor { animation: none; opacity: 0.6; } }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .tagline {
+    font-family: var(--serif);
+    font-size: 21px;
+    color: var(--text-dim);
+    margin-top: 22px;
+    max-width: 56ch;
+  }
+
+  .hero-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 32px;
+  }
+
+  .pill {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.03em;
+    padding: 6px 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    color: var(--text-dim);
+    background: var(--bg-elevated);
+  }
+
+  /* ---------- Section scaffolding ---------- */
+
+  section { padding: 72px 0; border-bottom: 1px solid var(--border); }
+  section:last-of-type { border-bottom: none; }
+
+  .section-head { margin-bottom: 40px; }
+  .section-head h2 { font-size: 28px; margin-top: 14px; }
+  .section-head p { margin-top: 12px; }
+
+  /* ---------- Pipeline spine ---------- */
+
+  .pipeline {
+    position: relative;
+    margin-top: 12px;
+    padding-left: 40px;
+  }
+
+  .pipeline::before {
+    content: "";
+    position: absolute;
+    left: 9px;
+    top: 10px;
+    bottom: 10px;
+    width: 2px;
+    background: linear-gradient(to bottom, var(--accent), var(--border-strong) 92%);
+  }
+
+  .stage {
+    position: relative;
+    padding-bottom: 34px;
+  }
+  .stage:last-child { padding-bottom: 0; }
+
+  .stage::before {
+    content: "";
+    position: absolute;
+    left: -40px;
+    top: 4px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--bg);
+    border: 2px solid var(--accent);
+  }
+
+  .stage-num {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    letter-spacing: 0.08em;
+  }
+
+  .stage h3 { font-size: 17px; margin-top: 4px; }
+  .stage p { margin-top: 6px; font-size: 15.5px; color: var(--text-dim); }
+  .stage .cmd {
+    display: inline-block;
+    margin-top: 8px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--text-faint);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 4px 9px;
+  }
+
+  /* ---------- Vendor roster ---------- */
+
+  .roster {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    margin-top: 12px;
+  }
+  @media (max-width: 640px) { .roster { grid-template-columns: 1fr; } }
+
+  .vendor {
+    background: var(--bg-card);
+    padding: 26px 24px;
+  }
+
+  .vendor-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 13px;
+    letter-spacing: 0.03em;
+  }
+
+  .vendor-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+
+  .vendor h3 { font-size: 19px; margin-top: 10px; }
+  .vendor p { font-size: 15px; color: var(--text-dim); margin-top: 8px; }
+  .vendor .detail { font-size: 13px; color: var(--text-faint); margin-top: 10px; font-family: var(--mono); }
+
+  /* ---------- Feature grid ---------- */
+
+  .features {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    margin-top: 12px;
+  }
+  @media (max-width: 760px) { .features { grid-template-columns: 1fr; } }
+
+  .feature { background: var(--bg-card); padding: 24px 22px; }
+  .feature .icon {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    letter-spacing: 0.06em;
+  }
+  .feature h3 { font-size: 16.5px; margin-top: 10px; }
+  .feature p { font-size: 14.5px; color: var(--text-dim); margin-top: 8px; }
+
+  .feature.highlight { border: 1px solid var(--accent-dim); position: relative; }
+
+  /* ---------- Trust rounds ---------- */
+
+  .rounds {
+    display: flex;
+    gap: 14px;
+    margin-top: 20px;
+    flex-wrap: wrap;
+  }
+
+  .round {
+    flex: 1;
+    min-width: 220px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 20px;
+  }
+  .round.rejected { border-left: 3px solid var(--warn); }
+  .round.accepted { border-left: 3px solid var(--accent); }
+
+  .round-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .round.rejected .round-label { color: var(--warn); }
+  .round.accepted .round-label { color: var(--accent); }
+  .round p { font-size: 14px; color: var(--text-dim); margin-top: 8px; }
+
+  /* ---------- Stats ---------- */
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 24px;
+    margin-top: 12px;
+  }
+  @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+
+  .stat-value {
+    font-family: var(--mono);
+    font-size: 34px;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+    letter-spacing: -0.02em;
+  }
+  .stat-label {
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-top: 4px;
+  }
+
+  /* ---------- Footer ---------- */
+
+  footer {
+    padding: 48px 0 72px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  footer .mono { font-size: 12.5px; color: var(--text-faint); }
+
+  ::selection { background: var(--accent-dim); color: var(--text); }
+</style>
+
+<header class="hero">
+  <div class="wrap">
+    <svg class="hero-glyph" viewBox="0 0 100 100" aria-hidden="true">
+      <circle cx="50" cy="18" r="6" fill="none" stroke="var(--accent)" stroke-width="1.4"/>
+      <circle cx="18" cy="78" r="6" fill="none" stroke="var(--claude)" stroke-width="1.4"/>
+      <circle cx="40" cy="86" r="6" fill="none" stroke="var(--codex)" stroke-width="1.4"/>
+      <circle cx="62" cy="86" r="6" fill="none" stroke="var(--opencode)" stroke-width="1.4"/>
+      <circle cx="84" cy="78" r="6" fill="none" stroke="var(--kimi)" stroke-width="1.4"/>
+      <path d="M50 24 L18 72 M50 24 L40 80 M50 24 L62 80 M50 24 L84 72" stroke="var(--border-strong)" stroke-width="1"/>
+    </svg>
+    <div class="eyebrow">local multi-agent dev harness</div>
+    <h1 class="wordmark"><span class="h">HYDRA</span>-SWARM<span class="cursor" aria-hidden="true"></span></h1>
+    <p class="tagline">One lead plans and judges. Four vendors — Claude, Codex, OpenCode, Kimi — implement in isolated worktrees. Nothing reaches your tree without crossing the trust boundary.</p>
+    <div class="hero-meta">
+      <span class="pill">v0.4.0</span>
+      <span class="pill">MIT licensed</span>
+      <span class="pill">TypeScript harness</span>
+      <span class="pill">689 tests passing</span>
+    </div>
+  </div>
+</header>
+
+<section id="what-it-is">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="eyebrow">the idea</div>
+      <h2>Agents propose. The harness decides.</h2>
+      <p class="dim">Hydra-Swarm treats every worker — human-directed or autonomous — as untrusted until it clears a deterministic gate. The lead never hand-edits authoritative state; workers never touch it at all. Every promoted candidate can be reconstructed from Git and an append-only ledger alone, even if the lead session that started it is gone.</p>
+    </div>
+  </div>
+</section>
+
+<section id="pipeline">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="eyebrow">the trust boundary</div>
+      <h2>Six stages, one gate</h2>
+      <p class="dim">A candidate moves through the same pipeline whether it came from Claude, Codex, OpenCode, or Kimi. Nothing skips a stage.</p>
+    </div>
+    <div class="pipeline">
+      <div class="stage">
+        <div class="stage-num">STAGE 01</div>
+        <h3>Plan</h3>
+        <p>The lead writes one task spec per lane — objective, acceptance criteria, a disjoint <code>writable_paths</code> boundary. No two writers share a tree.</p>
+        <span class="cmd">run-init.sh · create-worktree.sh</span>
+      </div>
+      <div class="stage">
+        <div class="stage-num">STAGE 02</div>
+        <h3>Dispatch</h3>
+        <p>The task routes to its assigned vendor, hosted in an isolated worktree with its own branch. Live progress streams to a monitor pane where the vendor supports it.</p>
+        <span class="cmd">dispatch.sh &lt;run&gt; &lt;task&gt;</span>
+      </div>
+      <div class="stage">
+        <div class="stage-num">STAGE 03</div>
+        <h3>Promote</h3>
+        <p>The actual trust boundary: schema check → Git evidence → ownership audit → sandboxed verify. The raw inbox drop is an untrusted claim until it clears every gate.</p>
+        <span class="cmd">promote.sh</span>
+      </div>
+      <div class="stage">
+        <div class="stage-num">STAGE 04</div>
+        <h3>Review</h3>
+        <p>Cross-vendor by convention — Codex reviews Kimi's candidate, OpenCode reviews Codex's fix. Only <code>accept</code> lets a candidate proceed.</p>
+        <span class="cmd">review-dispatch.sh</span>
+      </div>
+      <div class="stage">
+        <div class="stage-num">STAGE 05</div>
+        <h3>Squash</h3>
+        <p>The harness — never the worker — squashes an accepted candidate into one clean commit.</p>
+        <span class="cmd">squash.sh</span>
+      </div>
+      <div class="stage">
+        <div class="stage-num">STAGE 06</div>
+        <h3>Integrate</h3>
+        <p>Dependency-ordered cherry-picks, a per-candidate smoke verify, then a combined gate. Merge, push, and deploy stay human-authorized.</p>
+        <span class="cmd">integrate.sh</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="roster">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="eyebrow">the roster</div>
+      <h2>Four vendors, one contract</h2>
+      <p class="dim">Every adapter speaks the same argument / stdout / exit-code contract, so the pipeline above never needs to know which one it's talking to.</p>
+    </div>
+    <div class="roster">
+      <div class="vendor">
+        <span class="vendor-tag"><span class="vendor-dot" style="background:var(--claude)"></span>Claude</span>
+        <h3>The lead's own hand</h3>
+        <p>Runs non-streaming — a single JSON response at exit, no live capture. Loop detection degrades gracefully rather than guessing from silence.</p>
+        <div class="detail">adapter-claude.ts</div>
+      </div>
+      <div class="vendor">
+        <span class="vendor-tag"><span class="vendor-dot" style="background:var(--codex)"></span>Codex</span>
+        <h3>The adversary of choice</h3>
+        <p>Streams a real JSONL event log. Dispatched to review nearly every high-risk candidate this project has shipped — three rounds, for the loop detector alone.</p>
+        <div class="detail">adapter-codex.ts</div>
+      </div>
+      <div class="vendor">
+        <span class="vendor-tag"><span class="vendor-dot" style="background:var(--opencode)"></span>OpenCode / GLM</span>
+        <h3>The outside eye</h3>
+        <p>Hosted as a decoupled monitor process rather than inside a pane — direct pane-hosting broke its CLI outright. Caught a wrong-process-signal bug nobody else found.</p>
+        <div class="detail">adapter-opencode.ts</div>
+      </div>
+      <div class="vendor">
+        <span class="vendor-tag"><span class="vendor-dot" style="background:var(--kimi)"></span>Kimi</span>
+        <h3>The default implementer</h3>
+        <p>Stdout NDJSON tailed live into the pane. The usual first hand on a new task — implement, get reviewed, fix, repeat until accepted.</p>
+        <div class="detail">adapter-kimi.ts</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="hang-detection">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="eyebrow">latest addition · task #31</div>
+      <h2>An agent that's alive isn't the same as an agent that's working</h2>
+      <p class="dim">A worker can stream output forever without producing anything — the same failing command, the same three-step cycle, on repeat. Hydra-Swarm now has an answer to that on both ends: a way to check in, and a way to make sure something is actually watching.</p>
+    </div>
+    <div class="features">
+      <div class="feature">
+        <div class="icon">01 · READ-ONLY</div>
+        <h3>status.sh</h3>
+        <p>One-shot check on a running task: ledger state, elapsed time against the timeout and hard-cap budgets, advisory process liveness, a progress tail, the last five ledger events. No pane-tailing required.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">02 · SAFE CANCEL</div>
+        <h3>cancel-task.sh</h3>
+        <p>The only supported way to stop a dispatch cleanly. Resolves the real dispatch process — never the worker directly — sends SIGTERM, waits for its own terminal ledger write, escalates to SIGKILL only as a last resort with identity re-checked immediately before signaling.</p>
+      </div>
+      <div class="feature highlight">
+        <div class="icon">03 · AUTONOMOUS</div>
+        <h3>Loop-thinking detector</h3>
+        <p>Watches Git worktree activity against repeated action signatures. Two stages — suspected, then confirmed — before it cancels through the exact same clean path as a human-issued cancel. Off by default for no vendor; opt out per task with <code>HYDRA_LOOP_DETECTOR=0</code>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="review-history">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="eyebrow">what "trust boundary" actually cost</div>
+      <h2>Nothing that cancels work on its own ships on the first pass</h2>
+      <p class="dim">The loop detector can autonomously kill a running task, so it was held to a higher bar than everything else in this release — three real adversarial rounds before merge.</p>
+    </div>
+    <div class="rounds">
+      <div class="round rejected">
+        <div class="round-label">Round 1 — Rejected</div>
+        <p>Four high-severity false-positive paths: stale evidence surviving real progress, a confirmation stage that didn't require continued evidence, a rule that could fire on repeated <em>successful</em> work, Git sampling that wasn't fully fail-open.</p>
+      </div>
+      <div class="round rejected">
+        <div class="round-label">Round 2 — Partially fixed</div>
+        <p>Four of eight findings closed outright. The rest narrowed but not closed: one stale failure could still hide behind a run of successes and reach auto-cancel.</p>
+      </div>
+      <div class="round accepted">
+        <div class="round-label">Round 3 — Accepted</div>
+        <p>Every residual closed and independently re-traced against the exact counterexamples from round one. No new issue introduced by the fix itself.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="stats">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="eyebrow">by the numbers</div>
+      <h2>What this release actually is</h2>
+    </div>
+    <div class="stats">
+      <div>
+        <div class="stat-value">4</div>
+        <div class="stat-label">vendor adapters, one contract</div>
+      </div>
+      <div>
+        <div class="stat-value">689</div>
+        <div class="stat-label">tests passing on master</div>
+      </div>
+      <div>
+        <div class="stat-value">3</div>
+        <div class="stat-label">adversarial rounds on the riskiest feature</div>
+      </div>
+      <div>
+        <div class="stat-value">6</div>
+        <div class="stat-label">stages between proposal and merge</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap" style="display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:12px; width:100%;">
+    <span class="mono">hydra-swarm · MIT · TypeScript-default harness</span>
+    <span class="mono">plan → dispatch → promote → review → squash → integrate</span>
+  </div>
+</footer>
