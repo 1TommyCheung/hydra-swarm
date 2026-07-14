@@ -51,16 +51,16 @@ before install. `hydra doctor` checks, and refuses to proceed on any miss:
 Auth is machine-global (`~/.claude`, `~/.codex`, `~/.local/share/opencode`,
 `~/.kimi-code/oauth`) and never ships in the kit.
 
-> **As-built for the preflight only:** `hydra-swarm-plugin/` now contains a real,
+> **As-built for the preflight only:** the repo root now contains a real,
 > tested Claude Code plugin skeleton implementing exactly this table. The plugin
-> manifest is at `hydra-swarm-plugin/.claude-plugin/plugin.json`; the slash
-> command is `hydra-swarm-plugin/commands/hydra-doctor.md`; and the script it
-> runs is `hydra-swarm-plugin/kit/scripts/doctor.sh`. The script performs the
-> seven check classes shown above, distinguishes fatal `FAIL` from advisory
-> `WARN`, and exits non-zero only when a fatal check fails (shell version,
-> missing `jq`/`git`/Node, or a broken `srt` sandbox). It does **not** implement
-> Steps 1–5; install, per-project inputs, self-checks, and shakedown remain pure
-> design spec.
+> manifest is at `.claude-plugin/plugin.json` (with `.claude-plugin/marketplace.json`
+> for marketplace discovery); the slash command is `commands/hydra-doctor.md`; and
+> the script it runs is `kit/scripts/doctor.sh`. The script performs the seven
+> check classes shown above, distinguishes fatal `FAIL` from advisory `WARN`, and
+> exits non-zero only when a fatal check fails (shell version, missing
+> `jq`/`git`/Node, or a broken `srt` sandbox). It does **not** implement Steps
+> 1–5; install, per-project inputs, self-checks, and shakedown remain pure design
+> spec.
 
 ### Step 1 — Install (mechanical)
 `hydra-setup` skill, install mode: copy kit → `hydra/` + `.claude/`; create `~/.local/state/<repo-id>-hydra/` (full Domain-2 layout); link the global agents ledger (§4); write `hydra/WAVE = 2` and `hydra/VERSION = <kit-version>`; add `.gitignore` entries; commit; tag `hydra-wave-2`.

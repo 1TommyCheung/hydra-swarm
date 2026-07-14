@@ -2,8 +2,9 @@
 
 **Status:** Wave 2 operational since 2026-07-13. Waves 0–2 delivered; the front of
 the roadmap is now packaging (Wave 3) and the hardening daemon. This file is a
-*delivered changelog + forward plan*, not a design proposal — see
-`docs/hydra-reports/` for the per-wave evidence.
+*delivered changelog + forward plan*, not a design proposal — per-wave evidence
+reports lived in the pre-extraction tree (`docs/hydra-reports/`) and were not
+carried into this standalone repo.
 
 ## Delivered (Waves 0–2)
 
@@ -82,7 +83,7 @@ Dates are the day the wave's exit criteria were met in this repo.
 ### TypeScript harness cutover + entry-point hardening · 2026-07-13
 
 - **Cutover evidence (run 0036):** a real supervised shakedown ran the unchanged
-  `bash hydra/scripts/<name>.sh` command surface with `HYDRA_HARNESS=ts` through
+  `bash kit/hydra/scripts/<name>.sh` command surface with `HYDRA_HARNESS=ts` through
   run initialization, worktree creation, a herdr-pane-hosted Codex worker using
   the TypeScript adapter, promotion, squash, and dependency-ordered integration
   of two candidates with the combined verification gate. After that run passed,
@@ -99,8 +100,9 @@ Dates are the day the wave's exit criteria were met in this repo.
   `hydra_resolve_node()`. It requires Node ≥22.6, checks `PATH`, then chooses the
   highest qualifying nvm install or a common Homebrew install, and emits an
   actionable error if none exists. The hostile-PATH reproduction passed after
-  the fix; the full suite reported 577 tests. See
-  `../hydra-reports/wave2-ts-cutover.md` and `../../hydra-ts/migration/`.
+  the fix; the full suite reported 577 tests. The cutover report and migration
+  notes lived in the pre-extraction tree (`../hydra-reports/wave2-ts-cutover.md`
+  and `../../hydra-ts/migration/`); they were not carried into this standalone repo.
 
 ### Wave 3 preflight tooling — first real artifact · 2026-07-13
 
@@ -110,11 +112,11 @@ Dates are the day the wave's exit criteria were met in this repo.
   macOS and bubblewrap on Linux behind the identical CLI/config. This closes the
   Linux portability gap for Kimi's write role; `firejail`/`bwrap` direct support
   was never implemented.
-- **`hydra-swarm-plugin` skeleton + working `/hydra-doctor`** (commit
+- **`hydra-swarm` plugin skeleton + working `/hydra-doctor`** (commit
   `b2a1c43`) — a Claude Code plugin skeleton with manifest
-  (`hydra-swarm-plugin/.claude-plugin/plugin.json`), slash command
-  (`hydra-swarm-plugin/commands/hydra-doctor.md`), and a tested preflight script
-  (`hydra-swarm-plugin/kit/scripts/doctor.sh`). The script implements all seven
+  (`.claude-plugin/plugin.json` plus `.claude-plugin/marketplace.json`), slash command
+  (`commands/hydra-doctor.md`), and a tested preflight script
+  (`kit/scripts/doctor.sh`). The script implements all seven
   `hydra doctor` check classes (shell, core tools, vendor CLIs, code
   intelligence, observability, `srt` sandbox, timeout fallback), reports fatal
   `FAIL` vs advisory `WARN`, and exits non-zero only on fatal failures. The
@@ -228,7 +230,7 @@ policy) are still design-only. Scope is informed by a portability audit
 2. **`hydra-setup` skill** — install / upgrade / doctor modes; supersedes
    `wave0-implementation.md` for new installs.
 3. **`hydra doctor` preflight** — **built and tested** as a Claude Code plugin
-   command in `hydra-swarm-plugin/`. Checks bash ≥ 4; `jq`, `git`, and Node ≥ 22.6;
+   command at the repo root. Checks bash ≥ 4; `jq`, `git`, and Node ≥ 22.6;
    each vendor CLI present (headless smoke per CLI, non-fatal individually);
    Graphify/`gitnexus` present (non-fatal); `herdr` present (non-fatal); `srt`
    sandbox available and enforcing (Seatbelt on macOS, bubblewrap on Linux, else
@@ -326,9 +328,11 @@ exit, before tagging:
       provenance).
 - [ ] **normative docs** (architecture, trust, state, contracts, code-
       intelligence) — drift audit: reconcile each claim against
-      `hydra/scripts/` reality; fix the code or amend the doc, never leave them
+      `kit/hydra/scripts/` reality; fix the code or amend the doc, never leave them
       silently disagreeing. Prefer running the audit *as a hydra review* (a
       whole-repo docs-vs-code analysis, findings gated by a human).
 - [ ] **exit report** — snapshot exit criteria + ledger proof + measured stats +
-      hypothesis verdict + known limitations into `docs/hydra-reports/`.
+      hypothesis verdict + known limitations. (In the pre-extraction tree these
+      lived in `docs/hydra-reports/`; this standalone repo has not committed a
+      per-wave report directory yet.)
 - [ ] **operations** — update the runbook for any new failure modes or env vars.

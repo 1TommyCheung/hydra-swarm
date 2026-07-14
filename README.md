@@ -72,14 +72,15 @@ real progress live, not just a static banner:
 ## Layout
 
 ```text
-hydra-swarm-plugin/
+hydra-swarm/
 ├── .claude-plugin/plugin.json   plugin manifest
 ├── commands/hydra-doctor.md     preflight check, wraps kit/scripts/doctor.sh
 ├── skills/hydra-swarm/          the lead's operating protocol
 ├── docs/                        architecture, operations, vendor adapters, packaging
 └── kit/
     ├── hydra/                   scripts, adapters, schemas, templates (bash)
-    └── hydra-ts/                the same, ported to TypeScript (default runtime)
+    ├── hydra-ts/                the same, ported to TypeScript (default runtime)
+    └── scripts/                 shared preflight scripts (e.g. doctor.sh)
 ```
 
 ## Documentation

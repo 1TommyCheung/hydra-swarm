@@ -35,7 +35,7 @@ Amended specs supersede by version (`spec_version: 2`, `supersedes: v1`, `amendm
 
 ### 2.1 Worker-emitted portion (claims — untrusted)
 
-Written by the worker **only** to `inbox/<agent-run-id>/result.json` (or stdout captured by the adapter). Workers cannot reach `authoritative/`.
+Written by the worker **only** to `.hydra-result.json` in its own worktree (or stdout captured by the adapter). The adapter bridges that file into `inbox/<agent-run-id>/result.json`; workers cannot reach `authoritative/` or the state store.
 
 ```json
 {
@@ -69,13 +69,15 @@ Completion is invalid if the worker modified files without committing (unless th
 flowchart LR
     W["Worker output"] --> D["Untrusted inbox drop"]
     D --> V["Schema validation"]
-    V --> G["Git evidence check"]
-    G --> O["Ownership audit"]
+    V --> S["Spec freshness + completed status"]
+    S --> G["Git evidence check"]
+    G --> N["No-commit / empty-diff guard"]
+    N --> O["Ownership audit"]
     O --> R["Sandboxed verification re-run"]
     R --> P["Promotion to authoritative/results/"]
 ```
 
-Checks, in order: (1) `result.schema.json` validation; (2) claimed branch and commits exist, branch descends from declared base, working tree committed; (3) full ownership audit (`trust-and-permissions.md` §5); (4) mandatory verification commands from tracked policy re-run in the candidate worktree under the verification sandbox (`trust-and-permissions.md` §6); (5) promoted result = worker claims + harness-observed outcomes + divergence flags. Claim-vs-observed divergence is recorded per vendor. Rejection at any step emits `result_rejected` with the reason; the worktree is preserved.
+Checks, in order: (1) `result.schema.json` validation; (2) spec-version freshness (`stale_spec`) and worker-declared `completed` status (`not_completed`); (3) Git evidence — claimed branch and commits exist, branch descends from declared base, working tree committed; (4) `no_commit` guard — rejects `head == base` or an empty diff (work left uncommitted); (5) full ownership audit (`trust-and-permissions.md` §5); (6) mandatory verification commands from tracked policy re-run in the candidate worktree under the verification sandbox (`trust-and-permissions.md` §6); (7) promoted result = worker claims + harness-observed outcomes + divergence flags. Claim-vs-observed divergence is recorded per vendor. Rejection at any step emits `result_rejected` with the reason; the worktree is preserved.
 
 ## 3. Branch review gate
 
@@ -194,12 +196,12 @@ known_limitations: [...]
 
 ## 7. Run ledger
 
-Append-only `authoritative/ledger/events.jsonl`, harness-written:
+Append-only `authoritative/ledger/events.jsonl`, harness-written. Dispatch-originated entries also carry `agent_run_id` and `dispatch_instance_id` so a task retry or streaming-detector window can be correlated to a specific dispatch attempt.
 
 ```json
 {"time":"…","event":"run_started","run_id":"0042"}
 {"time":"…","event":"worktree_bootstrapped","task_id":"…","status":"ok"}
-{"time":"…","event":"task_started","task_id":"…","vendor":"claude","session_id":"…"}
+{"time":"…","event":"task_started","task_id":"…","vendor":"claude","session_id":"…","agent_run_id":"…","dispatch_instance_id":"…"}
 {"time":"…","event":"task_spec_amended","task_id":"…","from":"v1","to":"v2","delivery":"resume"}
 {"time":"…","event":"result_dropped","task_id":"…","inbox":"…"}
 {"time":"…","event":"result_promoted","task_id":"…","head":"ca827d1","divergence":false}
@@ -208,7 +210,13 @@ Append-only `authoritative/ledger/events.jsonl`, harness-written:
 {"time":"…","event":"squash_created","task_id":"…","integration_commit":"def5678"}
 {"time":"…","event":"candidate_integrated","task_id":"…","head":"8a0c76e"}
 {"time":"…","event":"combined_verification","status":"passed"}
-{"time":"…","event":"agent_timed_out","task_id":"…","vendor":"…"}
+{"time":"…","event":"agent_exited","task_id":"…","vendor":"…","agent_run_id":"…","dispatch_instance_id":"…","exit_code":"0"}
+{"time":"…","event":"agent_timed_out","task_id":"…","vendor":"…","agent_run_id":"…","dispatch_instance_id":"…","reason":"stalled"}
+{"time":"…","event":"agent_cancelled","task_id":"…","vendor":"…","agent_run_id":"…","dispatch_instance_id":"…"}
+{"time":"…","event":"verification_executed","task_id":"…","status":"passed"}
+{"time":"…","event":"agent_loop_suspected","task_id":"…","vendor":"codex","agent_run_id":"…","dispatch_instance_id":"…","episode_id":"…"}
+{"time":"…","event":"agent_loop_confirmed","task_id":"…","vendor":"codex","agent_run_id":"…","dispatch_instance_id":"…","episode_id":"…"}
+{"time":"…","event":"agent_loop_cleared","task_id":"…","vendor":"codex","agent_run_id":"…","dispatch_instance_id":"…","episode_id":"…","reason":"git_progress"}
 {"time":"…","event":"run_completed","run_id":"0042"}
 ```
 

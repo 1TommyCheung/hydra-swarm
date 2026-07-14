@@ -27,7 +27,7 @@ AGENTS.md                              # from trust-and-permissions.md §10
 CLAUDE.md                              # lead instructions: drive scripts, never hand-execute state
 .claude/agents/                        # read-only subagent roles only (explorer, reviewer)
 .claude/hooks/                         # ownership PreToolUse hook (defense in depth)
-.claude/skills/hydra-protocol/ # lead-only skill: procedure, ledger read protocol
+skills/hydra-swarm/                    # lead-only skill: procedure, ledger read protocol
 hydra/
 ├── schemas/{run,task,result,review}.schema.json
 ├── templates/{run,task}.example.yaml

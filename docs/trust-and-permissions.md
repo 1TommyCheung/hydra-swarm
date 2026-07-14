@@ -51,7 +51,7 @@ The audit inspects, against `writable_paths`:
 - **Untracked files:** `git ls-files --others --exclude-standard -z` — untracked output outside `writable_paths` is a violation (catches generated files and package-script side effects).
 - **Symlinks:** any new or modified symlink whose target resolves outside `writable_paths` is a violation (symlink-escape guard).
 - **Submodule pointer changes:** violations unless the submodule path is explicitly writable.
-- **Path hygiene:** reject absolute paths, `..` traversal, and (on case-insensitive filesystems) case-collision writes. The harness normalizes every path before applying rules.
+- **Path hygiene:** reject absolute paths and `..` traversal. The harness normalizes every path before applying rules. A case-collision write guard for case-insensitive filesystems is planned but not yet implemented (see §11 drift note).
 
 Outcomes: **reject** (violation), **split** (work is good but exceeds scope — new task), or **approve-expansion** (ownership widened via a version-bumped spec amendment, ledger-recorded).
 
