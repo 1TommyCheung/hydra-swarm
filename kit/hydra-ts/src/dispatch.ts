@@ -16,13 +16,19 @@ import { constants, cpus } from 'node:os';
 import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildWorkerPrompt } from './build-worker-prompt.ts';
+import { type LedgerEntry } from './current-attempt.ts';
 import { die, herdrState, killTree, log, now, stateRoot, warn, yamlScalar } from './lib.ts';
 import { recordUsage } from './record-usage.ts';
+import {
+  createLoopDetectorState,
+  loopDetectorTick,
+  type LoopDetectorState,
+} from './loop-detector.ts';
 
 export type ExecFileSyncLike = (
   file: string,
   args: string[],
-  options?: { encoding?: string; cwd?: string; stdio?: unknown },
+  options?: { encoding?: string; cwd?: string; stdio?: unknown; env?: NodeJS.ProcessEnv },
 ) => string | Buffer;
 
 export interface ChildProcessLike {
@@ -297,6 +303,9 @@ interface WorkerContext {
   buildWorkerPrompt: (taskSpecPath: string) => string;
   processAlive: (pid: number) => boolean;
   appendLedger: LedgerAppender;
+  readLedger: () => LedgerEntry[];
+  loopDetectorState: LoopDetectorState;
+  execFileSync: ExecFileSyncLike;
 }
 
 function releaseSlot(slotsDir: string, agentRunId: string): void {
@@ -537,6 +546,37 @@ function signalExitCode(signal: NodeJS.Signals | null): string {
 interface WorkerMonitor {
   poll(final?: boolean): boolean;
   close(): Promise<void>;
+}
+
+function runDetectorTick(ctx: WorkerContext, recorder: ExitRecorder): boolean {
+  if (ctx.env.HYDRA_LOOP_DETECTOR === '0') return false;
+  if (recorder.isRecorded()) return false;
+  try {
+    const { result } = loopDetectorTick(ctx.loopDetectorState, {
+      runId: ctx.runId,
+      taskId: ctx.taskId,
+      worktree: resolve(ctx.cwd, ctx.worktree),
+      sessionsDir: ctx.sessionsDir,
+      agentRunId: ctx.agentRunId,
+      vendor: ctx.vendor,
+      dispatchInstanceId: ctx.dispatchInstanceId,
+      pollIntervalMs: ctx.pollIntervalMs,
+      clock: ctx.clock,
+      appendLedger: (event, ...kvs) => ctx.appendLedger(ctx.runId, event, 'task_id', ctx.taskId, 'vendor', ctx.vendor, 'agent_run_id', ctx.agentRunId, ...kvs),
+      readLedger: ctx.readLedger,
+      execGit: ctx.execFileSync,
+      env: ctx.env,
+    });
+    if (result.verdict === 'confirmed') {
+      recorder.cancel();
+      return true;
+    }
+    return false;
+  } catch (error) {
+    // Detector/parser/Git failures must fail open and never block worker exit.
+    warn(`loop detector tick failed: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
 }
 
 function safeHerdrLive(herdr: HerdrClient): boolean {
@@ -835,6 +875,7 @@ async function runWorkerPlain(
         previousActivity = activity;
         waited = 0;
       }
+      if (runDetectorTick(ctx, recorder)) return;
     }
 
     if (recorder.isRecorded()) return;
@@ -988,6 +1029,7 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
       previousActivity = activity;
       waited = 0;
     }
+    if (runDetectorTick(ctx, recorder)) return true;
     if (await workerDisappeared()) {
       const pid = readPidfile(pidfile);
       if (pid) ctx.killTree(pid);
@@ -1096,6 +1138,23 @@ export async function dispatch(
   const dispatchInstanceId = randomBytes(8).toString('hex');
 
   const ledgerPath = join(runPath, 'authoritative', 'ledger', 'events.jsonl');
+  const readLedger = (): LedgerEntry[] => {
+    try {
+      const content = readFileSync(ledgerPath, 'utf8');
+      const entries: LedgerEntry[] = [];
+      for (const line of content.split('\n')) {
+        if (line.trim() === '') continue;
+        try {
+          entries.push(JSON.parse(line) as LedgerEntry);
+        } catch {
+          // Ignore malformed or partial lines; the ledger may be mid-write.
+        }
+      }
+      return entries;
+    } catch {
+      return [];
+    }
+  };
   const appendLedger: LedgerAppender = (id, event, ...kvs) => {
     mkdirSync(dirname(ledgerPath), { recursive: true });
     const entry: Record<string, string> = {
@@ -1160,6 +1219,9 @@ export async function dispatch(
     buildWorkerPrompt: options.buildWorkerPrompt ?? buildWorkerPrompt,
     processAlive: options.processAlive ?? defaultProcessAlive,
     appendLedger,
+    readLedger,
+    loopDetectorState: createLoopDetectorState(),
+    execFileSync: commandRunner,
   };
   const recorder = makeExitRecorder(ctx);
   recorder.register(options.signal, options.noSignals);
@@ -1175,6 +1237,7 @@ export async function dispatch(
     const acquired = await acquireSlot(ctx, recorder, computeConcurrencyCap(options, env));
     if (acquired && !recorder.isRecorded()) {
       writeAtomic(dispatchPidfile, String(process.pid));
+      ctx.loopDetectorState.lastGitChangeAt = ctx.clock.now();
     }
     const rawWork = acquired && !recorder.isRecorded() ? runWorker(ctx, recorder) : Promise.resolve();
     const work = rawWork.finally(() => {

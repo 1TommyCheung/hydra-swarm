@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { die, stateRoot, yamlScalar } from './lib.ts';
+import { currentAttemptEvents, type LedgerEntry } from './current-attempt.ts';
 
 export type CancelSignal = 'SIGTERM' | 'SIGKILL';
 
@@ -43,13 +44,6 @@ export interface CancelTaskResult {
 
 interface TaskSpec {
   specVersion: string;
-}
-
-interface LedgerEntry {
-  event?: string;
-  task_id?: string;
-  agent_run_id?: string;
-  [key: string]: unknown;
 }
 
 interface AttemptSnapshot {
@@ -117,19 +111,11 @@ function currentAttemptSnapshot(
 ): AttemptSnapshot {
   const taskEvents = readLedger(ledgerPath, runId)
     .filter((entry) => entry.task_id === taskId);
-  let startIndex = -1;
-  for (let index = taskEvents.length - 1; index >= 0; index -= 1) {
-    const entry = taskEvents[index];
-    if (entry.event === 'task_started' && entry.agent_run_id === agentRunId) {
-      startIndex = index;
-      break;
-    }
-  }
-  if (startIndex < 0) {
+  const { events, startedEntry } = currentAttemptEvents(taskEvents, agentRunId);
+  if (startedEntry === undefined) {
     return { events: [], startedEntry: undefined, terminalEntry: undefined };
   }
 
-  const events = taskEvents.slice(startIndex);
   let terminalEntry: LedgerEntry | undefined;
   for (let index = events.length - 1; index >= 0; index -= 1) {
     if (TERMINAL_EVENTS.has(events[index].event ?? '')) {
@@ -137,7 +123,7 @@ function currentAttemptSnapshot(
       break;
     }
   }
-  return { events, startedEntry: events[0], terminalEntry };
+  return { events, startedEntry, terminalEntry };
 }
 
 function readPidfile(path: string): number | undefined {

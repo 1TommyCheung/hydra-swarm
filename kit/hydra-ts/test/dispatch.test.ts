@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -1384,6 +1385,218 @@ describe('dispatch Bash parity', () => {
         child.kill('SIGTERM');
         rmSync(helperPath, { force: true });
       }
+    });
+  });
+
+  describe('loop detector integration', () => {
+    function codexCommand(cmd: string, exitCode?: number): string {
+      if (exitCode !== undefined) {
+        return JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', command: cmd }, exit_code: exitCode });
+      }
+      return JSON.stringify({ type: 'item.started', item: { type: 'command_execution', command: cmd } });
+    }
+
+    function codexText(text: string): string {
+      return JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } });
+    }
+
+    function writeRepeatedFailureCapture(f: Fixture, count = 12, textCount = 8): void {
+      const lines: string[] = [];
+      for (let i = 0; i < count; i += 1) lines.push(codexCommand('npm test', 1));
+      for (let i = 0; i < textCount; i += 1) lines.push(codexText(`msg ${i}`));
+      writeFileSync(join(f.sessionsDir, `${f.runId}-task-a-v1.cli.jsonl`), `${lines.join('\n')}\n`, 'utf8');
+    }
+
+    function stableGitExec(): ExecFileSyncLike {
+      return (file, args) => {
+        if (file !== 'git') throw new Error(`unexpected command: ${file}`);
+        if (args.includes('rev-parse')) return 'HEAD\n';
+        if (args.includes('diff')) return '';
+        if (args.includes('status')) return '';
+        if (args.includes('ls-files')) return '';
+        return '';
+      };
+    }
+
+    it('never triggers detection for a healthy diverse-action task', async () => {
+      const f = fixture(runId(), { vendor: 'codex', timeoutMinutes: 30 });
+      const lines: string[] = [];
+      for (let i = 0; i < 20; i += 1) lines.push(codexCommand(`cmd-${i % 10}`, i % 3 === 0 ? 1 : 0));
+      writeFileSync(join(f.sessionsDir, `${f.runId}-task-a-v1.cli.jsonl`), `${lines.join('\n')}\n`, 'utf8');
+      const mock = fakeSpawn({ autoExit: false });
+      const clock = new StepClock((_, count) => {
+        if (count === 8) mock.calls[0]?.child.exit(0);
+      });
+      const options = injectedOptions(f, mock.spawn, {
+        clock,
+        pollIntervalMs: 60_000,
+        execFileSync: stableGitExec(),
+      });
+      await dispatch(f.runId, 'task-a', options);
+      const events = ledger(f).map(({ event }) => event);
+      assert.deepEqual(events, ['task_started', 'agent_exited']);
+    });
+
+    it('detects repeated failure, emits suspected then confirmed, and cancels via recorder.cancel()', async () => {
+      const f = fixture(runId(), { vendor: 'codex', timeoutMinutes: 30 });
+      writeRepeatedFailureCapture(f);
+      const mock = fakeSpawn({ autoExit: false });
+      const capturePath = join(f.sessionsDir, `${f.runId}-task-a-v1.cli.jsonl`);
+      const clock = new StepClock((_, count) => {
+        // Stage 2 requires ongoing fresh evidence during the confirmation
+        // window, not just elapsed wall-clock time. Append fresh matching
+        // failures throughout the run so confirmation can fire.
+        if (count >= 10) {
+          appendFileSync(capturePath, `${codexCommand('npm test', 1)}\n`, 'utf8');
+        }
+        if (count >= 25) mock.calls[0]?.child.exit(0);
+      });
+      const options = injectedOptions(f, mock.spawn, {
+        clock,
+        pollIntervalMs: 60_000,
+        execFileSync: stableGitExec(),
+      });
+      await dispatch(f.runId, 'task-a', options);
+      const events = ledger(f).map(({ event }) => event);
+      assert.ok(events.includes('agent_loop_suspected'), `expected agent_loop_suspected in ${events.join(', ')}`);
+      assert.ok(events.includes('agent_loop_confirmed'), `expected agent_loop_confirmed in ${events.join(', ')}`);
+      assert.equal(events.at(-1), 'agent_cancelled');
+      assert.deepEqual(options.killed, [mock.calls[0].child.pid]);
+      const suspected = ledger(f).find((e) => e.event === 'agent_loop_suspected');
+      assert.ok(suspected?.dominant_action_hash);
+      assert.ok(suspected?.dispatch_instance_id);
+    });
+
+    it('clears suspicion when the Git signature changes', async () => {
+      const f = fixture(runId(), { vendor: 'codex', timeoutMinutes: 30 });
+      writeRepeatedFailureCapture(f);
+      const mock = fakeSpawn({ autoExit: false });
+      let gitCall = 0;
+      const execGit: ExecFileSyncLike = (file, args) => {
+        if (file !== 'git') throw new Error(`unexpected command: ${file}`);
+        if (args.includes('rev-parse')) return 'HEAD\n';
+        if (args.includes('diff')) {
+          gitCall += 1;
+          // Keep the baseline stable long enough for Rule A to fire, then change
+          // the diff before the Stage 2 confirmation window elapses.
+          return gitCall < 12 ? '' : '+changed\n';
+        }
+        if (args.includes('status')) return '';
+        if (args.includes('ls-files')) return '';
+        return '';
+      };
+      const clock = new StepClock((_, count) => {
+        if (count === 13) mock.calls[0]?.child.exit(0);
+      });
+      const options = injectedOptions(f, mock.spawn, {
+        clock,
+        pollIntervalMs: 60_000,
+        execFileSync: execGit,
+      });
+      await dispatch(f.runId, 'task-a', options);
+      const events = ledger(f).map(({ event }) => event);
+      assert.ok(events.includes('agent_loop_suspected'));
+      assert.ok(events.includes('agent_loop_cleared'));
+      assert.equal(events.at(-1), 'agent_exited');
+    });
+
+    it('does not trigger Rule A on repeated successful actions', async () => {
+      const f = fixture(runId(), { vendor: 'codex', timeoutMinutes: 30 });
+      const lines: string[] = [];
+      for (let i = 0; i < 12; i += 1) lines.push(codexCommand('npm test', 0));
+      for (let i = 0; i < 8; i += 1) lines.push(codexText(`msg ${i}`));
+      writeFileSync(join(f.sessionsDir, `${f.runId}-task-a-v1.cli.jsonl`), `${lines.join('\n')}\n`, 'utf8');
+      const mock = fakeSpawn({ autoExit: false });
+      const clock = new StepClock((_, count) => {
+        if (count === 8) mock.calls[0]?.child.exit(0);
+      });
+      const options = injectedOptions(f, mock.spawn, {
+        clock,
+        pollIntervalMs: 60_000,
+        execFileSync: stableGitExec(),
+      });
+      await dispatch(f.runId, 'task-a', options);
+      const events = ledger(f).map(({ event }) => event);
+      assert.deepEqual(events, ['task_started', 'agent_exited']);
+    });
+
+    it('never reaches Stage 2 for Claude/non-streaming vendor', async () => {
+      const f = fixture(runId(), { vendor: 'claude', timeoutMinutes: 30 });
+      const lines: string[] = [];
+      for (let i = 0; i < 30; i += 1) lines.push(codexCommand('npm test', 1));
+      writeFileSync(join(f.sessionsDir, `${f.runId}-task-a-v1.cli.jsonl`), `${lines.join('\n')}\n`, 'utf8');
+      const mock = fakeSpawn({ autoExit: false });
+      const clock = new StepClock((_, count) => {
+        if (count === 8) mock.calls[0]?.child.exit(0);
+      });
+      const options = injectedOptions(f, mock.spawn, {
+        clock,
+        pollIntervalMs: 60_000,
+        execFileSync: stableGitExec(),
+      });
+      await dispatch(f.runId, 'task-a', options);
+      const events = ledger(f).map(({ event }) => event);
+      assert.deepEqual(events, ['task_started', 'agent_exited']);
+    });
+
+    it('is fully disabled when HYDRA_LOOP_DETECTOR=0', async () => {
+      const f = fixture(runId(), { vendor: 'codex', timeoutMinutes: 30 });
+      writeRepeatedFailureCapture(f);
+      const mock = fakeSpawn({ autoExit: false });
+      let gitCalls = 0;
+      const execGit: ExecFileSyncLike = (file) => {
+        gitCalls += 1;
+        throw new Error(`git should not be called when disabled: ${file}`);
+      };
+      const clock = new StepClock((_, count) => {
+        if (count === 8) mock.calls[0]?.child.exit(0);
+      });
+      const options = injectedOptions(f, mock.spawn, {
+        clock,
+        pollIntervalMs: 60_000,
+        execFileSync: execGit,
+        env: { HYDRA_LOOP_DETECTOR: '0' },
+      });
+      await dispatch(f.runId, 'task-a', options);
+      const events = ledger(f).map(({ event }) => event);
+      assert.deepEqual(events, ['task_started', 'agent_exited']);
+      assert.equal(gitCalls, 0);
+    });
+
+    it('detects untracked-file content rewrite as Git progress', async () => {
+      const f = fixture(runId(), { vendor: 'codex', timeoutMinutes: 30 });
+      const untracked = join(f.worktree, 'untracked.log');
+      writeFileSync(untracked, 'first', 'utf8');
+      writeRepeatedFailureCapture(f);
+      const mock = fakeSpawn({ autoExit: false });
+      let lsCall = 0;
+      const execGit: ExecFileSyncLike = (file, args) => {
+        if (file !== 'git') throw new Error(`unexpected command: ${file}`);
+        if (args.includes('rev-parse')) return 'HEAD\n';
+        if (args.includes('diff')) return '';
+        if (args.includes('status')) return '';
+        if (args.includes('ls-files')) {
+          lsCall += 1;
+          // Keep the untracked file content stable long enough for Rule A to
+          // fire, then rewrite it before the Stage 2 confirmation window elapses.
+          if (lsCall >= 12) writeFileSync(untracked, 'second', 'utf8');
+          return 'untracked.log\0';
+        }
+        return '';
+      };
+      const clock = new StepClock((_, count) => {
+        if (count === 13) mock.calls[0]?.child.exit(0);
+      });
+      const options = injectedOptions(f, mock.spawn, {
+        clock,
+        pollIntervalMs: 60_000,
+        execFileSync: execGit,
+      });
+      await dispatch(f.runId, 'task-a', options);
+      const events = ledger(f).map(({ event }) => event);
+      assert.ok(events.includes('agent_loop_suspected'));
+      assert.ok(events.includes('agent_loop_cleared'));
+      assert.equal(events.at(-1), 'agent_exited');
     });
   });
 });

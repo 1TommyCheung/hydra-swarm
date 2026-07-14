@@ -3,6 +3,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { die, stateRoot, yamlScalar } from './lib.ts';
 import { kimiEventText } from './dispatch.ts';
+import { currentAttemptEvents, type LedgerEntry } from './current-attempt.ts';
 
 export interface StatusOptions {
   /** Override for the external state root (used by tests). */
@@ -19,6 +20,12 @@ export interface StatusOptions {
   json?: boolean;
 }
 
+export interface LoopSuspicion {
+  status: 'suspected' | 'confirmed';
+  since: string;
+  dominant_action_hash: string;
+}
+
 export interface StatusResult {
   state: 'running' | 'completed' | 'failed' | 'cancelled' | 'timed_out' | 'unknown';
   agent_run_id: string;
@@ -32,6 +39,7 @@ export interface StatusResult {
     advisory: true;
   } | null;
   disagreement: string | null;
+  loop_suspicion: LoopSuspicion | null;
   progress_tail: string[];
   progress_source: string | null;
   ledger_events: Array<Record<string, unknown>>;
@@ -41,14 +49,6 @@ interface TaskSpec {
   vendor: string;
   timeoutMinutes: number;
   specVersion: string;
-}
-
-interface LedgerEntry {
-  time?: string;
-  event?: string;
-  run_id?: string;
-  task_id?: string;
-  [key: string]: unknown;
 }
 
 const TERMINAL_EVENTS = ['agent_exited', 'agent_cancelled', 'agent_timed_out'];
@@ -110,30 +110,6 @@ function filterTaskEvents(events: LedgerEntry[], taskId: string): LedgerEntry[] 
   return events.filter((entry) => entry.task_id === taskId);
 }
 
-/**
- * Isolate the event window for the current attempt. A task_id can be retried
- * with a new spec_version, leaving terminal events from earlier attempts in the
- * ledger. Only events at or after the task_started entry whose agent_run_id
- * matches the current agentRunId are considered when deriving state and elapsed
- * time. Terminal events from prior attempts are ignored.
- */
-function currentAttemptEvents(
-  events: LedgerEntry[],
-  agentRunId: string,
-): { events: LedgerEntry[]; startedEntry: LedgerEntry | undefined } {
-  // Scan backward so a duplicate task_started for the same agent_run_id uses
-  // the most recent one as the window boundary.
-  let startIndex = -1;
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    if (events[i].event === 'task_started' && events[i].agent_run_id === agentRunId) {
-      startIndex = i;
-      break;
-    }
-  }
-  if (startIndex < 0) return { events: [], startedEntry: undefined };
-  return { events: events.slice(startIndex), startedEntry: events[startIndex] };
-}
-
 function isLastEventConcurrencyWait(events: LedgerEntry[]): boolean {
   if (events.length === 0) return false;
   return events[events.length - 1].event === 'concurrency_wait';
@@ -153,6 +129,33 @@ function determineState(events: LedgerEntry[]): StatusResult['state'] {
   }
   const hasStarted = events.some((entry) => entry.event === 'task_started');
   return hasStarted ? 'running' : 'unknown';
+}
+
+const LOOP_TERMINAL_EVENTS = new Set([
+  'agent_loop_suspected',
+  'agent_loop_confirmed',
+  'agent_loop_cleared',
+  'agent_exited',
+  'agent_cancelled',
+  'agent_timed_out',
+]);
+
+function deriveLoopSuspicion(events: LedgerEntry[]): LoopSuspicion | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i].event;
+    if (!LOOP_TERMINAL_EVENTS.has(event)) continue;
+    if (event === 'agent_loop_suspected' || event === 'agent_loop_confirmed') {
+      const hash = events[i].dominant_action_hash;
+      if (typeof hash !== 'string' || hash === '') return null;
+      return {
+        status: event === 'agent_loop_suspected' ? 'suspected' : 'confirmed',
+        since: events[i].time ?? '',
+        dominant_action_hash: hash,
+      };
+    }
+    return null;
+  }
+  return null;
 }
 
 function parseEventTime(time: string | undefined): Date | null {
@@ -318,6 +321,11 @@ function renderHuman(result: StatusResult): string {
     lines.push(`disagreement: ${result.disagreement}`);
   }
 
+  if (result.loop_suspicion) {
+    const { status, since, dominant_action_hash } = result.loop_suspicion;
+    lines.push(`loop_suspicion: ${status} since ${since} (hash=${dominant_action_hash})`);
+  }
+
   lines.push(`progress_tail (${result.progress_source ?? 'none'}):`);
   if (result.progress_tail.length === 0) {
     lines.push('  (no progress capture files found)');
@@ -390,6 +398,7 @@ export function status(
   }
 
   const disagreement = detectDisagreement(state, liveness, elapsedSeconds, attemptEvents);
+  const loopSuspicion = deriveLoopSuspicion(attemptEvents);
 
   const lines = options.lines ?? 20;
   const { tail: progressTail, source: progressSource } = gatherProgressTail(
@@ -410,6 +419,7 @@ export function status(
     hard_cap_minutes: hardCapMinutes,
     dispatch_liveness: liveness,
     disagreement,
+    loop_suspicion: loopSuspicion,
     progress_tail: progressTail,
     progress_source: progressSource,
     ledger_events: lastEvents as Array<Record<string, unknown>>,

@@ -157,6 +157,32 @@ describe('status', () => {
     assert.deepEqual(result.ledger_events.map(({ event }) => event), ['task_started', 'heartbeat']);
   });
 
+  it('does not surface a stale loop suspicion from a superseded dispatch attempt', () => {
+    const f = fixture(uniqueRunId('loop-stale'), { specVersion: 2 });
+    const oldStarted = '2024-01-01T00:00:00Z';
+    const newStarted = '2024-01-01T00:10:00Z';
+    const nowMs = Date.parse(newStarted) + 2 * 60 * 1000;
+    writeLedger(f, [
+      { time: oldStarted, event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1`, dispatch_instance_id: 'old-dispatch' },
+      { time: '2024-01-01T00:05:00Z', event: 'agent_loop_suspected', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1`, dispatch_instance_id: 'old-dispatch', dominant_action_hash: 'abc123' },
+      { time: newStarted, event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v2`, dispatch_instance_id: 'new-dispatch' },
+      { time: '2024-01-01T00:11:00Z', event: 'heartbeat', run_id: f.runId, task_id: 'task-a', vendor: 'kimi' },
+    ]);
+    const supervisorDir = join(f.sessionsDir, 'supervisor');
+    mkdirSync(supervisorDir, { recursive: true });
+    writeFileSync(join(supervisorDir, `${f.runId}-task-a-v2.dispatch.pid`), '12345\n', 'utf8');
+
+    const result = status(f.runId, 'task-a', baseOptions(f, {
+      now: () => nowMs,
+      processAlive: (pid) => pid === 12345,
+    }));
+
+    assert.equal(result.state, 'running');
+    assert.equal(result.agent_run_id, `${f.runId}-task-a-v2`);
+    assert.equal(result.loop_suspicion, null);
+    assert.deepEqual(result.ledger_events.map(({ event }) => event), ['task_started', 'heartbeat']);
+  });
+
   it('reports a completed task when agent_exited is present', () => {
     const f = fixture(uniqueRunId('completed'));
     writeLedger(f, [
@@ -485,6 +511,87 @@ describe('status', () => {
     assert.match(stdout, /vendor: kimi/);
     assert.match(stdout, /dispatch_pid: none \(advisory\)/);
     assert.match(stdout, /disagreement:/);
+  });
+
+  it('reports an active loop suspicion from the current attempt', () => {
+    const f = fixture(uniqueRunId('suspected'));
+    writeLedger(f, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:10:00Z', event: 'agent_loop_suspected', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1`, dominant_action_hash: 'abc123', repeat_count: '8', failure_count: '6' },
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f));
+
+    assert.equal(result.loop_suspicion?.status, 'suspected');
+    assert.equal(result.loop_suspicion?.since, '2024-01-01T00:10:00Z');
+    assert.equal(result.loop_suspicion?.dominant_action_hash, 'abc123');
+  });
+
+  it('reports an active loop confirmation when confirmed is the latest loop event', () => {
+    const f = fixture(uniqueRunId('confirmed'));
+    writeLedger(f, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:10:00Z', event: 'agent_loop_suspected', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1`, dominant_action_hash: 'abc123', repeat_count: '8', failure_count: '6' },
+      { time: '2024-01-01T00:16:00Z', event: 'agent_loop_confirmed', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1`, dominant_action_hash: 'abc123', repeat_count: '12', failure_count: '6' },
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f));
+
+    assert.equal(result.loop_suspicion?.status, 'confirmed');
+    assert.equal(result.loop_suspicion?.dominant_action_hash, 'abc123');
+  });
+
+  it('clears loop suspicion when a later agent_loop_cleared event exists', () => {
+    const f = fixture(uniqueRunId('cleared'));
+    writeLedger(f, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:10:00Z', event: 'agent_loop_suspected', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1`, dominant_action_hash: 'abc123', repeat_count: '8', failure_count: '6' },
+      { time: '2024-01-01T00:12:00Z', event: 'agent_loop_cleared', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1`, reason: 'git_progress' },
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f));
+
+    assert.equal(result.loop_suspicion, null);
+  });
+
+  it('does not carry loop suspicion across a terminal event', () => {
+    const f = fixture(uniqueRunId('stale'));
+    writeLedger(f, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:10:00Z', event: 'agent_loop_suspected', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1`, dominant_action_hash: 'abc123', repeat_count: '8', failure_count: '6' },
+      { time: '2024-01-01T00:12:00Z', event: 'agent_exited', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', exit_code: '0' },
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f));
+
+    assert.equal(result.state, 'completed');
+    assert.equal(result.loop_suspicion, null);
+  });
+
+  it('surfaces loop suspicion in human and JSON output', () => {
+    const f = fixture(uniqueRunId('suspicion-output'));
+    writeLedger(f, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:10:00Z', event: 'agent_loop_suspected', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1`, dominant_action_hash: 'deadbeef', repeat_count: '8', failure_count: '6' },
+    ]);
+
+    const previous = process.env.HYDRA_STATE_ROOT;
+    process.env.HYDRA_STATE_ROOT = f.stateRoot;
+    let human = '';
+    let json = '';
+    try {
+      human = captureStdout(() => main([f.runId, 'task-a']));
+      json = captureStdout(() => main([f.runId, 'task-a', '--json']));
+    } finally {
+      if (previous === undefined) delete process.env.HYDRA_STATE_ROOT;
+      else process.env.HYDRA_STATE_ROOT = previous;
+    }
+
+    assert.match(human, /loop_suspicion: suspected/);
+    assert.match(human, /deadbeef/);
+    const parsed = JSON.parse(json) as ReturnType<typeof status>;
+    assert.equal(parsed.loop_suspicion?.status, 'suspected');
+    assert.equal(parsed.loop_suspicion?.dominant_action_hash, 'deadbeef');
   });
 });
 

@@ -349,6 +349,42 @@ describe('cancelTask', () => {
     assert.deepEqual(ledger(f).map(({ event }) => event), ['task_started']);
   });
 
+  it('ignores agent_loop_suspected when resolving the current attempt and PID', async () => {
+    const f = fixture();
+    const dispatchPid = 43210;
+    writeLedger(f, [
+      started(f),
+      {
+        time: '2026-07-14T00:00:30Z',
+        event: 'agent_loop_suspected',
+        run_id: f.runId,
+        task_id: f.taskId,
+        vendor: 'codex',
+        agent_run_id: f.agentRunId,
+        dominant_action_hash: 'abc123',
+        repeat_count: '8',
+        failure_count: '6',
+      },
+    ]);
+    writePidfile(f, dispatchPid);
+    const signals: Array<[number, CancelSignal]> = [];
+
+    const result = await cancelTask(f.runId, f.taskId, options(f, {
+      processAlive: (pid) => pid === dispatchPid,
+      listProcesses: () => [dispatchProcess(f, dispatchPid)],
+      signalProcess: (pid, signal) => {
+        signals.push([pid, signal]);
+        if (signal === 'SIGTERM') appendLedger(f, terminal(f));
+      },
+    }));
+
+    assert.equal(result.outcome, 'terminated');
+    assert.equal(result.dispatch_pid, dispatchPid);
+    assert.equal(result.terminal_event.event, 'agent_cancelled');
+    assert.deepEqual(signals, [[dispatchPid, 'SIGTERM']]);
+    assert.deepEqual(ledger(f).map(({ event }) => event), ['task_started', 'agent_loop_suspected', 'agent_cancelled']);
+  });
+
   it('requires exact dispatcher and run/task command tokens', () => {
     assert.equal(
       isDispatchCommand('node /repo/dispatch.ts run-1 task-a', 'run-1', 'task-a'),
