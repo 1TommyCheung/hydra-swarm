@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
   existsSync,
@@ -12,6 +12,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   dispatch,
   kimiEventText,
@@ -258,6 +259,14 @@ async function captureStdout<T>(callback: () => Promise<T>): Promise<{ output: s
 
 async function flush(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+async function waitFor(condition: () => boolean, { timeout = 5000, interval = 50 } = {}): Promise<void> {
+  const start = Date.now();
+  while (!condition()) {
+    if (Date.now() - start > timeout) throw new Error('Timeout waiting for condition');
+    await new Promise<void>((resolve) => setTimeout(resolve, interval));
+  }
 }
 
 describe('dispatch Bash parity', () => {
@@ -1128,5 +1137,168 @@ describe('dispatch Bash parity', () => {
 
     assert.equal(ledger(timedOut).at(-1)?.event, 'agent_timed_out');
     assert.equal(ledger(timedOut).at(-1)?.reason, 'stalled');
+  });
+
+  describe('async foundation', () => {
+    it('generates a dispatch_instance_id and includes it in task_started and the terminal event', async () => {
+      const f = fixture(runId());
+      const mock = fakeSpawn({ autoExit: 5 });
+      await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn));
+
+      const events = ledger(f);
+      assert.equal(events[0].event, 'task_started');
+      assert.match(events[0].dispatch_instance_id, /^[0-9a-f]{16}$/);
+      assert.equal(events.at(-1)?.event, 'agent_exited');
+      assert.equal(events.at(-1)?.dispatch_instance_id, events[0].dispatch_instance_id);
+    });
+
+    it('writes the dispatch pidfile under sessions/supervisor and removes it on completion', async () => {
+      const f = fixture(runId());
+      const gate = new GateClock();
+      const mock = fakeSpawn({ autoExit: false });
+      const options = injectedOptions(f, mock.spawn, { background: true, clock: gate });
+      const handle = await dispatch(f.runId, 'task-a', options);
+
+      const pidfile = join(f.sessionsDir, 'supervisor', `${f.runId}-task-a-v1.dispatch.pid`);
+      assert.equal(existsSync(pidfile), true, 'dispatch pidfile should exist while running');
+      assert.equal(readFileSync(pidfile, 'utf8'), String(process.pid));
+      assert.equal(existsSync(`${pidfile}.tmp.${process.pid}`), false, 'no leftover temp file');
+
+      mock.calls[0].child.exit(0);
+      gate.release();
+      await handle.finished;
+
+      assert.equal(existsSync(pidfile), false, 'dispatch pidfile should be removed after completion');
+    });
+
+    it('does not let supervisor metadata interfere with the plain-activity timeout', async () => {
+      const f = fixture(runId(), { timeoutMinutes: 1 });
+      const id = `${f.runId}-task-a-v1`;
+      const supervisorDir = join(f.sessionsDir, 'supervisor');
+      mkdirSync(supervisorDir, { recursive: true });
+      writeFileSync(join(supervisorDir, `${id}.dispatch.pid`), String(process.pid));
+
+      const mock = fakeSpawn({ autoExit: false });
+      const clock = new StepClock();
+      await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { clock, pollIntervalMs: 20_000 }));
+
+      assert.equal(clock.sleeps, 3);
+      assert.equal(ledger(f).at(-1)?.event, 'agent_timed_out');
+      assert.equal(ledger(f).at(-1)?.reason, 'stalled');
+    });
+
+    it('detects a pane worker that disappears before writing the exit sentinel', async () => {
+      const f = fixture(runId());
+      const herdr = new FakeHerdr();
+      herdr.live = true;
+      const id = `${f.runId}-task-a-v1`;
+      let aliveCalls = 0;
+      const clock = new StepClock((_ms, count) => {
+        if (count === 1) {
+          writeFileSync(join(f.sessionsDir, `${id}.pid`), '12345');
+        }
+      });
+      const options = injectedOptions(f, () => { throw new Error('no spawn'); }, {
+        env: { HYDRA_HERDR_PANES: '1' },
+        herdr,
+        clock,
+        processAlive: () => { aliveCalls += 1; return false; },
+      });
+
+      await dispatch(f.runId, 'task-a', options);
+
+      assert.equal(ledger(f).at(-1)?.event, 'agent_exited');
+      assert.equal(ledger(f).at(-1)?.exit_code, '127');
+      assert.equal(ledger(f).at(-1)?.reason, 'worker_disappeared');
+      assert.equal(ledger(f).at(-1)?.dispatch_instance_id, ledger(f)[0].dispatch_instance_id);
+      assert.ok(aliveCalls >= 2, 'processAlive should be probed at least twice');
+      assert.deepEqual(options.killed, [12345], 'worker tree should be killed when worker disappears');
+      assert.deepEqual(herdr.closes, ['pane-1']);
+    });
+
+    it('prefers the exit sentinel when the worker disappears after writing it', async () => {
+      const f = fixture(runId());
+      const herdr = new FakeHerdr();
+      herdr.live = true;
+      const id = `${f.runId}-task-a-v1`;
+      let aliveCalls = 0;
+      const clock = new StepClock((_ms, count) => {
+        if (count === 1) {
+          writeFileSync(join(f.sessionsDir, `${id}.pid`), '12345');
+        } else if (count === 2) {
+          writeFileSync(join(f.sessionsDir, `${id}.exit`), '42');
+        }
+      });
+
+      await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('no spawn'); }, {
+        env: { HYDRA_HERDR_PANES: '1' },
+        herdr,
+        clock,
+        processAlive: () => { aliveCalls += 1; return false; },
+      }));
+
+      assert.equal(ledger(f).at(-1)?.event, 'agent_exited');
+      assert.equal(ledger(f).at(-1)?.exit_code, '42');
+      assert.notEqual(ledger(f).at(-1)?.reason, 'worker_disappeared');
+      assert.deepEqual(herdr.closes, ['pane-1']);
+    });
+
+    it('does not treat a transient processAlive false-negative as worker disappearance', async () => {
+      const f = fixture(runId());
+      const herdr = new FakeHerdr();
+      herdr.live = true;
+      const id = `${f.runId}-task-a-v1`;
+      let aliveCalls = 0;
+      const clock = new StepClock((_ms, count) => {
+        if (count === 1) {
+          writeFileSync(join(f.sessionsDir, `${id}.pid`), '12345');
+        } else if (count === 3) {
+          writeFileSync(join(f.sessionsDir, `${id}.exit`), '0');
+        }
+      });
+
+      await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('no spawn'); }, {
+        env: { HYDRA_HERDR_PANES: '1' },
+        herdr,
+        clock,
+        processAlive: () => {
+          aliveCalls += 1;
+          return aliveCalls !== 1;
+        },
+      }));
+
+      assert.equal(ledger(f).at(-1)?.event, 'agent_exited');
+      assert.equal(ledger(f).at(-1)?.exit_code, '0');
+      assert.notEqual(ledger(f).at(-1)?.reason, 'worker_disappeared');
+      assert.deepEqual(herdr.closes, ['pane-1']);
+    });
+
+    it('removes the dispatch pidfile when a cancelling signal fires', async () => {
+      const f = fixture(runId(), { adapterContent: '#!/usr/bin/env bash\nsleep 60\n' });
+      const dispatchSrc = fileURLToPath(new URL('../src/dispatch.ts', import.meta.url));
+      const helperPath = join(TEST_TMP, `signal-helper-${f.runId}.mjs`);
+      writeFileSync(helperPath, [
+        `import { dispatch } from ${JSON.stringify(pathToFileURL(dispatchSrc).href)};`,
+        'const [runId, taskId, stateRoot, repoRoot] = process.argv.slice(2);',
+        'await dispatch(runId, taskId, { stateRoot, repoRoot });',
+        '',
+      ].join('\n'), 'utf8');
+
+      const child = spawn(process.execPath, ['--experimental-strip-types', helperPath, f.runId, 'task-a', f.stateRoot, f.repoRoot], { stdio: 'ignore' });
+      const pidfile = join(f.sessionsDir, 'supervisor', `${f.runId}-task-a-v1.dispatch.pid`);
+
+      try {
+        await waitFor(() => existsSync(pidfile), { timeout: 5000 });
+        child.kill('SIGINT');
+        await new Promise<void>((resolve, reject) => {
+          child.on('error', reject);
+          child.on('exit', () => resolve());
+        });
+        assert.equal(existsSync(pidfile), false, 'dispatch pidfile should be removed after signal cancellation');
+      } finally {
+        child.kill('SIGTERM');
+        rmSync(helperPath, { force: true });
+      }
+    });
   });
 });

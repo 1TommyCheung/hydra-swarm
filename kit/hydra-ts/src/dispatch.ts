@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import {
   appendFileSync,
   existsSync,
@@ -6,6 +7,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -249,7 +251,7 @@ interface ExitRecorder {
   isCancelled(): boolean;
   setWorkerPid(pid: number): void;
   setPaneId(paneId: string): void;
-  recordExit(event: string, rc?: string): void;
+  recordExit(event: string, rc?: string, ...extraKvs: string[]): void;
   recordTimeout(reason: 'stalled' | 'hard_cap', metric?: [string, string]): void;
   cancel(): void;
   register(signal: AbortSignal | undefined, noSignals: boolean | undefined): void;
@@ -261,6 +263,7 @@ interface WorkerContext {
   taskId: string;
   vendor: string;
   agentRunId: string;
+  dispatchInstanceId: string;
   worktree: string;
   inbox: string;
   sessionsDir: string;
@@ -337,7 +340,11 @@ function makeExitRecorder(ctx: WorkerContext): ExitRecorder {
     isCancelled: () => wasCancelled,
     setWorkerPid: (pid) => { workerPid = pid; },
     setPaneId: (id) => { paneId = id; },
-    recordExit: (event, rc) => finish(event, rc === undefined ? [] : ['exit_code', rc], rc ?? '0'),
+    recordExit: (event, rc, ...extraKvs) => finish(
+      event,
+      rc === undefined ? extraKvs : ['exit_code', rc, ...extraKvs],
+      rc ?? '0',
+    ),
     recordTimeout: (reason, metric) => {
       const extra = ['reason', reason];
       if (metric) extra.push(metric[0], metric[1]);
@@ -488,6 +495,21 @@ function herdrActivity(sessionsDir: string, agentRunId: string): string {
     join(sessionsDir, `${agentRunId}.cli.jsonl`),
     join(sessionsDir, `${agentRunId}.stderr`),
   ]);
+}
+
+function dispatchPidfilePath(sessionsDir: string, agentRunId: string): string {
+  return join(sessionsDir, 'supervisor', `${agentRunId}.dispatch.pid`);
+}
+
+function writeAtomic(path: string, content: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp.${process.pid}`;
+  writeFileSync(tmp, content, 'utf8');
+  renameSync(tmp, path);
+}
+
+function removeDispatchPidfile(path: string): void {
+  rmSync(path, { force: true });
 }
 
 function signalExitCode(signal: NodeJS.Signals | null): string {
@@ -916,6 +938,21 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
   let elapsed = 0;
   let previousActivity = '';
 
+  async function workerDisappeared(): Promise<boolean> {
+    if (existsSync(sentinel)) return false;
+    if (!isFile(pidfile)) return false;
+    const pid = Number(readFileSync(pidfile, 'utf8').trim());
+    if (!pid) return false;
+    let alive = false;
+    try { alive = ctx.processAlive(pid); } catch { alive = false; }
+    if (alive) return false;
+    await Promise.race([ctx.clock.sleep(1000), recorder.cancelled]);
+    if (recorder.isRecorded()) return false;
+    if (existsSync(sentinel)) return false;
+    try { alive = ctx.processAlive(pid); } catch { alive = false; }
+    return !alive;
+  }
+
   while (
     !existsSync(sentinel) &&
     waited < limit &&
@@ -934,6 +971,15 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
     if (activity !== previousActivity) {
       previousActivity = activity;
       waited = 0;
+    }
+    if (await workerDisappeared()) {
+      if (isFile(pidfile)) {
+        const pid = Number(readFileSync(pidfile, 'utf8').trim());
+        if (pid) ctx.killTree(pid);
+      }
+      recorder.recordExit('agent_exited', '127', 'reason', 'worker_disappeared');
+      await closePane();
+      return true;
     }
   }
 
@@ -1033,10 +1079,14 @@ export async function dispatch(
   mkdirSync(sessionsDir, { recursive: true });
 
   const delivery = determineDelivery(runId, taskId, sessionsDir, adapterPath, env);
+  const dispatchInstanceId = randomBytes(8).toString('hex');
+
   const ledgerPath = join(runPath, 'authoritative', 'ledger', 'events.jsonl');
   const appendLedger: LedgerAppender = (id, event, ...kvs) => {
     mkdirSync(dirname(ledgerPath), { recursive: true });
-    const entry: Record<string, string> = { time: now(), event, run_id: id };
+    const entry: Record<string, string> = {
+      time: now(), event, run_id: id, dispatch_instance_id: dispatchInstanceId,
+    };
     for (let index = 0; index + 1 < kvs.length; index += 2) entry[kvs[index]] = kvs[index + 1];
     appendFileSync(ledgerPath, `${JSON.stringify(entry)}\n`);
   };
@@ -1072,6 +1122,7 @@ export async function dispatch(
     taskId,
     vendor: spec.vendor,
     agentRunId,
+    dispatchInstanceId,
     worktree: spec.worktree,
     inbox,
     sessionsDir,
@@ -1099,13 +1150,21 @@ export async function dispatch(
   const recorder = makeExitRecorder(ctx);
   recorder.register(options.signal, options.noSignals);
 
-  const releaseOnExit = (): void => releaseSlot(slotsDir, agentRunId);
+  const dispatchPidfile = dispatchPidfilePath(sessionsDir, agentRunId);
+  const releaseOnExit = (): void => {
+    removeDispatchPidfile(dispatchPidfile);
+    releaseSlot(slotsDir, agentRunId);
+  };
   process.once('exit', releaseOnExit);
 
   try {
     const acquired = await acquireSlot(ctx, recorder, computeConcurrencyCap(options, env));
+    if (acquired && !recorder.isRecorded()) {
+      writeAtomic(dispatchPidfile, String(process.pid));
+    }
     const rawWork = acquired && !recorder.isRecorded() ? runWorker(ctx, recorder) : Promise.resolve();
     const work = rawWork.finally(() => {
+      removeDispatchPidfile(dispatchPidfile);
       recorder.unregister();
       process.removeListener('exit', releaseOnExit);
       releaseSlot(slotsDir, agentRunId);
@@ -1128,6 +1187,7 @@ export async function dispatch(
     process.stdout.write(`${agentRunId}\n`);
     return { agentRunId, finished };
   } catch (error) {
+    removeDispatchPidfile(dispatchPidfile);
     process.removeListener('exit', releaseOnExit);
     recorder.unregister();
     releaseSlot(slotsDir, agentRunId);
