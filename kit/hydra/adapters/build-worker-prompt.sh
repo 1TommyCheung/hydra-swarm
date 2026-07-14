@@ -32,6 +32,20 @@ base_commit="$(hydra_yaml_scalar "$task_spec" 'base_commit')"
 # just the header line (which is empty).
 objective="$(hydra_yaml_block "$task_spec" 'objective')"
 [ -n "$objective" ] || objective="$(hydra_yaml_scalar "$task_spec" 'objective')"
+amendment_reason="$(hydra_yaml_scalar "$task_spec" 'amendment_reason')"
+
+if [ -n "$amendment_reason" ]; then
+  task_section="## Task ${task_id} (run ${run_id}, spec v${spec_version})
+*** THIS TASK WAS AMENDED. The amendment reason below is a REQUIRED FIX
+on top of your own prior work already committed on this branch -- read
+it first and follow it. ***
+Amendment reason: ${amendment_reason}
+
+Objective: ${objective}"
+else
+  task_section="## Task ${task_id} (run ${run_id}, spec v${spec_version})
+Objective: ${objective}"
+fi
 
 writable="$(hydra_yaml_list "$task_spec" 'writable_paths' | sed 's/^/  - /')"
 readonly_paths="$(hydra_yaml_list "$task_spec" 'read_only_paths' | sed 's/^/  - /')"
@@ -55,8 +69,7 @@ ${readonly_paths:-  (none)}
 - Your test results are ADVISORY. The harness re-executes verification; do not
   fake or assume outcomes.
 
-## Task ${task_id} (run ${run_id}, spec v${spec_version})
-Objective: ${objective}
+${task_section}
 
 Acceptance criteria:
 ${acceptance}

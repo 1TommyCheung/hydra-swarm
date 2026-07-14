@@ -45,6 +45,8 @@ export function buildWorkerPrompt(
     objective = yamlScalar(specPath, 'objective');
   }
 
+  const amendmentReason = yamlScalar(specPath, 'amendment_reason');
+
   const writable = yamlList(specPath, 'writable_paths')
     .map((p) => `  - ${p}`)
     .join('\n');
@@ -75,8 +77,16 @@ ${readonly || '  (none)'}
 - Your test results are ADVISORY. The harness re-executes verification; do not
   fake or assume outcomes.
 
-## Task ${taskId} (run ${runId}, spec v${specVersion})
-Objective: ${objective}
+${amendmentReason
+    ? `## Task ${taskId} (run ${runId}, spec v${specVersion})
+*** THIS TASK WAS AMENDED. The amendment reason below is a REQUIRED FIX
+on top of your own prior work already committed on this branch -- read
+it first and follow it. ***
+Amendment reason: ${amendmentReason}
+
+Objective: ${objective}`
+    : `## Task ${taskId} (run ${runId}, spec v${specVersion})
+Objective: ${objective}`}
 
 Acceptance criteria:
 ${acceptance}
