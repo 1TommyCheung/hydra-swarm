@@ -2,9 +2,9 @@
 
 **Status:** Wave 2. This is the day-to-day guide to *operating* a run (Waves 0–2
 documented *building*). It assumes the lead protocol in
-`../../.claude/skills/hydra-protocol/SKILL.md`.
+`skills/hydra-swarm/SKILL.md`.
 
-> Golden rule: you drive `hydra/scripts/*.sh`; you never hand-edit
+> Golden rule: you drive `kit/hydra/scripts/*.sh`; you never hand-edit
 > `~/.local/state/<repo-id>-hydra/authoritative/**`. Read promoted results, never
 > raw inbox drops. Merge/push/deploy is human-authorized.
 
@@ -12,18 +12,18 @@ documented *building*). It assumes the lead protocol in
 
 ```bash
 export HYDRA_WAVE=2                       # gates conditional bootstrap (gitnexus analyze)
-bash hydra/scripts/run-init.sh 0042       # -> run_started; creates the state tree
-# write runs/run-0042/tasks/<task>.yaml per lane (template: hydra/templates/task.example.yaml)
-bash hydra/scripts/create-worktree.sh 0042 <task>          # worktree + branch + bootstrap + PORT
-bash hydra/scripts/dispatch.sh 0042 <task>                 # runs the assigned vendor worker
-bash hydra/scripts/status.sh 0042 <task>                   # one-shot read-only task status
-bash hydra/scripts/cancel-task.sh 0042 <task>              # clean cancellation of a running task
-bash hydra/scripts/promote.sh 0042 <task> \
+bash kit/hydra/scripts/run-init.sh 0042       # -> run_started; creates the state tree
+# write runs/run-0042/tasks/<task>.yaml per lane (template: kit/hydra/templates/task.example.yaml)
+bash kit/hydra/scripts/create-worktree.sh 0042 <task>          # worktree + branch + bootstrap + PORT
+bash kit/hydra/scripts/dispatch.sh 0042 <task>                 # runs the assigned vendor worker
+bash kit/hydra/scripts/status.sh 0042 <task>                   # one-shot read-only task status
+bash kit/hydra/scripts/cancel-task.sh 0042 <task>              # clean cancellation of a running task
+bash kit/hydra/scripts/promote.sh 0042 <task> \
      ~/.local/state/<repo>-hydra/runs/run-0042/inbox/0042-<task>-v1/result.json   # THE trust boundary
-bash hydra/scripts/review-dispatch.sh 0042 <rev> <vendor> <prompt-file>   # cross-vendor review (read-only)
-bash hydra/scripts/record-review.sh 0042 <task> <verdict.json>            # record accept/revise/reject
-bash hydra/scripts/squash.sh 0042 <task>                   # accepted candidates only
-bash hydra/scripts/integrate.sh 0042 <task-in-dep-order>...# cherry-pick + smoke + combined gate
+bash kit/hydra/scripts/review-dispatch.sh 0042 <rev> <vendor> <prompt-file>   # cross-vendor review (read-only)
+bash kit/hydra/scripts/record-review.sh 0042 <task> <verdict.json>            # record accept/revise/reject
+bash kit/hydra/scripts/squash.sh 0042 <task>                   # accepted candidates only
+bash kit/hydra/scripts/integrate.sh 0042 <task-in-dep-order>...# cherry-pick + smoke + combined gate
 ```
 
 Only `accept` candidates enter `squash`/`integrate`. `revise`/`reject` return to
@@ -32,13 +32,13 @@ the same worktree (amend the spec + re-dispatch).
 ## Harness runtime selection
 
 The command surface did not change during the TypeScript cutover: continue to
-invoke `bash hydra/scripts/<name>.sh ...`. Every operational shell entry point
-now selects the TypeScript implementation in `hydra-ts/src/` by default.
+invoke `bash kit/hydra/scripts/<name>.sh ...`. Every operational shell entry point
+now selects the TypeScript implementation in `kit/hydra-ts/src/` by default.
 
 ```bash
-bash hydra/scripts/run-init.sh 0042                 # TypeScript (default)
-HYDRA_HARNESS=ts bash hydra/scripts/run-init.sh 0042
-HYDRA_HARNESS=bash bash hydra/scripts/run-init.sh 0042  # frozen Bash fallback
+bash kit/hydra/scripts/run-init.sh 0042                 # TypeScript (default)
+HYDRA_HARNESS=ts bash kit/hydra/scripts/run-init.sh 0042
+HYDRA_HARNESS=bash bash kit/hydra/scripts/run-init.sh 0042  # frozen Bash fallback
 ```
 
 `HYDRA_HARNESS` supports `ts` and `bash`; unset means `ts`. The switch covers
@@ -54,13 +54,17 @@ future decision, not part of the cutover.
 |---|---|
 | `HYDRA_HARNESS` | Harness runtime: `ts` (default) or `bash` (frozen reference/rollback fallback). |
 | `HYDRA_ADAPTER_RUNTIME` | Advanced mixed-runtime override for TypeScript dispatch: `ts` or `bash`; takes precedence over `HYDRA_HARNESS` for the adapter only. Normally leave unset. |
-| `HYDRA_WAVE` | Wave level; ≥1 activates the `wave_1` bootstrap (gitnexus analyze). Or set `hydra/WAVE`. |
-| `HYDRA_STATE_ROOT` | Override the external state root (tests point this at a throwaway dir). |
+| `HYDRA_WAVE` | Wave level; ≥1 activates the `wave_1` bootstrap (gitnexus analyze). Or set `kit/hydra/WAVE`. |
+| `HYDRA_STATE_ROOT` | Override the external state root entirely (takes precedence over `XDG_STATE_HOME` and the default). |
+| `XDG_STATE_HOME` | Base dir for state; when set and `HYDRA_STATE_ROOT` is unset, the state root resolves to `${XDG_STATE_HOME}/<repo-id>-hydra` (default `~/.local/state/<repo-id>-hydra`). |
 | `HYDRA_WORKTREE_ROOT`, `HYDRA_REPO_ID` | Override worktree parent / repo id. |
 | `HYDRA_VERIFY_POLICY` | Path to the verification policy `promote.sh`/`integrate.sh` re-run (combined gate). |
 | `HYDRA_SMOKE_POLICY` | Per-candidate smoke policy for `integrate.sh` (task-specific; no cross-component tests). |
 | `HYDRA_DELIVERY` | `start` (default) or `resume` — resume uses the captured session id where the adapter supports it. |
-| `HYDRA_MAX_CONCURRENCY` | Backgrounded-dispatch slot cap (default `min(16, cores-2)`). |
+| `HYDRA_MAX_CONCURRENCY` | Dispatch slot cap (default `min(16, cores-2)`). The slot is acquired unconditionally before a dispatch proceeds, so both foreground (blocking) and backgrounded dispatches queue behind it and can emit `concurrency_wait`. |
+| `HYDRA_HARD_CAP_MIN` | Absolute hard-cap minutes for both plain and pane-hosted dispatch (overrides the default `timeout_minutes * 6`). Status reports this value as `hard_cap_minutes`. |
+| `HYDRA_GITNEXUS_REPO` | Override the code-intelligence repository id passed to `gitnexus` (default is the derived repo id; see `kit/hydra/scripts/code-intel.sh`). |
+| `HYDRA_HERDR_PANE` | Fallback lead pane id for `herdr-push.sh` when no live pane matches the repo root (see `kit/hydra/scripts/herdr-push.sh`). |
 | `HYDRA_LOOP_DETECTOR` | Loop-thinking detector. Enabled by default (`1` or unset); set to `0` to disable for a task/session where false positives are expected (e.g., legitimately long silent reasoning phases). |
 | `HYDRA_HERDR_PANES=1` | Host each worker/reviewer in a herdr pane (Layer-1 live monitor). |
 | `HYDRA_HERDR_KEEP_PANE=1` | Don't auto-close panes on completion (for inspection). |
@@ -73,7 +77,7 @@ future decision, not part of the cutover.
 timeout can't SIGTERM the dispatch mid-run:
 
 ```bash
-nohup bash hydra/scripts/dispatch.sh 0042 <task> >/tmp/d.log 2>&1 </dev/null & disown
+nohup bash kit/hydra/scripts/dispatch.sh 0042 <task> >/tmp/d.log 2>&1 </dev/null & disown
 ```
 
 (If a dispatch *is* killed, it's safe: the trap records `agent_cancelled`, reaps
@@ -94,7 +98,7 @@ interactive shell selected Node 22. Do not diagnose this from an interactive
 command. `hydra_resolve_node()` protects Hydra's shell entry points, but npm's
 own scripts still require the invoking shell to resolve Node 22.6+.
 
-From `hydra-ts/`, the standard suite is deliberately split:
+From `kit/hydra-ts/`, the standard suite is deliberately split:
 
 ```bash
 npm test                 # test:concurrent, then test:promote
@@ -116,7 +120,7 @@ worktrees, timeout, cancellation, the ledger). Pane text is never read as truth.
 herdr status                    # server up? socket path
 herdr agent list                # live agents + status, attributed to this lead
 herdr pane list                 # panes; hydra workers labelled hydra:<run>:<task>:<vendor>
-bash hydra/scripts/herdr-push.sh 0042 --notify   # push ledger-derived state + reconcile
+bash kit/hydra/scripts/herdr-push.sh 0042 --notify   # push ledger-derived state + reconcile
 ```
 
 `herdr-push.sh` also **reconciles** the live view against the ledger and emits an
@@ -130,7 +134,7 @@ display to a tty; for fully TUI-free runs use `opencode serve` + `--attach`.
 ## Authoritative view (Layer-2)
 
 ```bash
-bash hydra/scripts/ledger-view.sh 0042   # self-contained HTML from the ledger alone
+bash kit/hydra/scripts/ledger-view.sh 0042   # self-contained HTML from the ledger alone
 ```
 
 ## Recovery drill (lead-kill)
@@ -138,7 +142,7 @@ bash hydra/scripts/ledger-view.sh 0042   # self-contained HTML from the ledger a
 Standing test, run it any time:
 
 ```bash
-bash hydra/tests/recovery-drill.sh       # builds a mid-run state, reconstructs from ledger+Git only
+bash kit/hydra/tests/recovery-drill.sh       # builds a mid-run state, reconstructs from ledger+Git only
 ```
 
 Live procedure if a lead session dies: **do not rely on memory.** Read
@@ -150,11 +154,11 @@ recorded checkpoint. A promoted head is a real Git commit — verify with
 ## Capability profiles + allocation
 
 ```bash
-bash hydra/scripts/aggregate-usage.sh                    # writes agents/profiles/<vendor>.measured.json
-bash hydra/scripts/allocate.sh implementer feature high  # recommendation (never an auto-pin)
+bash kit/hydra/scripts/aggregate-usage.sh                    # writes agents/profiles/<vendor>.measured.json
+bash kit/hydra/scripts/allocate.sh implementer feature high  # recommendation (never an auto-pin)
 ```
 
-Allocation ranks on `measured` at n≥8, else seeded priors (`hydra/profiles/`).
+Allocation ranks on `measured` at n≥8, else seeded priors (`kit/hydra/profiles/`).
 It's recommend-only — a human pins the role.
 
 ## Common failures and fixes
@@ -162,7 +166,7 @@ It's recommend-only — a human pins the role.
 | Symptom | Cause | Fix |
 |---|---|---|
 | TypeScript entry point reports `bad option: --experimental-strip-types`, or `npm test` exits 9 | A stale Node (observed: `/usr/local/bin/node` v17.4.0) shadows nvm's Node in a login/non-interactive shell | Current entry points use `hydra_resolve_node()`; update to current code. For npm, invoke it from an environment where `node --version` is ≥22.6, or temporarily use `HYDRA_HARNESS=bash` for Hydra commands. |
-| Worker "completed" but no new commit; head == a prior commit | **Empty objective** (block-scalar not read) — historical, now fixed | `build-worker-prompt.sh` uses `hydra_yaml_block`. If you see it again, dump the prompt: `bash hydra/adapters/build-worker-prompt.sh <spec>` |
+| Worker "completed" but no new commit; head == a prior commit | **Empty objective** (block-scalar not read) — historical, now fixed | `build-worker-prompt.sh` uses `hydra_yaml_block`. If you see it again, dump the prompt: `bash kit/hydra/adapters/build-worker-prompt.sh <spec>` |
 | **Multiple vendors fail identically** | Suspect the harness, not the vendors | Dump the actual worker prompt first; check the drop and stderr under `sessions/` |
 | opencode/GLM: `Unexpected server error` immediately | Transient Z.AI coding-endpoint 500 | Retry; if persistent, `allocate.sh` route around; GLM read-only reviews usually still work |
 | opencode worker hangs on a permission prompt | Missing `--auto` | The adapter passes `--auto`; for manual runs use `opencode run --format json --auto` |
@@ -173,16 +177,17 @@ It's recommend-only — a human pins the role.
 | `command not found: timeout` | macOS has no GNU `timeout` | `hydra_timeout` falls back to a perl shim; `brew install coreutils` gives `gtimeout` |
 | Codex: `Reading additional input from stdin...` (hang) | non-TTY stdin | adapters close stdin (`</dev/null`) |
 | Codex/Kimi can't `git commit` in-sandbox | linked worktree's `.git` is in the git-common-dir, outside the worktree | adapters add the git-common-dir to writable roots (resolved via `pwd -P`) |
-| A running task needs to be cancelled | Operator needs to stop a dispatched worker | Use `bash hydra/scripts/cancel-task.sh <run> <task>`. This is the only supported clean cancellation path. Never `kill -9` a dispatch process directly: it bypasses the clean path and can leave a dangling `running` ledger entry. |
+| A running task needs to be cancelled | Operator needs to stop a dispatched worker | Use `bash kit/hydra/scripts/cancel-task.sh <run> <task>`. This is the only supported clean cancellation path. Never `kill -9` a dispatch process directly: it bypasses the clean path and can leave a dangling `running` ledger entry. |
 
 ## Concurrent runs
 
 - **Isolation:** every writer gets its own worktree + branch; no two writers
   share a tree (enforced by disjoint `writable_paths` and separate worktrees).
 - **Slots:** `dispatch.sh` uses a per-run slot dir (`runs/run-<id>/.slots`) capped
-  at `HYDRA_MAX_CONCURRENCY`; backgrounded dispatches wait and emit
-  `concurrency_wait`. There is **no per-task mutex** yet — do not dispatch the
-  same `(run, task)` twice concurrently (open item, roadmap).
+  at `HYDRA_MAX_CONCURRENCY`; the slot is acquired unconditionally before a
+  dispatch proceeds, so both foreground (blocking) and backgrounded dispatches
+  can wait and emit `concurrency_wait`. There is **no per-task mutex** yet — do
+  not dispatch the same `(run, task)` twice concurrently (open item, roadmap).
 - **Stale base:** if primary moves mid-run, do not silently rebase candidates.
   Finish against the recorded base; integrate; then update-to-latest as a
   separate re-verified step (architecture §8).
@@ -193,7 +198,7 @@ It's recommend-only — a human pins the role.
 ## Health checks
 
 ```bash
-bash hydra/tests/run-boundary-tests.sh   # the trust boundary's unit tests (expect 9/9)
-bash hydra/tests/recovery-drill.sh       # lead-kill reconstruction (expect 3/3)
+bash kit/hydra/tests/run-boundary-tests.sh   # the trust boundary's unit tests (expect 9/9)
+bash kit/hydra/tests/recovery-drill.sh       # lead-kill reconstruction (expect 3/3)
 ```
 Run both after any change to `promote.sh`, `lib.sh`, or an adapter.

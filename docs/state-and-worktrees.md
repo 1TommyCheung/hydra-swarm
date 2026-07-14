@@ -8,26 +8,31 @@
 <repo>/
 ├── AGENTS.md
 ├── CLAUDE.md
-├── .claude/{agents/, hooks/, skills/hydra-protocol/}
-├── .codex/config.toml
-├── hydra/
-│   ├── README.md
-│   ├── schemas/          # run, task, result, review JSON schemas
-│   ├── templates/        # run.example.yaml, task.example.yaml
-│   ├── scripts/          # create-worktree.sh, dispatch.sh, verify.sh,
-│   │                     #   audit-ownership.sh, promote.sh, integrate.sh
-│   ├── adapters/         # claude.sh, codex.sh  (opencode.sh, kimi.sh in Wave 1/2)
-│   ├── policies/         # ownership.yaml, permissions.yaml, verification.yaml
-│   └── tasks/planned/    # human-reviewed task definitions (pre-run)
-├── hydra-ts/
-│   ├── src/              # default harness + vendor-adapter implementations
-│   ├── test/             # TypeScript harness tests
-│   └── migration/        # cutover plans, findings, reviews, shakedown history
-└── docs/hydra-reports/   # selected final reports only (optional)
+├── .claude-plugin/      # plugin.json, marketplace.json
+├── commands/            # slash commands (e.g. hydra-doctor.md)
+├── kit/
+│   ├── hydra/
+│   │   ├── README.md
+│   │   ├── WAVE                     # wave-level marker
+│   │   ├── schemas/                 # run, task, result, review JSON schemas
+│   │   ├── templates/               # run.example.yaml, task.example.yaml
+│   │   ├── scripts/                 # create-worktree.sh, dispatch.sh, verify.sh,
+│   │   │                            #   audit-ownership.sh, promote.sh, integrate.sh
+│   │   ├── adapters/                # claude.sh, codex.sh, opencode.sh, kimi.sh
+│   │   ├── policies/                # ownership.yaml, permissions.yaml, verification.yaml
+│   │   ├── profiles/                # per-vendor capability profiles (Wave 2)
+│   │   ├── runs-config/             # run-level configuration
+│   │   └── tests/                   # boundary / recovery tests
+│   ├── hydra-ts/
+│   │   ├── src/                     # default harness + vendor-adapter implementations
+│   │   └── test/                    # TypeScript harness tests
+│   └── scripts/                     # plugin helper scripts (e.g. doctor.sh)
+├── skills/hydra-swarm/  # lead orchestration skill (SKILL.md + references/)
+└── docs/                # operations, architecture, vendor-adapters, etc.
 ```
 
-`hydra/scripts/<name>.sh` remains the stable operator command surface, but its
-default execution path is now the corresponding module in `hydra-ts/src/`.
+`kit/hydra/scripts/<name>.sh` remains the stable operator command surface, but its
+default execution path is now the corresponding module in `kit/hydra-ts/src/`.
 `HYDRA_HARNESS=bash` selects the frozen Bash body for reference or rollback.
 This runtime cutover did not change the external state root, run-directory
 schema, worktree paths, branch naming, or custody boundaries described below.

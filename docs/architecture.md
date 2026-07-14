@@ -61,7 +61,7 @@ No instruction reaches a running agent outside a versioned task specification re
 
 > Workers never write authoritative state. The lead modifies authoritative state only through harness interfaces.
 
-The lead (Claude Code) invokes harness scripts via its shell; since lead and scripts run as the same OS user, the lead *could* technically bypass the scripts. This is therefore a **protocol boundary for the lead** and a **real boundary for workers** (workers cannot reach the state store at all — see `state-and-worktrees.md`). This is honest and sufficient for Wave 0: the threat model treats workers as untrusted and the lead as a trusted-but-audited coordinator whose every state mutation flows through logged script invocations.
+The lead (Claude Code) invokes harness scripts via its shell; since lead and scripts run as the same OS user, the lead *could* technically bypass the scripts. This is therefore a **protocol boundary for the lead** and a **real boundary for workers** — with one vendor-asymmetric exception: the state store is a separate path that is never handed to a worker, and for Codex (`workspace-write` sandbox) and Kimi (`srt`) the OS sandbox structurally confines writes to the worktree, so those workers cannot reach the state store at the OS level. Claude workers, however, run under `--permission-mode bypassPermissions` with **no OS sandbox**, so a Claude worker *could* read/write `~/.local/state/...` at the OS level. Today the real boundaries for the Claude case are: the state store is not in the worker's known paths, the post-hoc ownership audit, and no remote credentials in the worker env (see `state-and-worktrees.md` and the drift note in §9). This is honest and sufficient for Wave 0: the threat model treats workers as untrusted and the lead as a trusted-but-audited coordinator whose every state mutation flows through logged script invocations.
 
 **Hardening milestone (roadmap):** a harness daemon owning the state directory under separated privileges, exposing narrow operations (`create-run`, `register-task`, `record-dispatch`, `promote-result`, `record-verification`, `record-review`, `close-run`), with the lead holding read-only access to promoted views. Deferred until the core loop is proven.
 
@@ -118,7 +118,7 @@ stateDiagram-v2
     AwaitingApproval --> Cancelled: Rejected
 ```
 
-Task states: `planned, ready, running, blocked, completed_unreviewed, revision_required, accepted, rejected, integrated, verified`. Every transition is a ledger event written by the harness. Agent prose never mutates task state. Spec amendments during `running` are ledger events, not state transitions.
+Conceptual task lifecycle: `planned, ready, running, blocked, completed_unreviewed, revision_required, accepted, rejected, integrated, verified`. This is the *designed* vocabulary, not what `status.sh` reports today. The implemented, observable status vocabulary (reconstructed from the ledger event stream in `status.ts`) is narrower: `running, completed, failed, cancelled, timed_out, unknown`. There are no one-for-one ledger transition events named after the conceptual states; state is inferred from events like `task_started`, `agent_exited`, `agent_cancelled`, and `agent_timed_out`. Agent prose never mutates task state. Spec amendments during `running` are ledger events, not state transitions.
 
 ## 8. Failure and recovery
 
