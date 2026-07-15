@@ -1,6 +1,4 @@
 import {
-  chmodSync,
-  copyFileSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -196,6 +194,15 @@ export async function amendTask(
   if (fromV === undefined) die('task spec has invalid spec_version');
   const toV = (fromV + 1n).toString();
 
+  // Preflight the recorded worktree BEFORE mutating the authoritative spec.
+  // Checking only after the rewrite would leave a broken half-amended state
+  // on a missing worktree: spec_version bumped, amendment_reason set, but
+  // no refreshed worktree copy, no ledger event, and no redispatch.
+  const worktree = yamlScalar(taskSpec, 'worktree');
+  if (worktree && !existsSync(worktree)) {
+    die(`amend-task: worktree not found, cannot refresh its task spec copy: ${worktree}`);
+  }
+
   const content = readFileSync(taskSpec, 'utf8');
   const rewritten = rewriteTaskSpec(content, fromVStr, toV, reason, delivery);
   replaceFileAtomically(taskSpec, rewritten);
@@ -208,17 +215,24 @@ export async function amendTask(
   // amendment_reason at all, indistinguishable from "nothing was amended."
   // This was found live: two consecutive redispatches reported false
   // completion because the worker never saw the amendment.
-  const worktree = yamlScalar(taskSpec, 'worktree');
+  //
+  // Written via the same temp-file-then-atomic-rename pattern as
+  // replaceFileAtomically, with the mode set AT CREATION rather than via a
+  // separate chmod step -- a chmod-writable/copy/chmod-readonly sequence
+  // leaves the destination genuinely writable for the whole window between
+  // the two chmods, and if the copy throws in between, it never gets
+  // re-locked: a real trust-boundary violation (workers must not be able
+  // to self-amend their own instructions), not just a missed refresh.
   if (worktree) {
     const worktreeSpec = join(worktree, '.hydra-task.yaml');
-    if (!existsSync(worktree)) {
-      die(`amend-task: worktree not found, cannot refresh its task spec copy: ${worktree}`);
+    const tempDir = mkdtempSync(join(worktree, '.hydra-task-'));
+    const tempPath = join(tempDir, 'task.yaml');
+    try {
+      writeFileSync(tempPath, rewritten, { encoding: 'utf8', mode: 0o444 });
+      renameSync(tempPath, worktreeSpec);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
     }
-    if (existsSync(worktreeSpec)) {
-      chmodSync(worktreeSpec, 0o644);
-    }
-    copyFileSync(taskSpec, worktreeSpec);
-    chmodSync(worktreeSpec, 0o444);
   }
 
   ledgerAppend(

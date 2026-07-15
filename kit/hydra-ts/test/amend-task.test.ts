@@ -217,19 +217,29 @@ objective: Original objective.
     assert.equal(mode, 0o444);
   });
 
-  it('dies with a clear error when the recorded worktree does not exist', async () => {
+  it('dies with a clear error when the recorded worktree does not exist, WITHOUT mutating the spec or ledger first', async () => {
     const runId = 'worktree-missing';
     const taskId = 'task-missing-wt';
     setupRun(runId);
-    writeTaskSpec(runId, taskId, `task_id: ${taskId}
+    const specPath = writeTaskSpec(runId, taskId, `task_id: ${taskId}
 worktree: ${join(TEST_TMP, 'does-not-exist')}
 spec_version: 1
 `);
 
+    let dispatched = false;
     await assert.rejects(
-      amendTask(runId, taskId, 'reason', 'restart', { dispatch: () => {} }),
+      amendTask(runId, taskId, 'reason', 'restart', { dispatch: () => { dispatched = true; } }),
       /worktree not found/,
     );
+
+    // The missing-worktree check must run BEFORE the authoritative spec is
+    // rewritten -- otherwise a failed amendment leaves a broken half-amended
+    // state: spec_version bumped, amendment_reason set, but no refreshed
+    // worktree copy, no ledger event, and no redispatch.
+    assert.equal(yamlScalar(specPath, 'spec_version'), '1');
+    assert.equal(yamlScalar(specPath, 'amendment_reason'), '');
+    assert.equal(dispatched, false);
+    assert.equal(existsSync(ledger(runId)), false);
   });
 
   it('defaults delivery to restart', async () => {

@@ -46,6 +46,16 @@ to_v=$(( from_v + 1 ))
 # scalar (`key: |` + 2-space-indented lines) instead, and any PRIOR block
 # scalar's continuation lines are skipped (not just its header) when dropping
 # stale amendment metadata from a spec that was already amended once before.
+#
+# Preflight the recorded worktree BEFORE mutating the authoritative spec --
+# checking only after the rewrite would leave a broken half-amended state on
+# a missing worktree: spec_version bumped, amendment_reason set, but no
+# refreshed worktree copy, no ledger event, and no redispatch.
+worktree="$(hydra_yaml_scalar "$task_spec" 'worktree')"
+if [ -n "$worktree" ]; then
+  [ -d "$worktree" ] || hydra_die "amend-task: worktree not found, cannot refresh its task spec copy: $worktree"
+fi
+
 tmp="$(mktemp)"
 awk -v to="$to_v" -v from="$from_v" -v reason="$reason" -v delivery="$delivery" '
   function print_kv(key, value,    n, i, parts) {
@@ -87,13 +97,19 @@ mv "$tmp" "$task_spec"
 # has no access to the authoritative state root) must be refreshed to match,
 # or a resumed/restarted worker silently keeps reading the PRE-amendment
 # spec: no error, just the old objective and no amendment_reason at all.
-worktree="$(hydra_yaml_scalar "$task_spec" 'worktree')"
+#
+# Written via a temp file created with mode 444 up front, then renamed over
+# the destination -- a chmod-writable/copy/chmod-readonly sequence leaves the
+# destination genuinely writable for the whole window between the two
+# chmods, and if the copy fails in between, it never gets re-locked: a real
+# trust-boundary violation (workers must not be able to self-amend their own
+# instructions), not just a missed refresh.
 if [ -n "$worktree" ]; then
-  [ -d "$worktree" ] || hydra_die "amend-task: worktree not found, cannot refresh its task spec copy: $worktree"
   worktree_spec="$worktree/.hydra-task.yaml"
-  [ -f "$worktree_spec" ] && chmod u+w "$worktree_spec"
-  cp "$task_spec" "$worktree_spec"
-  chmod 444 "$worktree_spec"
+  wt_tmp="$(mktemp "$worktree/.hydra-task-XXXXXX")"
+  cp "$task_spec" "$wt_tmp"
+  chmod 444 "$wt_tmp"
+  mv "$wt_tmp" "$worktree_spec"
 fi
 
 hydra_ledger_append "$run_id" task_spec_amended task_id "$task_id" \
