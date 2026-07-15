@@ -337,16 +337,6 @@ export function yamlList(file: string, key: string): string[] {
 // Any valid YAML block-scalar header: `|`/`>`, optionally followed by a
 // chomping indicator (`-`/`+`) and/or a single explicit indentation digit
 // (1-9), in EITHER order -- YAML permits both `|2-` and `|-2`.
-//
-// Known accepted gap: an explicit indentation digit (`|2`, `>1-`, etc.) is
-// recognized as a header but NOT honored -- yamlBlock still infers the base
-// indent from the first content line rather than using the declared number,
-// so a body whose first line is indented deeper than the declared digit
-// reads incorrectly. This harness's own writer (amend-task.ts's
-// rewriteTaskSpec) never emits an explicit indentation digit -- it always
-// writes a bare `|` and lets the reader infer the base -- so this gap is
-// unreachable via any value the harness itself generates; it only matters
-// for a hand-authored task spec using that specific YAML feature.
 export const YAML_BLOCK_HEADER = /^[|>](?:[1-9][+-]?|[+-][1-9]?)?$/;
 
 export function yamlBlock(file: string, key: string): string {
@@ -366,11 +356,19 @@ export function yamlBlock(file: string, key: string): string {
         return rest.replace(/\s+#.*$/, '').replace(/^"|"$/g, '').trim();
       }
       grab = true;
+      // An explicit indentation digit (`|2`, `>1-`, etc.) fixes the base
+      // indent from the header itself rather than leaving it to be inferred
+      // from the first content line below -- honor it if present, so a
+      // first line indented deeper than the declared digit doesn't corrupt
+      // every later line's slice point.
+      const digitMatch = rest.match(/[1-9]/);
+      baseIndent = digitMatch ? Number(digitMatch[0]) : null;
       continue;
     }
     if (grab) {
       if (/^\S/.test(line)) break;
-      // Strip only the block's own base indentation (set by the first
+      // Strip only the block's own base indentation (the header's explicit
+      // digit if it declared one, otherwise inferred from the first
       // non-blank continuation line), not all leading whitespace -- content
       // indented further than the base (nested lists, code) must survive.
       if (line !== '' && baseIndent === null) {

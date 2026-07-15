@@ -419,17 +419,18 @@ hydra_yaml_block() {
     # Any valid YAML block-scalar header: | or >, optionally with a chomping
     # indicator (-/+) and/or a single explicit indentation digit (1-9), in
     # EITHER order (YAML permits both "|2-" and "|-2").
-    #
-    # Known accepted gap: an explicit indentation digit is recognized as a
-    # header but not honored -- the base indent is still inferred from the
-    # first content line rather than the declared digit. This harness never
-    # writes an explicit indentation digit (amend-task.sh always emits a
-    # bare "|"), so this is unreachable via any harness-generated spec.
     function is_block_header(s) { return s ~ /^[|>]([1-9][+-]?|[+-][1-9]?)?$/ }
     $0 ~ "^"key":[[:space:]]*[|>]?([1-9][+-]?|[+-][1-9]?)?[[:space:]]*$" && !grab {
       inline=$0; sub("^"key":[[:space:]]*", "", inline); sub(/[[:space:]]*$/, "", inline);
       if (inline != "" && !is_block_header(inline)) { print inline; exit }
-      grab=1; base=-1; next
+      grab=1
+      # An explicit indentation digit fixes the base indent from the header
+      # itself instead of leaving it to be inferred from the first content
+      # line below -- honor it if present (base becomes non-negative right
+      # away), otherwise fall through to inference (base stays -1).
+      if (match(inline, /[1-9]/)) base = substr(inline, RSTART, RLENGTH) + 0
+      else base = -1
+      next
     }
     grab {
       if ($0 ~ /^[^[:space:]]/) exit             # dedent to col 0 => block ended

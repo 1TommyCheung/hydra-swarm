@@ -278,17 +278,22 @@ next: value
     assert.equal(yamlScalar(file, 'other'), '>');
   });
 
-  it('known accepted gap: an explicit indentation digit is recognized but not honored', () => {
-    // amend-task.ts's writer never emits an explicit indentation digit (it
-    // always writes a bare "|"), so this only affects a hand-authored spec
-    // using that specific YAML feature -- documented, not silently wrong.
+  it('honors an explicit indentation digit as the base indent, not the first line\'s inferred indent', () => {
     const file = writeFixture('block', 'reason: |2\n    first\n  second\nnext: value\n');
-    // A spec-compliant parser would use the declared indent (2) as the base,
-    // yielding "  first\nsecond". This reader still infers the base from the
-    // first content line instead (4, not the declared 2), which both
-    // mis-indents "first" and over-strips "second" -- a known, accepted
-    // limitation for this unreachable-via-the-harness YAML feature.
-    assert.equal(yamlBlock(file, 'reason'), 'first\ncond');
+    // The header declares base indent 2. "first" has 4 leading spaces (2
+    // base + 2 extra, preserved); "second" has exactly 2 (the base, none
+    // left over). Inferring the base from "first" instead (as if the
+    // digit weren't there) would wrongly use 4 and delete real characters
+    // from "second" -- this was a real corruption bug, not just lost
+    // formatting, caught by adversarial review.
+    assert.equal(yamlBlock(file, 'reason'), '  first\nsecond');
+  });
+
+  it('explicit indentation digit works with a chomping indicator in either order', () => {
+    for (const header of ['|2-', '|-2', '>2+', '>+2']) {
+      const file = writeFixture('block', `reason: ${header}\n    first\n  second\nnext: value\n`);
+      assert.equal(yamlBlock(file, 'reason'), '  first\nsecond', `header ${header}`);
+    }
   });
 });
 
