@@ -86,7 +86,7 @@ objective: >
     // The decoded reason now contains a real newline, so it must be written
     // as a block scalar (a plain `key: value` line cannot span lines without
     // corrupting the YAML) -- see the round-trip test below.
-    assert.ok(out.includes('amendment_reason: |\n  first\n  second\\third\n'));
+    assert.ok(out.includes('amendment_reason: |2\n  first\n  second\\third\n'));
     assert.ok(out.includes('delivered_via: re\tstart\n'));
   });
 
@@ -95,7 +95,7 @@ objective: >
     const reason = 'SPEC VERSION 2 -- REQUIRED FIX.\n\n1. Fix the thing.\n2. Also fix this # not a comment.\n';
     const out = rewriteTaskSpec(content, 1, 2, reason, 'restart');
 
-    assert.match(out, /^amendment_reason: \|$/m);
+    assert.match(out, /^amendment_reason: \|2$/m);
     // A plain scalar line for the same key must not also be present.
     assert.doesNotMatch(out, /^amendment_reason: [^|]/m);
 
@@ -107,6 +107,26 @@ objective: >
     // reason ending in "\n" round-trips byte-for-byte because the block
     // scalar's final empty continuation line reconstitutes it on join.
     assert.equal(roundTripped, reason);
+  });
+
+  it('round-trips a reason whose first line is more indented than a later line, without corrupting it', () => {
+    // A bare "|" header makes a real YAML parser auto-detect the base
+    // indent from the FIRST content line -- but this writer always adds a
+    // constant 2 spaces regardless of the value's own per-line indentation.
+    // If the first line already had leading whitespace (e.g. pasted code),
+    // auto-detection would pick up a too-large base, and a later,
+    // less-indented "root level" line becomes invalid YAML / gets
+    // corrupted on read. Declaring "|2" explicitly removes the ambiguity.
+    const content = 'task_id: t1\nspec_version: 1\n';
+    const reason = '  first\nsecond';
+    const out = rewriteTaskSpec(content, 1, 2, reason, 'restart');
+
+    assert.match(out, /^amendment_reason: \|2$/m);
+
+    mkdirSync(TEST_TMP, { recursive: true });
+    const specPath = join(TEST_TMP, 'roundtrip-uneven-indent.yaml');
+    writeFileSync(specPath, out, 'utf8');
+    assert.equal(yamlBlock(specPath, 'amendment_reason'), reason);
   });
 
   it('drops a prior multi-line amendment_reason block in full (header + continuation lines) when re-amending', () => {

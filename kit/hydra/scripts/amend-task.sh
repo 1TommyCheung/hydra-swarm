@@ -58,12 +58,20 @@ fi
 
 tmp="$(mktemp)"
 awk -v to="$to_v" -v from="$from_v" -v reason="$reason" -v delivery="$delivery" '
+  # An implicit (bare |) indentation indicator makes a real YAML parser
+  # auto-detect the base indent from the first content line -- but this
+  # writer always adds exactly 2 spaces regardless of that first line own
+  # leading whitespace. If the value first line is more indented than a
+  # later "root level" line within the same value, auto-detection picks up
+  # the larger indent and the less-indented line becomes invalid YAML.
+  # Declaring |2 explicitly removes the ambiguity: every emitted line is
+  # unambiguously 2 spaces deep.
   function print_kv(key, value,    n, i, parts) {
     if (index(value, "\n") == 0) {
       print key ": " value
       return
     }
-    print key ": |"
+    print key ": |2"
     n = split(value, parts, "\n")
     for (i = 1; i <= n; i++) {
       if (parts[i] == "") print ""

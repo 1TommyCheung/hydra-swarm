@@ -114,7 +114,19 @@ function yamlKeyValue(key: string, value: string): string {
     return `${key}: ${value}`;
   }
   const indented = value.split('\n').map((line) => (line ? `  ${line}` : ''));
-  return [`${key}: |`, ...indented].join('\n');
+  // An IMPLICIT (bare `|`) indentation indicator makes a real YAML parser
+  // auto-detect the base indent from the first content line -- but this
+  // writer always adds exactly 2 spaces regardless of what leading
+  // whitespace that line's own content already had. If the value's first
+  // line happens to be more indented than a later "root level" line within
+  // the same value (e.g. "  first\nsecond"), auto-detection picks up that
+  // larger indent, and the less-indented later line is then invalid YAML
+  // under a strict parser -- silently corrupted content under this file's
+  // own lenient readers. Declaring the indent explicitly (`|2`, matching
+  // the constant 2 spaces this writer always adds) removes the ambiguity
+  // entirely: every emitted line is unambiguously 2 spaces deep, regardless
+  // of the original value's own per-line indentation.
+  return [`${key}: |2`, ...indented].join('\n');
 }
 
 /**
