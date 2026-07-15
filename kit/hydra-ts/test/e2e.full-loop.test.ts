@@ -124,6 +124,10 @@ function dispatchEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     PATH: process.env.PATH ?? '',
     HOME: process.env.HOME ?? '',
     LANG: process.env.LANG ?? 'C',
+    // Panes default to on, but this suite tests the real plain-spawn path
+    // deterministically; force it off regardless of whether herdr happens
+    // to be live on the machine running the tests.
+    HYDRA_HERDR_PANES: '0',
     ...extra,
   };
 }
