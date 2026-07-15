@@ -798,6 +798,73 @@ describe('herdrPush', () => {
       /JSON|Unexpected token/,
     );
   });
+
+  it('the real default runner strips BUN_BE_BUN from every herdr child (Stage 4 review bug #2)', () => {
+    // No exec injection: this exercises defaultExec itself. A stub `herdr`
+    // on PATH records whether BUN_BE_BUN is present in its own environment
+    // for every call site herdrPush drives (status probe, pane list, pane
+    // rename, notification show, agent list).
+    const runId = uniqueRunId('bunbebun');
+    setupRun(runId, [
+      { event: 'task_started', task_id: 't1', run_id: runId, vendor: 'claude' },
+      { event: 'agent_exited', task_id: 't1', run_id: runId },
+    ]);
+
+    const binDir = join(TEST_TMP, `stub-bin-${process.pid}`);
+    mkdirSync(binDir, { recursive: true });
+    const stubLog = join(TEST_TMP, `herdr-stub-${process.pid}.log`);
+    writeFileSync(
+      join(binDir, 'herdr'),
+      [
+        '#!/bin/sh',
+        'state=absent',
+        'if [ "${BUN_BE_BUN+x}" = "x" ]; then state="present"; fi',
+        'printf \'%s BUN_BE_BUN=%s\\n\' "$*" "$state" >> "$HYDRA_HERDR_STUB_LOG"',
+        'case "$1" in',
+        '  pane) [ "$2" = "list" ] && printf \'{"result":{"panes":[{"agent":"lead","cwd":"/repo","pane_id":"pane-1"}]}}\\n\' ;;',
+        '  agent) [ "$2" = "list" ] && printf \'{"result":{"agents":[]}}\\n\' ;;',
+        'esac',
+        'exit 0',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+
+    const saved = {
+      PATH: process.env.PATH,
+      BUN_BE_BUN: process.env.BUN_BE_BUN,
+      HYDRA_HERDR_STUB_LOG: process.env.HYDRA_HERDR_STUB_LOG,
+    };
+    process.env.PATH = `${binDir}:${process.env.PATH ?? ''}`;
+    // Prove the strip: with BUN_BE_BUN set in the PARENT environment, an
+    // unstripped child would observe it (the pre-fix behavior).
+    process.env.BUN_BE_BUN = '1';
+    process.env.HYDRA_HERDR_STUB_LOG = stubLog;
+    try {
+      const { result } = captureIO(() =>
+        herdrPush(runId, { notify: true, repoRoot: '/repo' }),
+      );
+      assert.equal(result.length, 1);
+    } finally {
+      process.env.PATH = saved.PATH ?? '';
+      if (saved.BUN_BE_BUN === undefined) delete process.env.BUN_BE_BUN;
+      else process.env.BUN_BE_BUN = saved.BUN_BE_BUN;
+      if (saved.HYDRA_HERDR_STUB_LOG === undefined) delete process.env.HYDRA_HERDR_STUB_LOG;
+      else process.env.HYDRA_HERDR_STUB_LOG = saved.HYDRA_HERDR_STUB_LOG;
+    }
+
+    const log = readFileSync(stubLog, 'utf8').trim().split('\n');
+    // All five herdr call sites fired...
+    assert.ok(log.some((l) => l.startsWith('status ')), `status call missing: ${log}`);
+    assert.ok(log.some((l) => l.startsWith('pane list ')), `pane list missing: ${log}`);
+    assert.ok(log.some((l) => l.startsWith('pane rename pane-1 ')), `pane rename missing: ${log}`);
+    assert.ok(log.some((l) => l.startsWith('notification show ')), `notification missing: ${log}`);
+    assert.ok(log.some((l) => l.startsWith('agent list ')), `agent list missing: ${log}`);
+    // ...and none of their children could observe BUN_BE_BUN.
+    for (const line of log) {
+      assert.ok(line.endsWith('BUN_BE_BUN=absent'), `child saw BUN_BE_BUN: ${line}`);
+    }
+  });
 });
 
 describe('CLI', () => {

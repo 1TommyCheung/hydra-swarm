@@ -62,7 +62,18 @@ function defaultExec(
   args: string[],
   options?: ExecFileSyncOptions,
 ): string {
-  return execFileSync(file, args, { encoding: 'utf8', ...options }) as string;
+  return execFileSync(file, args, {
+    encoding: 'utf8',
+    ...options,
+    // Strip BUN_BE_BUN from every child: herdr is hydra's own tooling and a
+    // leaked BUN_BE_BUN=1 hijacks a Bun-compiled herdr into Bun's generic CLI
+    // (spike: docs/bun-migration-spike-results.md). Same pattern the Stage 2
+    // spawn audit applied to dispatch.ts and review-dispatch.ts; this file
+    // was missed (Stage 4 review bug #2,
+    // docs/bun-migration-stage4-fixes-runtime.md). Extends whatever env the
+    // call already builds; Bun omits undefined env keys.
+    env: { ...process.env, ...options?.env, BUN_BE_BUN: undefined },
+  }) as string;
 }
 
 // ---------------------------------------------------------------------------

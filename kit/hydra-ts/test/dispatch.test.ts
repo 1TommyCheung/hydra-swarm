@@ -18,6 +18,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   dispatch,
   kimiEventText,
+  resolveAdapterRuntime,
   type ChildProcessLike,
   type Clock,
   type DispatchOptions,
@@ -460,6 +461,242 @@ describe('dispatch Bash parity', () => {
       `'${nodeExecutable}' '--experimental-strip-types' '${hosted.tsAdapterPath}'`,
     ));
     assert.equal(herdr.starts[0].command.includes("'node' '--experimental-strip-types'"), false);
+  });
+
+  it('resolves the adapter runtime with compiled-binary precedence (resolveAdapterRuntime)', () => {
+    // Inside a compiled binary the runtime is 'compiled' regardless of
+    // HYDRA_HARNESS / HYDRA_ADAPTER_RUNTIME — 'ts' can never work there (no
+    // Node, no adapter .ts file).
+    assert.equal(resolveAdapterRuntime(undefined, 'bin', true), 'compiled');
+    assert.equal(resolveAdapterRuntime(undefined, 'bash', true), 'compiled');
+    assert.equal(resolveAdapterRuntime('ts', 'bash', true), 'compiled');
+    // ... UNLESS an operator explicitly forces the bash adapters.
+    assert.equal(resolveAdapterRuntime('bash', 'bin', true), 'bash');
+    assert.equal(resolveAdapterRuntime('bash', undefined, true), 'bash');
+    // An explicit 'compiled' override selects the self-reexec runtime even
+    // under plain Node (this is how the tests below exercise the branch
+    // without a bun-built binary).
+    assert.equal(resolveAdapterRuntime('compiled', undefined, false), 'compiled');
+    assert.equal(resolveAdapterRuntime('compiled', 'bash', false), 'compiled');
+    // The legacy source-lane mapping is byte-for-byte unchanged.
+    assert.equal(resolveAdapterRuntime(undefined, undefined, false), 'ts');
+    assert.equal(resolveAdapterRuntime(undefined, 'bin', false), 'ts');
+    assert.equal(resolveAdapterRuntime(undefined, 'bash', false), 'bash');
+    assert.equal(resolveAdapterRuntime('ts', 'bash', false), 'ts');
+    assert.equal(resolveAdapterRuntime('bash', 'ts', false), 'bash');
+    assert.equal(resolveAdapterRuntime('nonsense', undefined, false), 'ts');
+    assert.equal(resolveAdapterRuntime('', 'bash', false), 'ts');
+  });
+
+  it('compiled runtime self-reexecs process.execPath through the adapter-<vendor> route', async () => {
+    const f = fixture(runId());
+    const mock = fakeSpawn();
+    const options = injectedOptions(f, mock.spawn, {
+      adapterRuntime: 'compiled',
+      env: { BUN_BE_BUN: '1' },
+    });
+    const handle = await dispatch(f.runId, 'task-a', options);
+
+    assert.equal(mock.calls.length, 1);
+    // The command is the current executable itself — inside a compiled binary
+    // that IS the hydra-cli binary — never a Node interpreter, never a .ts
+    // adapter path, and never --experimental-strip-types (cli.ts's router
+    // would reject that as an unknown subcommand).
+    assert.equal(mock.calls[0].command, process.execPath);
+    assert.deepEqual(mock.calls[0].args, [
+      'adapter-claude',
+      'start', f.taskSpecPath, f.worktree,
+      join(f.runDir, 'inbox', handle.agentRunId),
+      f.sessionsDir, handle.agentRunId, '',
+    ]);
+    // The self-reexec spawn gets the same env object every runtime gets, with
+    // BUN_BE_BUN stripped in place — a leaked BUN_BE_BUN=1 would hijack the
+    // re-exec'd binary into Bun's own CLI instead of Hydra.
+    assert.equal(mock.calls[0].options?.env, options.env);
+    assert.equal('BUN_BE_BUN' in (mock.calls[0].options?.env ?? {}), false);
+  });
+
+  it('compiled runtime routes each vendor via HYDRA_ADAPTER_RUNTIME=compiled', async () => {
+    for (const vendor of ['codex', 'stub'] as const) {
+      const f = fixture(runId(), { vendor });
+      const mock = fakeSpawn();
+      const handle = await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+        env: { HYDRA_ADAPTER_RUNTIME: 'compiled' },
+      }));
+
+      assert.equal(mock.calls.length, 1);
+      assert.equal(mock.calls[0].command, process.execPath);
+      assert.equal(mock.calls[0].args[0], `adapter-${vendor}`);
+      assert.equal(mock.calls[0].args[1], 'start');
+      assert.equal(mock.calls[0].args[2], f.taskSpecPath);
+      assert.equal(mock.calls[0].args.at(-1), '');
+    }
+  });
+
+  it('compiled runtime rejects an unknown vendor against the fixed route set, with no file probe', async () => {
+    // The fixture DOES write bash/ts adapter files for 'nosuch' — proving the
+    // compiled gate never stats adapter files; validity is cli.ts's fixed
+    // compile-time adapter-<vendor> route set.
+    const f = fixture(runId(), { vendor: 'nosuch' });
+    const mock = fakeSpawn();
+    await assert.rejects(
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { adapterRuntime: 'compiled' })),
+      /no adapter for vendor 'nosuch': the compiled binary only routes adapter-claude, adapter-codex, adapter-kimi, adapter-opencode, adapter-stub/,
+    );
+    assert.equal(mock.calls.length, 0);
+  });
+
+  it('compiled runtime takes resume capability from the static registry, not a source file', async () => {
+    // adapter-claude implements start|resume, so a prior session plus
+    // HYDRA_DELIVERY=resume reaches the child as the resume verb even though
+    // there is no adapter .ts file for the compiled runtime to grep.
+    const capable = fixture(runId(), { vendor: 'claude' });
+    writeFileSync(
+      join(capable.sessionsDir, `${capable.runId}-task-a-v1.json`),
+      JSON.stringify({ session_id: 'session-compiled' }),
+    );
+    const capableMock = fakeSpawn();
+    await dispatch(capable.runId, 'task-a', injectedOptions(capable, capableMock.spawn, {
+      adapterRuntime: 'compiled',
+      env: { HYDRA_DELIVERY: 'resume' },
+    }));
+    assert.equal(capableMock.calls[0].args[0], 'adapter-claude');
+    assert.equal(capableMock.calls[0].args[1], 'resume');
+    assert.equal(capableMock.calls[0].args.at(-1), 'session-compiled');
+
+    // adapter-codex has no resume verb: cold restart with start (prior
+    // session still forwarded, exactly like the ts/bash runtimes).
+    const incapable = fixture(runId(), { vendor: 'codex' });
+    writeFileSync(
+      join(incapable.sessionsDir, `${incapable.runId}-task-a-v1.json`),
+      JSON.stringify({ session_id: 'session-compiled' }),
+    );
+    const incapableMock = fakeSpawn();
+    await dispatch(incapable.runId, 'task-a', injectedOptions(incapable, incapableMock.spawn, {
+      adapterRuntime: 'compiled',
+      env: { HYDRA_DELIVERY: 'resume' },
+    }));
+    assert.equal(incapableMock.calls[0].args[0], 'adapter-codex');
+    assert.equal(incapableMock.calls[0].args[1], 'start');
+    assert.equal(incapableMock.calls[0].args.at(-1), 'session-compiled');
+  });
+
+  it('compiled runtime builds the self-reexec pane command when herdr-hosted', async () => {
+    const hosted = fixture(runId());
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    const expectedId = `${hosted.runId}-task-a-v1`;
+    const clock = new StepClock(() => {
+      writeFileSync(join(hosted.sessionsDir, `${expectedId}.exit`), '0');
+    });
+    await dispatch(hosted.runId, 'task-a', injectedOptions(hosted, () => {
+      throw new Error('plain spawn must not run');
+    }, {
+      adapterRuntime: 'compiled',
+      env: { HYDRA_HERDR_PANES: '1' },
+      herdr,
+      clock,
+    }));
+
+    assert.equal(herdr.starts.length, 1);
+    // `<self> adapter-claude start ...` shell-quoted in the adapter's slot —
+    // and crucially NOT `<self> --experimental-strip-types ...`.
+    assert.ok(herdr.starts[0].command.includes(
+      `'${process.execPath}' 'adapter-claude' 'start'`,
+    ));
+    assert.equal(herdr.starts[0].command.includes('--experimental-strip-types'), false);
+  });
+
+  // -------------------------------------------------------------------------
+  // Compiled-binary end-to-end dispatch (Stage 3 black-box shape, deferred).
+  //
+  // Stage 4 review bug #1 follow-up: a REAL checkout-free dispatch through
+  // the compiled binary (`hydra-cli dispatch <run> <task>` for vendor stub,
+  // asserting the self-reexec argv reaches adapter-stub and agent_exited is
+  // recorded) needs `bun build --compile` output, which this task cannot
+  // produce (bun is unavailable in the sandbox — noted, not faked). The test
+  // below IS that fixture, written against the Stage 3 harness's invocation
+  // style (scripts/blackbox-compiled.ts): it runs when a compiled binary is
+  // reachable (HYDRA_COMPILED_BINARY, or dist/hydra-cli from `npm run
+  // build:bin`) and skips loudly otherwise, so a follow-up task with bun
+  // access only has to build the binary — no test changes needed.
+  // -------------------------------------------------------------------------
+
+  const COMPILED_BINARY = process.env.HYDRA_COMPILED_BINARY
+    ?? join(import.meta.dirname, '..', 'dist', 'hydra-cli');
+
+  it('compiled binary dispatches through adapter-stub end-to-end (requires a bun-built binary)', {
+    skip: existsSync(COMPILED_BINARY)
+      ? false
+      : `no compiled binary at ${COMPILED_BINARY} — run \`npm run build:bin\` (requires bun) or set HYDRA_COMPILED_BINARY`,
+  }, async () => {
+    const id = runId();
+    const root = join(TEST_TMP, id, 'e2e');
+    const stateRoot = join(root, 'state');
+    const runDir = join(stateRoot, 'runs', `run-${id}`);
+    const worktree = join(root, 'worktree');
+    mkdirSync(join(runDir, 'tasks'), { recursive: true });
+    mkdirSync(worktree, { recursive: true });
+
+    // The stub adapter observes Git state from the worktree, so the worktree
+    // must be a real repository with a branch and a base commit.
+    const git = (args: string[]): void => {
+      const result = spawnSync('git', args, { cwd: worktree, encoding: 'utf8' });
+      assert.equal(result.status, 0, `git ${args.join(' ')}: ${result.stderr}`);
+    };
+    git(['init', '-b', 'main']);
+    git(['config', 'user.email', 'test@example.com']);
+    git(['config', 'user.name', 'Test User']);
+    writeFileSync(join(worktree, 'README.md'), '# fixture\n', 'utf8');
+    git(['add', 'README.md']);
+    git(['commit', '-m', 'initial']);
+    const base = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' })
+      .stdout.trim();
+
+    writeFileSync(join(runDir, 'tasks', 'task-a.yaml'), [
+      'task_id: task-a',
+      `run_id: ${id}`,
+      'assigned_vendor: stub',
+      `worktree: ${worktree}`,
+      'timeout_minutes: 45',
+      'spec_version: 1',
+      `branch: hydra/${id}/task-a`,
+      `base_commit: ${base}`,
+      '',
+    ].join('\n'));
+
+    // The review's exact failing scenario: HYDRA_HARNESS=bin with the
+    // compiled binary. herdr is deliberately absent from PATH so dispatch
+    // takes the plain self-reexec spawn path.
+    const result = spawnSync(COMPILED_BINARY, ['dispatch', id, 'task-a'], {
+      cwd: worktree,
+      encoding: 'utf8',
+      timeout: 60_000,
+      env: {
+        PATH: process.env.PATH ?? '',
+        HOME: root,
+        TMPDIR: root,
+        HYDRA_STATE_ROOT: stateRoot,
+        HYDRA_HARNESS: 'bin',
+        HYDRA_HERDR_PANES: '0',
+        TERM: 'dumb',
+      },
+    });
+
+    const agentRunId = `${id}-task-a-v1`;
+    assert.equal(result.status, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+    assert.ok(result.stdout.includes(agentRunId), `stdout missing agent run id: ${result.stdout}`);
+    const events = readFileSync(join(runDir, 'authoritative', 'ledger', 'events.jsonl'), 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, string>);
+    const exited = events.find((e) => e.event === 'agent_exited');
+    assert.equal(exited?.exit_code, '0', `ledger: ${JSON.stringify(events)}`);
+    const drop = JSON.parse(
+      readFileSync(join(runDir, 'inbox', agentRunId, 'result.json'), 'utf8'),
+    ) as { vendor?: string; status?: string };
+    assert.equal(drop.vendor, 'stub');
+    assert.equal(drop.status, 'completed');
   });
 
   it('records non-zero and signal-derived worker exit codes', async () => {

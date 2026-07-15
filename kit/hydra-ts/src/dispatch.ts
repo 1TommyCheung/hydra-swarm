@@ -75,12 +75,63 @@ export interface Clock {
   sleep(ms: number): Promise<void>;
 }
 
+/**
+ * Adapter runtime: 'bash' runs `hydra/adapters/<vendor>.sh` directly, 'ts'
+ * runs `adapter-<vendor>.ts` through a Node interpreter, and 'compiled'
+ * self-reexecs this process's own executable through cli.ts's
+ * `adapter-<vendor>` route. 'compiled' is the ONLY runtime available inside
+ * a `bun build --compile` binary: there is no Node interpreter to spawn and
+ * no adapter .ts file to point one at (Stage 4 review bug #1,
+ * docs/bun-migration-stage4-fixes-runtime.md).
+ */
+export type AdapterRuntime = 'bash' | 'ts' | 'compiled';
+
+/**
+ * Static adapter capability registry for the 'compiled' runtime. A compiled
+ * binary cannot stat or read an adapter source file, so vendor validity and
+ * resume capability are compile-time constants. The key set mirrors cli.ts's
+ * `adapter-<vendor>` routes 1:1 (docs/bun-migration-stage1-cli.md);
+ * `resume` mirrors each adapter's verb parser (adapter-claude/adapter-stub
+ * implement start|resume; adapter-codex/adapter-kimi/adapter-opencode do
+ * not). Keep in sync with the routing table and the adapters.
+ */
+export const COMPILED_ADAPTERS: Readonly<Record<string, { resume: boolean }>> = {
+  claude: { resume: true },
+  codex: { resume: false },
+  kimi: { resume: false },
+  opencode: { resume: false },
+  stub: { resume: true },
+};
+
+/**
+ * Resolve the adapter runtime from the option/env overrides and the current
+ * process shape. Precedence:
+ *   1. an explicit 'bash' override always wins — an operator may force the
+ *      bash adapters even from a compiled binary, matching the override-
+ *      precedence conventions used elsewhere in this migration;
+ *   2. a real compiled binary (`compiled`) or an explicit 'compiled'
+ *      override selects the self-reexec runtime — inside a compiled binary
+ *      'ts' can never work, regardless of HYDRA_HARNESS/HYDRA_ADAPTER_RUNTIME;
+ *   3. otherwise the legacy mapping applies: explicit override, else
+ *      HYDRA_HARNESS=bash selects 'bash', and every other value coerces to
+ *      'ts' (unchanged pre-migration semantics).
+ */
+export function resolveAdapterRuntime(
+  override: string | undefined,
+  harness: string | undefined,
+  compiled: boolean,
+): AdapterRuntime {
+  if (override === 'bash') return 'bash';
+  if (override === 'compiled' || compiled) return 'compiled';
+  return (override ?? (harness === 'bash' ? 'bash' : 'ts')) === 'bash' ? 'bash' : 'ts';
+}
+
 export interface DispatchOptions {
   cwd?: string;
   stateRoot?: string;
   repoRoot?: string;
   env?: NodeJS.ProcessEnv;
-  adapterRuntime?: 'bash' | 'ts';
+  adapterRuntime?: AdapterRuntime;
   /** Override directory for TypeScript adapters (used by tests). */
   tsAdapterDir?: string;
   /** Override directory for Bash adapters (used by tests). */
@@ -313,7 +364,7 @@ interface WorkerContext {
   slotsDir: string;
   taskSpecPath: string;
   adapterPath: string;
-  adapterRuntime: 'bash' | 'ts';
+  adapterRuntime: AdapterRuntime;
   nodeExecutable: string;
   verb: 'start' | 'resume';
   priorSession: string;
@@ -488,22 +539,28 @@ function determineDelivery(
   runId: string,
   taskId: string,
   sessionsDir: string,
-  adapterPath: string,
+  adapter: { vendor: string; path: string; runtime: AdapterRuntime },
   env: NodeJS.ProcessEnv,
 ): { verb: 'start' | 'resume'; priorSession: string } {
   if (env.HYDRA_DELIVERY !== 'resume') return { verb: 'start', priorSession: '' };
   const priorSession = findPriorSession(runId, taskId, sessionsDir);
   let supportsResume = false;
-  try {
-    const source = readFileSync(adapterPath, 'utf8');
-    if (extname(adapterPath) === '.ts') {
-      supportsResume = /^\s*export\s+(?:(?:async\s+)?function|(?:const|let|var))\s+resume\b/m.test(source)
-        || /^\s*export\s*\{[^}]*\bresume\b[^}]*\}/m.test(source);
-    } else {
-      supportsResume = source.includes('start|resume');
+  if (adapter.runtime === 'compiled') {
+    // There is no adapter source file to inspect inside a compiled binary;
+    // resume capability is a compile-time constant (see COMPILED_ADAPTERS).
+    supportsResume = COMPILED_ADAPTERS[adapter.vendor]?.resume ?? false;
+  } else {
+    try {
+      const source = readFileSync(adapter.path, 'utf8');
+      if (extname(adapter.path) === '.ts') {
+        supportsResume = /^\s*export\s+(?:(?:async\s+)?function|(?:const|let|var))\s+resume\b/m.test(source)
+          || /^\s*export\s*\{[^}]*\bresume\b[^}]*\}/m.test(source);
+      } else {
+        supportsResume = source.includes('start|resume');
+      }
+    } catch {
+      // The adapter existence gate already ran; treat a later read failure as no resume support.
     }
-  } catch {
-    // The adapter existence gate already ran; treat a later read failure as no resume support.
   }
   if (priorSession && supportsResume) return { verb: 'resume', priorSession };
   warn('resume requested but unavailable (no session / adapter lacks resume) — cold restart');
@@ -751,10 +808,24 @@ async function runWorkerPlain(
     ctx.agentRunId,
     ctx.priorSession,
   ];
-  const command = ctx.adapterRuntime === 'ts' ? ctx.nodeExecutable : ctx.adapterPath;
+  // 'compiled' self-reexecs this very executable through cli.ts's
+  // `adapter-<vendor>` route — the same premise bin-cli.ts's selfReexec
+  // already relies on (inside a compiled binary process.execPath IS the
+  // hydra-cli binary). The verb/task-spec/... argument sequence is identical
+  // across runtimes; only the command and its leading args differ. The spawn
+  // passes `env: ctx.env` for every runtime, so the in-place BUN_BE_BUN
+  // strip above covers the self-reexec too — leaking BUN_BE_BUN=1 to a
+  // re-exec'd self would hijack the child into Bun's own CLI.
+  const command = ctx.adapterRuntime === 'ts'
+    ? ctx.nodeExecutable
+    : ctx.adapterRuntime === 'compiled'
+      ? process.execPath
+      : ctx.adapterPath;
   const args = ctx.adapterRuntime === 'ts'
     ? ['--experimental-strip-types', ctx.adapterPath, ...adapterArgs]
-    : adapterArgs;
+    : ctx.adapterRuntime === 'compiled'
+      ? [`adapter-${ctx.vendor}`, ...adapterArgs]
+      : adapterArgs;
   const child = ctx.spawn(command, args, {
     detached: false,
     stdio: 'ignore',
@@ -862,9 +933,17 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
     pollJsonlFile(cliJsonlPath, progressPath, parseLiveProgress, liveProgressTailState, final);
   };
 
+  // 'compiled' substitutes the self-reexec form `<self> adapter-<vendor>` for
+  // the adapter file path; the verb/task-spec/... sequence after it and the
+  // surrounding pidfile/banner/sentinel protocol are unchanged (plan-codex:
+  // "Only the adapter command changes").
+  const adapterCommand = ctx.adapterRuntime === 'ts'
+    ? [ctx.nodeExecutable, '--experimental-strip-types', ctx.adapterPath]
+    : ctx.adapterRuntime === 'compiled'
+      ? [process.execPath, `adapter-${ctx.vendor}`]
+      : [ctx.adapterPath];
   const adapterArgs = [
-    ...(ctx.adapterRuntime === 'ts' ? [ctx.nodeExecutable, '--experimental-strip-types'] : []),
-    ctx.adapterPath,
+    ...adapterCommand,
     ctx.verb,
     ctx.taskSpecPath,
     ctx.worktree,
@@ -1050,11 +1129,16 @@ export async function dispatch(
   // bin-cli.ts's startup delete; safe under Node, effective under Bun because
   // the env object is passed explicitly.
   delete env.BUN_BE_BUN;
-  const adapterRuntime = (
-    options.adapterRuntime
-    ?? env.HYDRA_ADAPTER_RUNTIME
-    ?? (env.HYDRA_HARNESS === 'bash' ? 'bash' : 'ts')
-  ) === 'bash' ? 'bash' : 'ts';
+  // A real compiled binary resolves to the self-reexec runtime no matter what
+  // HYDRA_HARNESS/HYDRA_ADAPTER_RUNTIME say (except an explicit bash force):
+  // the old mapping sent HYDRA_HARNESS=bin to the 'ts' runtime, which then
+  // probed the synthetic /$bunfs/root for adapter-<vendor>.ts and would have
+  // spawned the binary itself as if it were Node (Stage 4 review bug #1).
+  const adapterRuntime = resolveAdapterRuntime(
+    options.adapterRuntime ?? env.HYDRA_ADAPTER_RUNTIME,
+    env.HYDRA_HARNESS,
+    isCompiledBinary(),
+  );
   // Adapters are kit-owned assets: resolve self-relative to this file's own
   // location, not via the target repo root (repo is for git/worktree/state
   // operations on the TARGET project, which is a different concern).
@@ -1064,10 +1148,22 @@ export async function dispatch(
   const defaultBashAdapterDir = join(selfDir, '..', '..', 'hydra', 'adapters');
   const tsAdapterDir = options.tsAdapterDir ? resolve(cwd, options.tsAdapterDir) : defaultTsAdapterDir;
   const bashAdapterDir = options.bashAdapterDir ? resolve(cwd, options.bashAdapterDir) : defaultBashAdapterDir;
-  const adapterPath = adapterRuntime === 'ts'
-    ? join(tsAdapterDir, `adapter-${spec.vendor}.ts`)
-    : join(bashAdapterDir, `${spec.vendor}.sh`);
-  if (!isFile(adapterPath)) die(`no adapter for vendor '${spec.vendor}': ${adapterPath}`);
+  let adapterPath: string;
+  if (adapterRuntime === 'compiled') {
+    // No adapter file exists to check inside a compiled binary — vendor
+    // validity is cli.ts's fixed compile-time `adapter-<vendor>` route set,
+    // not a file-existence probe (selfDir is the synthetic /$bunfs/root
+    // there, so isFile() could never find a real adapter anyway).
+    if (COMPILED_ADAPTERS[spec.vendor] === undefined) {
+      die(`no adapter for vendor '${spec.vendor}': the compiled binary only routes ${Object.keys(COMPILED_ADAPTERS).map((v) => `adapter-${v}`).join(', ')}`);
+    }
+    adapterPath = `adapter-${spec.vendor}`;
+  } else {
+    adapterPath = adapterRuntime === 'ts'
+      ? join(tsAdapterDir, `adapter-${spec.vendor}.ts`)
+      : join(bashAdapterDir, `${spec.vendor}.sh`);
+    if (!isFile(adapterPath)) die(`no adapter for vendor '${spec.vendor}': ${adapterPath}`);
+  }
 
   const resolvedWorktree = spec.worktree ? resolve(cwd, spec.worktree) : '';
   if (!resolvedWorktree || !isDirectory(resolvedWorktree)) {
@@ -1081,7 +1177,7 @@ export async function dispatch(
   mkdirSync(inbox, { recursive: true });
   mkdirSync(sessionsDir, { recursive: true });
 
-  const delivery = determineDelivery(runId, taskId, sessionsDir, adapterPath, env);
+  const delivery = determineDelivery(runId, taskId, sessionsDir, { vendor: spec.vendor, path: adapterPath, runtime: adapterRuntime }, env);
   const dispatchInstanceId = randomBytes(8).toString('hex');
 
   const ledgerPath = join(runPath, 'authoritative', 'ledger', 'events.jsonl');

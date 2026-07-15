@@ -170,6 +170,45 @@ describe('isCompiledBinary', () => {
     // (import.meta.url === file:///$bunfs/...); Phase 3 verifies that lane.
     assert.equal(isCompiledBinary(), false);
   });
+
+  it('is false for a /$bunfs-rooted checkout URL under plain Node (the review collision)', () => {
+    // Stage 4 review bug #3: a repository physically checked out at a
+    // root-level /$bunfs/... path (legal, e.g. in a root-run container) gives
+    // modules file:///$bunfs/... URLs under ORDINARY Node. The URL prefix
+    // alone must not decide compiled-ness — without the Bun-only
+    // process.versions.bun marker the answer stays false, so the 34
+    // direct-invocation guards keep working in that checkout.
+    assert.equal(
+      isCompiledBinary(
+        'file:///$bunfs/checkout/kit/hydra-ts/src/kit-assets.ts',
+        {} as NodeJS.ProcessVersions,
+      ),
+      false,
+    );
+  });
+
+  it('is true only when BOTH the $bunfs URL prefix and process.versions.bun hold', () => {
+    const bunVersions = { bun: '1.2.3' } as NodeJS.ProcessVersions;
+    // The compiled-binary shape: synthetic URL + Bun runtime marker.
+    assert.equal(
+      isCompiledBinary('file:///$bunfs/root/kit-assets.ts', bunVersions),
+      true,
+    );
+    // A Bun runtime WITHOUT the synthetic prefix (ordinary `bun script.ts`
+    // source run) is not a compiled binary.
+    assert.equal(
+      isCompiledBinary('file:///home/user/checkout/kit-assets.ts', bunVersions),
+      false,
+    );
+    // Node runtime WITHOUT the prefix: the everyday source lane.
+    assert.equal(
+      isCompiledBinary(
+        'file:///home/user/checkout/kit-assets.ts',
+        {} as NodeJS.ProcessVersions,
+      ),
+      false,
+    );
+  });
 });
 
 describe('cli.ts asset-import quarantine', () => {
