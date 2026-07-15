@@ -9,7 +9,8 @@
     "test": "npm run test:concurrent && npm run test:promote",
     "test:concurrent": "node --experimental-strip-types --test $(find test -name '*.test.ts' ! -name 'promote.test.ts' -print)",
     "test:promote": "node --experimental-strip-types --test test/promote.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:bin": "bun build --compile --outfile dist/hydra-bin-stage0 src/bin-cli.ts"
   },
   "devDependencies": { "typescript": "^5.5.0" }
 }
