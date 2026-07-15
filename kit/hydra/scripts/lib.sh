@@ -117,30 +117,43 @@ hydra_resolve_node() {
   hydra_die "Node.js >=22.6 is required for the TypeScript harness; install Node.js >=22.6 or set HYDRA_HARNESS=bash as a temporary workaround"
 }
 
+# A candidate compiled binary must be an ABSOLUTE path naming a regular
+# executable FILE. `-x` alone is also true for a searchable directory (bash
+# then crashes with "is a directory" at exec instead of falling back), and a
+# relative path would make the override's meaning depend on the caller's cwd.
+_hydra_bin_is_usable() {
+  case "$1" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  [ -f "$1" ] && [ -x "$1" ]
+}
+
 # Resolve the compiled single-binary CLI for HYDRA_HARNESS=bin. HYDRA_BIN
 # (operator/rollback override — point at a specific build) wins when it names
-# an executable file; otherwise the default `npm run build:bin` output
-# (kit/hydra-ts/dist/hydra-cli) is used. Prints the resolved path and returns
-# 0 on success. When no binary is available it warns on stderr and returns 1
-# so the caller falls back to the ts lane — it never hard-fails: an operator
-# who has not run build:bin yet must never be left without a working command.
+# an absolute, regular, executable file; otherwise the default
+# `npm run build:bin` output (kit/hydra-ts/dist/hydra-cli) is used. Prints the
+# resolved path and returns 0 on success. When no binary is available it warns
+# on stderr and returns 1 so the caller falls back to the ts lane — it never
+# hard-fails: an operator who has not run build:bin yet must never be left
+# without a working command.
 hydra_resolve_bin() {
   local lib_dir candidate
   if [ -n "${HYDRA_BIN:-}" ]; then
-    if [ -x "$HYDRA_BIN" ]; then
+    if _hydra_bin_is_usable "$HYDRA_BIN"; then
       printf '%s\n' "$HYDRA_BIN"
       return 0
     fi
-    hydra_warn "HYDRA_HARNESS=bin requested but HYDRA_BIN=$HYDRA_BIN not found, falling back to ts"
+    hydra_warn "HYDRA_HARNESS=bin requested but HYDRA_BIN=$HYDRA_BIN is missing, not a regular file, or not executable, falling back to ts"
     return 1
   fi
   lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   candidate="$lib_dir/../../hydra-ts/dist/hydra-cli"
-  if [ -x "$candidate" ]; then
+  if _hydra_bin_is_usable "$candidate"; then
     printf '%s\n' "$candidate"
     return 0
   fi
-  hydra_warn "HYDRA_HARNESS=bin requested but $candidate not found, falling back to ts"
+  hydra_warn "HYDRA_HARNESS=bin requested but $candidate is missing, not a regular file, or not executable, falling back to ts"
   return 1
 }
 
