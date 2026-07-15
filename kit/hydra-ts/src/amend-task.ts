@@ -113,7 +113,6 @@ function yamlKeyValue(key: string, value: string): string {
   if (!value.includes('\n')) {
     return `${key}: ${value}`;
   }
-  const indented = value.split('\n').map((line) => (line ? `  ${line}` : ''));
   // An IMPLICIT (bare `|`) indentation indicator makes a real YAML parser
   // auto-detect the base indent from the first content line -- but this
   // writer always adds exactly 2 spaces regardless of what leading
@@ -126,6 +125,16 @@ function yamlKeyValue(key: string, value: string): string {
   // the constant 2 spaces this writer always adds) removes the ambiguity
   // entirely: every emitted line is unambiguously 2 spaces deep, regardless
   // of the original value's own per-line indentation.
+  //
+  // Deliberately no chomping suffix. The in-repo readers recognize chomping
+  // indicators syntactically but do not apply their semantics: yamlBlock
+  // reconstructs continuation lines with a fixed '\n' join, and pre-existing
+  // tests require literal trailing blank-line preservation. Selecting
+  // suffixes and physical blank-line counts for strict-YAML round-tripping
+  // would break the reader/writer round-trip used here. Full YAML chomping
+  // compliance would require a coordinated reader/test contract change and
+  // is out of scope.
+  const indented = value.split('\n').map((line) => (line ? `  ${line}` : ''));
   return [`${key}: |2`, ...indented].join('\n');
 }
 
