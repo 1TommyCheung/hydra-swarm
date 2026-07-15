@@ -20,6 +20,12 @@ TypeScript is the default harness implementation. Continue calling the unchanged
 
 Bash remains frozen at Wave 2 exit and kept byte-for-byte as reference/rollback — do not delete it. Retiring bash entirely is a separate, later, deliberately-scoped decision.
 
+### Bun single-binary migration (Stage 0 only — exploratory, not operational)
+
+A `bun build --compile` migration is being explored to remove the Node.js dependency entirely, but nothing about normal harness operation changes yet. `HYDRA_HARNESS=ts` remains the default; the TypeScript path above is still what every dispatch actually runs.
+
+Stage 0 landed: `kit/hydra-ts/src/bin-cli.ts` is a minimal, additive, NOT-wired-in router proving the compiled-binary self-re-exec mechanism works (`status` and `__adapter stub` subcommands only). A real spike confirmed `process.execPath` resolves correctly across direct/symlinked/relocated invocations, but `import.meta.url`/`process.argv[1]` become synthetic paths inside a compiled binary, and `BUN_BE_BUN=1` can hijack the binary before any of its own code runs. See `docs/bun-migration-plan-codex.md` (the accepted blueprint), `docs/bun-migration-plan-review-glm.md` (cross-vendor synthesis and go/no-go), and `docs/bun-migration-spike-results.md` / `docs/bun-migration-stage0.md` for the full picture before doing any further work in this area — do not restart the planning from scratch.
+
 ## Scope
 
 Current scope: Wave 2 complete — Claude, Codex, OpenCode/GLM, and Kimi; GitNexus + Graphify code intelligence; herdr terminal-host integration; capability profiles. The bash harness in `${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/` plus `${CLAUDE_PLUGIN_ROOT}/kit/hydra/adapters/` has a TypeScript counterpart in `${CLAUDE_PLUGIN_ROOT}/kit/hydra-ts/src/` with the same argument/stdout/exit-code contract, except that the loop-thinking detector and the `loop_suspicion` status field are TypeScript-only.
