@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import {
   die,
   ledgerAppend,
@@ -19,6 +19,7 @@ import {
   yamlList,
   yamlScalar,
 } from './lib.ts';
+import { kitAssetPath } from './kit-assets.ts';
 
 // ---------------------------------------------------------------------------
 // Worktree bootstrap (TypeScript port of hydra/scripts/create-worktree.sh).
@@ -100,8 +101,10 @@ function resolveRoots(options: CreateWorktreeOptions): ResolvedRoots {
 }
 
 function defaultWavePath(): string {
-  const selfDir = dirname(fileURLToPath(import.meta.url));
-  return join(selfDir, '..', '..', 'hydra', 'WAVE');
+  // WAVE is per-install state written by the installer — resolve it
+  // checkout-relative (spike §9 verdict #2). HYDRA_WAVE and options.wavePath
+  // keep precedence over this default.
+  return kitAssetPath('WAVE');
 }
 
 function resolvedRunDir(runId: string, roots: ResolvedRoots): string {

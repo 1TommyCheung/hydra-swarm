@@ -53,6 +53,7 @@ import { main as runInitMain } from './run-init.ts';
 import { main as squashMain } from './squash.ts';
 import { main as statusMain } from './status.ts';
 import { main as verifyMain } from './verify.ts';
+import { initEmbeddedAssets, isCompiledBinary } from './kit-assets.ts';
 
 /** Every routed module exposes the normalized router-callable shape. */
 export type MainFn = (args: string[]) => number | Promise<number>;
@@ -133,5 +134,40 @@ const isMain = process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {
+  // Stage 1 Phase 2 (spike §10): inside a `bun build --compile` binary, embed
+  // the EMBED-set kit assets (trust-boundary schemas + seeded profiles) and
+  // hand them to kit-assets BEFORE route() runs any subcommand main() that
+  // reads them. The `with: { type: 'text' }` attribute is Bun-only — Node
+  // 22/24 reject it (spike §7) — so these must never be STATIC imports: the
+  // source lane (`node --experimental-strip-types`, cli.test.ts) loads this
+  // module too. Dynamic import() behind isCompiledBinary() keeps the
+  // attribute out of Node's loader path entirely; cli.ts is the ONLY module
+  // in the tree carrying it. The embedded-binary behavior itself is verified
+  // in Phase 3 (compile lane), not here.
+  if (isCompiledBinary()) {
+    const [resultSchema, reviewSchema, profileClaude, profileCodex, profileOpencode, profileKimi] =
+      await Promise.all([
+        // @ts-ignore -- Bun 'text'-loader asset specifier; tsc cannot resolve it (no network for typecheck here — visually confirmed, Phase 3 verifies the compile lane).
+        import('../../hydra/schemas/result.schema.json', { with: { type: 'text' } }),
+        // @ts-ignore -- Bun 'text'-loader asset specifier; see above.
+        import('../../hydra/schemas/review.schema.json', { with: { type: 'text' } }),
+        // @ts-ignore -- Bun 'text'-loader asset specifier; see above.
+        import('../../hydra/profiles/claude-fable-5.yaml', { with: { type: 'text' } }),
+        // @ts-ignore -- Bun 'text'-loader asset specifier; see above.
+        import('../../hydra/profiles/codex-gpt-5.6-sol.yaml', { with: { type: 'text' } }),
+        // @ts-ignore -- Bun 'text'-loader asset specifier; see above.
+        import('../../hydra/profiles/opencode-glm-5.2.yaml', { with: { type: 'text' } }),
+        // @ts-ignore -- Bun 'text'-loader asset specifier; see above.
+        import('../../hydra/profiles/kimi-k2.7-code.yaml', { with: { type: 'text' } }),
+      ]);
+    initEmbeddedAssets({
+      'schemas/result.schema.json': resultSchema.default,
+      'schemas/review.schema.json': reviewSchema.default,
+      'profiles/claude-fable-5.yaml': profileClaude.default,
+      'profiles/codex-gpt-5.6-sol.yaml': profileCodex.default,
+      'profiles/opencode-glm-5.2.yaml': profileOpencode.default,
+      'profiles/kimi-k2.7-code.yaml': profileKimi.default,
+    });
+  }
   process.exitCode = await route(process.argv.slice(2));
 }

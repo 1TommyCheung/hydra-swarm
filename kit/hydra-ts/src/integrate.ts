@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
+import { kitAssetPath } from './kit-assets.ts';
 import {
   ledgerAppend,
   log,
@@ -34,8 +35,9 @@ export interface IntegrateOptions {
 }
 
 function defaultVerifyPolicyPath(): string {
-  const selfDir = dirname(fileURLToPath(import.meta.url));
-  return join(selfDir, '..', '..', 'hydra', 'policies', 'verification.yaml');
+  // Per-project active config — resolve checkout-relative (spike §9 verdict
+  // #7). HYDRA_VERIFY_POLICY keeps precedence over this default.
+  return kitAssetPath('policies/verification.yaml');
 }
 
 export class IntegrationError extends Error {

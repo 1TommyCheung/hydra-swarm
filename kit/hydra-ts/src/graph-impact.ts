@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
+import { freshnessGate } from './freshness-gate.ts';
 import { die, ledgerAppend, log, runDir, warn, yamlScalar } from './lib.ts';
 
 // ---------------------------------------------------------------------------
@@ -10,7 +11,13 @@ import { die, ledgerAppend, log, runDir, warn, yamlScalar } from './lib.ts';
 // ---------------------------------------------------------------------------
 
 export interface GraphImpactDeps {
-  /** Path to the freshness-gate.sh script. Defaults to the bash script in hydra/scripts. */
+  /**
+   * Optional out-of-process freshness-gate script (test hook; also the shape
+   * the frozen HYDRA_HARNESS=bash lane uses). When omitted, the gate runs
+   * IN-PROCESS via freshness-gate.ts — the only mode that works inside a
+   * compiled binary, where a child `bash` cannot see `/$bunfs/` paths (spike
+   * §4 Test B5, exit 127; §9 verdict #3).
+   */
   freshnessGatePath?: string;
   /** Path or name of the gitnexus CLI. Defaults to "gitnexus". */
   gitnexusPath?: string;
@@ -26,11 +33,6 @@ export class GraphImpactError extends Error {
 }
 
 const ANSI_RE = /\x1B\[[0-9;]*m/g;
-
-function defaultFreshnessGatePath(): string {
-  const selfDir = dirname(fileURLToPath(import.meta.url));
-  return join(selfDir, '..', '..', 'hydra', 'scripts', 'freshness-gate.sh');
-}
 
 function checkCommand(command: string): void {
   const result = spawnSync(
@@ -91,12 +93,26 @@ export function graphImpact(
   }
 
   // Freshness gate — a stale graph result must not participate in review.
-  const freshnessGatePath = deps.freshnessGatePath ?? defaultFreshnessGatePath();
-  const freshResult = spawnSync('bash', [freshnessGatePath, runId, taskId], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  if (freshResult.status !== 0) {
+  // Default: in-process call (compiled-binary safe — a spawned bash cannot see
+  // `/$bunfs/` embedded paths, spike §4 Test B5). deps.freshnessGatePath keeps
+  // the out-of-process script path for tests and the bash lane.
+  let gateFresh: boolean;
+  if (deps.freshnessGatePath !== undefined) {
+    const freshResult = spawnSync('bash', [deps.freshnessGatePath, runId, taskId], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    gateFresh = freshResult.status === 0;
+  } else {
+    try {
+      gateFresh = freshnessGate(runId, taskId).fresh;
+    } catch {
+      // Gate errors (missing spec/worktree, git failures) mean the index is
+      // unusable — same stale_omitted outcome as the script's non-zero exit.
+      gateFresh = false;
+    }
+  }
+  if (!gateFresh) {
     ledgerAppend(
       runId,
       'graph_impact',

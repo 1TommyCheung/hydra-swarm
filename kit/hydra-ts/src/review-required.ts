@@ -1,5 +1,6 @@
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { kitAssetPath } from './kit-assets.ts';
 import { die, repoRoot, yamlList, yamlScalar } from './lib.ts';
 
 // ---------------------------------------------------------------------------
@@ -18,8 +19,10 @@ export interface ReviewOptions {
 }
 
 function defaultPolicyPath(): string {
-  const selfDir = dirname(fileURLToPath(import.meta.url));
-  return join(selfDir, '..', '..', 'hydra', 'policies', 'review-policy.yaml');
+  // Operator-meaningful policy (risk thresholds, trigger labels, vendor
+  // pairing) — resolve checkout-relative (spike §9 verdict #8). The
+  // `policyFile` option keeps precedence over this default.
+  return kitAssetPath('policies/review-policy.yaml');
 }
 
 function rank(risk: string): number {

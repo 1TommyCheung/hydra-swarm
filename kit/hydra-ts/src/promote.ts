@@ -1,12 +1,13 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   auditOwnership,
   type AuditOwnershipOptions,
   type AuditOwnershipResult,
 } from './audit-ownership.ts';
+import { kitAssetPath, kitAssetText } from './kit-assets.ts';
 import {
   ledgerAppend,
   log,
@@ -20,14 +21,20 @@ import {
 } from './lib.ts';
 import { verify, type VerifyOptions, type VerifyResult } from './verify.ts';
 
-function defaultSchemaPath(): string {
-  const selfDir = dirname(fileURLToPath(import.meta.url));
-  return join(selfDir, '..', '..', 'hydra', 'schemas', 'result.schema.json');
+/**
+ * Trust-boundary schema content. The `schema` option (tests) reads from disk
+ * and wins; the default goes through kit-assets — embedded in the compiled
+ * binary so an operator cannot weaken result validation without rebuilding,
+ * checkout file in the source lane (spike §9 verdict #4).
+ */
+function defaultSchemaText(): string {
+  return kitAssetText('schemas/result.schema.json');
 }
 
 function defaultVerifyPolicyPath(): string {
-  const selfDir = dirname(fileURLToPath(import.meta.url));
-  return join(selfDir, '..', '..', 'hydra', 'policies', 'verification.yaml');
+  // Per-project active config — resolve checkout-relative (spike §9 verdict
+  // #5). HYDRA_VERIFY_POLICY and options.verifyPolicy keep precedence.
+  return kitAssetPath('policies/verification.yaml');
 }
 
 // ---------------------------------------------------------------------------
@@ -47,9 +54,9 @@ export interface PromoteOptions {
   cwd?: string;
   /** Hydra state root; defaults to HYDRA_STATE_ROOT or lib.ts stateRoot(). */
   stateRoot?: string;
-  /** Path to result.schema.json; defaults to the self-relative hydra/schemas/result.schema.json. */
+  /** Path to result.schema.json; defaults to the kit asset (embedded when compiled, else hydra/schemas/result.schema.json from the checkout). */
   schema?: string;
-  /** Path to verification policy YAML; defaults to HYDRA_VERIFY_POLICY or the self-relative hydra/policies/verification.yaml. */
+  /** Path to verification policy YAML; defaults to HYDRA_VERIFY_POLICY or the checkout-relative hydra/policies/verification.yaml. */
   verifyPolicy?: string;
   /** Injected exec implementation for git commands. */
   exec?: ExecLike;
@@ -160,11 +167,11 @@ function validateSchema(node: unknown, sch: SchemaNode, path: string, errors: st
   }
 }
 
-function validateDrop(schemaPath: string, dropPath: string): string[] {
+function validateDrop(schemaText: string, dropPath: string): string[] {
   let schema: SchemaNode;
   let instance: unknown;
   try {
-    schema = JSON.parse(readFileSync(schemaPath, 'utf8'));
+    schema = JSON.parse(schemaText);
   } catch (e) {
     throw new Error(`cannot read/parse schema: ${(e as Error).message}`);
   }
@@ -264,9 +271,6 @@ export async function promote(
   const rDir = runDir(stateRoot, runId);
   const taskSpec = join(rDir, 'tasks', `${taskId}.yaml`);
 
-  const defaultSchema = defaultSchemaPath();
-  const schema = options.schema ? resolve(cwd, options.schema) : defaultSchema;
-
   const defaultPolicy = process.env.HYDRA_VERIFY_POLICY ?? defaultVerifyPolicyPath();
   const verifyPolicy = options.verifyPolicy ? resolve(cwd, options.verifyPolicy) : defaultPolicy;
 
@@ -276,8 +280,20 @@ export async function promote(
   if (!isFile(taskSpec)) {
     internal(`instantiated task spec not found: ${taskSpec}`);
   }
-  if (!isFile(schema)) {
-    internal(`result schema not found: ${schema}`);
+
+  let schemaText: string;
+  if (options.schema) {
+    const schemaPath = resolve(cwd, options.schema);
+    if (!isFile(schemaPath)) {
+      internal(`result schema not found: ${schemaPath}`);
+    }
+    schemaText = readFileSync(schemaPath, 'utf8');
+  } else {
+    try {
+      schemaText = defaultSchemaText();
+    } catch {
+      internal(`result schema not found: ${kitAssetPath('schemas/result.schema.json')}`);
+    }
   }
 
   appendLedger(stateRoot, runId, 'result_dropped', 'task_id', taskId, 'inbox', drop);
@@ -285,7 +301,7 @@ export async function promote(
   // --- 1. Schema validation -------------------------------------------------
   let schemaErrors: string[];
   try {
-    schemaErrors = validateDrop(schema, drop);
+    schemaErrors = validateDrop(schemaText, drop);
   } catch (error) {
     schemaErrors = [(error as Error).message];
   }

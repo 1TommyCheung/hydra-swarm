@@ -1,8 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { die, stateRoot, yamlScalar } from './lib.ts';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { die, stateRoot, YAML_BLOCK_HEADER } from './lib.ts';
+import { kitAssetText } from './kit-assets.ts';
 
 // ---------------------------------------------------------------------------
 // Allocation RECOMMENDATION (vendor-adapters.md §5).
@@ -19,17 +20,53 @@ import { die, stateRoot, yamlScalar } from './lib.ts';
 
 const MIN_N = 8; // measured drives ranking only at n>=8 (§5); else seeded priors
 
-function defaultProfilesDir(): string {
-  const selfDir = dirname(fileURLToPath(import.meta.url));
-  return join(selfDir, '..', '..', 'hydra', 'profiles');
-}
-
 const SEED_FILES: Record<string, string> = {
   claude: 'claude-fable-5.yaml',
   codex: 'codex-gpt-5.6-sol.yaml',
   opencode: 'opencode-glm-5.2.yaml',
   kimi: 'kimi-k2.7-code.yaml',
 };
+
+/**
+ * Seed profile content for a vendor. The `profilesDir` override (tests) reads
+ * from that directory on disk and wins; the default goes through kit-assets
+ * (embedded map inside a compiled binary, checkout file in the source lane —
+ * spike §9 verdict #1). A missing seed yields null, matching the old
+ * existsSync() guards.
+ */
+function readSeedText(vendor: string, profilesDir: string | undefined): string | null {
+  if (profilesDir !== undefined) {
+    const seedPath = join(profilesDir, SEED_FILES[vendor]);
+    return existsSync(seedPath) ? readFileSync(seedPath, 'utf8') : null;
+  }
+  try {
+    return kitAssetText(`profiles/${SEED_FILES[vendor]}`);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * yamlScalar (lib.ts) applied to in-memory text instead of a file path — same
+ * first-match, comment-stripping, quote-stripping semantics. Used for seed
+ * `cost_hint`, which now arrives as content rather than a path.
+ */
+function yamlScalarText(text: string, key: string): string {
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.replace(/\r$/, '');
+    const match = line.match(new RegExp(`^${key}:[\\s]*`));
+    if (match) {
+      let value = line.slice(match[0].length);
+      value = value.replace(/\s+#.*$/, '');
+      const wasQuoted = /^".*"$/.test(value.trim());
+      value = value.replace(/^"|"$/g, '');
+      value = value.replace(/\s+$/, '');
+      if (!wasQuoted && YAML_BLOCK_HEADER.test(value)) return '';
+      return value;
+    }
+  }
+  return '';
+}
 
 export interface Candidate {
   vendor: string;
@@ -84,14 +121,14 @@ function eligible(role: string): string[] {
 
 // Seeded relevance: does any seeded_strength mention the task_type stem or the
 // generic capability keywords?
-function isSeedRelevant(seedPath: string, taskType: string): boolean {
-  if (!existsSync(seedPath)) return false;
+function isSeedRelevant(seedText: string | null, taskType: string): boolean {
+  if (seedText === null) return false;
   const stem = taskType.split('_')[0];
   // The shell source interpolates the stem directly into grep -E. Preserve
   // that regex behavior; malformed patterns make grep return non-zero.
   try {
     const pattern = new RegExp(`${stem}|review|refactor|implement|visual|explor`, 'i');
-    return pattern.test(readFileSync(seedPath, 'utf8'));
+    return pattern.test(seedText);
   } catch {
     return false;
   }
@@ -160,18 +197,17 @@ export function allocate(
   const resolvedRisk = risk || 'medium';
   const stateRootPath = options.stateRoot ?? stateRoot();
 
-  const profDir = options.profilesDir ?? defaultProfilesDir();
   const measuredDir = join(stateRootPath, 'agents', 'profiles');
 
   const candidates = eligible(role).filter((v) => v !== excludeVendor);
   if (candidates.length === 0) die(`no eligible vendor for role=${role}`);
 
   const ranked: Candidate[] = candidates.map((vendor) => {
-    const seed = join(profDir, SEED_FILES[vendor]);
+    const seedText = readSeedText(vendor, options.profilesDir);
     const measured = join(measuredDir, `${vendor}.measured.json`);
-    const seedRelevant = isSeedRelevant(seed, taskType);
+    const seedRelevant = isSeedRelevant(seedText, taskType);
     const measuredStats = readMeasured(measured);
-    const cost = existsSync(seed) ? yamlScalar(seed, 'cost_hint') : '';
+    const cost = seedText !== null ? yamlScalarText(seedText, 'cost_hint') : '';
 
     return {
       vendor,

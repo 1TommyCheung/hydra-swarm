@@ -1,6 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
+import { kitAssetText } from './kit-assets.ts';
 import { die, ledgerAppend, log, repoRoot, runDir, warn } from './lib.ts';
 
 // ---------------------------------------------------------------------------
@@ -18,9 +19,13 @@ export class RecordReviewError extends Error {
   readonly exitCode = 5;
 }
 
-function defaultSchemaPath(): string {
-  const selfDir = dirname(fileURLToPath(import.meta.url));
-  return join(selfDir, '..', '..', 'hydra', 'schemas', 'review.schema.json');
+/**
+ * Trust-boundary schema content. The `schemaPath` option (tests) reads from
+ * disk and wins; the default goes through kit-assets — embedded in the
+ * compiled binary, checkout file in the source lane (spike §9 verdict #6).
+ */
+function defaultSchemaText(): string {
+  return kitAssetText('schemas/review.schema.json');
 }
 
 interface SchemaNode {
@@ -166,11 +171,11 @@ export function recordReview(
   }
 
   return withStateRoot(options.stateRoot, () => {
-    const schemaPath = options.schemaPath ?? defaultSchemaPath();
-
     let schema: SchemaNode;
     try {
-      schema = JSON.parse(readFileSync(schemaPath, 'utf8')) as SchemaNode;
+      schema = options.schemaPath !== undefined
+        ? JSON.parse(readFileSync(options.schemaPath, 'utf8')) as SchemaNode
+        : JSON.parse(defaultSchemaText()) as SchemaNode;
     } catch (e) {
       rejectReview(runId, taskId, [`cannot read/parse schema: ${(e as Error).message}`]);
     }
