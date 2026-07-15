@@ -356,7 +356,7 @@ export function reviewDispatch(
   let launchedInPane = false;
   let pane: string | undefined;
 
-  if (process.env.HYDRA_HERDR_PANES === '1') {
+  if (process.env.HYDRA_HERDR_PANES !== '0') {
     const launched = launchInPane(
       runId,
       reviewId,

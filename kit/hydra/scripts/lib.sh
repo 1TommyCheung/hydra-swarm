@@ -124,7 +124,7 @@ hydra_resolve_node() {
 # Absolute path to the main repository checkout.
 hydra_repo_root() {
   git rev-parse --show-toplevel 2>/dev/null \
-    || hydra_die "not inside a git repository"
+    || hydra_die "not inside a git repository (cwd: $PWD) — hydra resolves its state dir from the repo root; cd into the target repo (or one of its worktrees) and re-run"
 }
 
 # Stable identifier for this repository. Overridable so a clone on another

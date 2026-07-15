@@ -231,7 +231,7 @@ export function herdrPush(
         cwd,
       }).trim();
     } catch {
-      throw new Error('hydra: error: not inside a git repository');
+      throw new Error(`hydra: error: not inside a git repository (cwd: ${cwd}) — hydra resolves its state dir from the repo root; cd into the target repo (or one of its worktrees) and re-run`);
     }
   }
 

@@ -447,6 +447,6 @@ describe('CLI', () => {
 
     assert.equal(result.status, 1);
     assert.equal(result.stdout, '');
-    assert.equal(result.stderr, 'hydra: error: not inside a git repository\n');
+    assert.match(result.stderr, /^hydra: error: not inside a git repository \(cwd: .+\) — hydra resolves its state dir from the repo root/);
   });
 });

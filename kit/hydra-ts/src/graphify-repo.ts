@@ -272,7 +272,7 @@ export async function graphifyRepo(
       killGraceMs: options.killGraceMs,
     });
     if (commandFailed(discovered) || !discovered.stdout.trim()) {
-      die('not inside a git repository');
+      die(`not inside a git repository (cwd: ${process.cwd()}) — hydra resolves its state dir from the repo root; cd into the target repo (or one of its worktrees) and re-run`);
     }
     root = discovered.stdout.trim();
   } else {

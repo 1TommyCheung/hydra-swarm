@@ -117,7 +117,7 @@ on_signal() {
 }
 trap on_signal INT TERM HUP
 
-# --- Optional: host the worker in a herdr pane (HYDRA_HERDR_PANES=1) ---------
+# --- Default: host the worker in a herdr pane (set HYDRA_HERDR_PANES=0 to opt out) ---
 # herdr is the TERMINAL HOST only (like tmux): the harness still decides what to
 # launch, owns the timeout, cancels, and writes the ledger; adapters still write
 # their own session/result files, so structured capture + budget accounting are
@@ -325,7 +325,7 @@ close_opencode_monitor_pane() {
 
 run_worker() {
   local rc=0
-  if [ "$vendor" = opencode ] && [ "${HYDRA_HERDR_PANES:-0}" = 1 ] && herdr_live; then
+  if [ "$vendor" = opencode ] && [ "${HYDRA_HERDR_PANES:-1}" = 1 ] && herdr_live; then
     "$adapter" "$verb" "$task_spec" "$worktree" "$inbox" "$sessions_dir" "$agent_run_id" "$prior_session" &
     worker_pid=$!
     local monitor_pane_id
@@ -360,7 +360,7 @@ run_worker() {
     "$SELF_DIR/record-usage.sh" "$run_id" "$task_id" "$vendor" "$agent_run_id" 2>/dev/null || true
     return 0
   fi
-  if [ "${HYDRA_HERDR_PANES:-0}" = 1 ] && herdr_live; then
+  if [ "${HYDRA_HERDR_PANES:-1}" = 1 ] && herdr_live; then
     run_worker_in_herdr_pane && {
       "$SELF_DIR/record-usage.sh" "$run_id" "$task_id" "$vendor" "$agent_run_id" 2>/dev/null || true
       return 0
