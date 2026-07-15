@@ -2,6 +2,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -692,6 +693,361 @@ describe('reviewDispatch', () => {
       readFileSync(join(state, 'runs', 'run-cli-run', 'sessions', 'rev1.claude.pid'), 'utf8'),
       /^\d+\n?$/,
     );
+  });
+
+  it('live-tails codex progress events from the raw file into the pane', () => {
+    const runId = 'pane-codex-live-run';
+    const reviewId = 'rev1';
+    const sessionDir = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions');
+    const rawPath = join(sessionDir, `${reviewId}.codex.raw`);
+    const progressPath = join(sessionDir, `${reviewId}.codex.pane-progress.txt`);
+    const sentinelPath = join(sessionDir, `${reviewId}.codex.exit`);
+    const calls: Call[] = [];
+    let sleeps = 0;
+    const previousPanes = process.env.HYDRA_HERDR_PANES;
+    const previousTimeout = process.env.HYDRA_REVIEW_TIMEOUT_MIN;
+    process.env.HYDRA_HERDR_PANES = '1';
+    process.env.HYDRA_REVIEW_TIMEOUT_MIN = '1';
+
+    const exec: ExecFn = (file, args, opts) => {
+      calls.push({ file, args, cwd: opts?.cwd });
+      if (args[0] === 'status') {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      if (args[0] === 'pane' && args[1] === 'list') {
+        return {
+          stdout: JSON.stringify({
+            result: {
+              panes: [{ agent: {}, cwd: TEST_TMP, workspace_id: 'workspace-1' }],
+            },
+          }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'agent' && args[1] === 'start') {
+        return {
+          stdout: JSON.stringify({ result: { agent: { pane_id: 'pane-codex' } } }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'pane' && args[1] === 'close') {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(' ')}`);
+    };
+
+    let mdPath: string;
+    try {
+      mdPath = reviewDispatch(
+        runId,
+        reviewId,
+        'codex',
+        writePrompt('codex pane review'),
+        options({
+          exec,
+          sleep: (ms) => {
+            assert.equal(ms, 3000);
+            sleeps += 1;
+            if (sleeps === 1) {
+              writeFileSync(
+                rawPath,
+                [
+                  JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'Analyzing the codebase' } }),
+                  JSON.stringify({ type: 'item.started', item: { type: 'command_execution', command: 'npm run test' } }),
+                  JSON.stringify({ type: 'item.started', item: { type: 'file_change', changes: [{ path: 'src/foo.ts' }] } }),
+                ].join('\n') + '\n',
+                'utf8',
+              );
+            } else {
+              // Trailing event written just before the sentinel; final poll must catch it.
+              appendFileSync(
+                rawPath,
+                `${JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'Review complete' } })}\n`,
+                'utf8',
+              );
+              writeFileSync(sentinelPath, '0', 'utf8');
+            }
+          },
+        }),
+      );
+    } finally {
+      restoreEnv('HYDRA_HERDR_PANES', previousPanes);
+      restoreEnv('HYDRA_REVIEW_TIMEOUT_MIN', previousTimeout);
+    }
+
+    const agentStart = calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'start');
+    assert.ok(agentStart);
+    const command = agentStart!.args[agentStart!.args.length - 1];
+    assert.match(command, /tail -n \+1 -f/);
+    assert.match(command, /TPID=/);
+    assert.match(command, /kill \$TPID/);
+
+    const progress = readFileSync(progressPath, 'utf8');
+    assert.match(progress, /Analyzing the codebase/);
+    assert.match(progress, /\[cmd\] npm run test/);
+    assert.match(progress, /\[edit\] foo\.ts/);
+    assert.match(progress, /Review complete/);
+    assert.equal(readFileSync(mdPath!, 'utf8').trim(), 'Review complete');
+  });
+
+  it('live-tails kimi progress events from the raw file into the pane', () => {
+    const runId = 'pane-kimi-live-run';
+    const reviewId = 'rev1';
+    const sessionDir = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions');
+    const rawPath = join(sessionDir, `${reviewId}.kimi.raw`);
+    const progressPath = join(sessionDir, `${reviewId}.kimi.pane-progress.txt`);
+    const sentinelPath = join(sessionDir, `${reviewId}.kimi.exit`);
+    const calls: Call[] = [];
+    let sleeps = 0;
+    const previousPanes = process.env.HYDRA_HERDR_PANES;
+    const previousTimeout = process.env.HYDRA_REVIEW_TIMEOUT_MIN;
+    process.env.HYDRA_HERDR_PANES = '1';
+    process.env.HYDRA_REVIEW_TIMEOUT_MIN = '1';
+
+    const exec: ExecFn = (file, args, opts) => {
+      calls.push({ file, args, cwd: opts?.cwd });
+      if (args[0] === 'status') {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      if (args[0] === 'pane' && args[1] === 'list') {
+        return {
+          stdout: JSON.stringify({
+            result: {
+              panes: [{ agent: {}, cwd: TEST_TMP, workspace_id: 'workspace-1' }],
+            },
+          }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'agent' && args[1] === 'start') {
+        return {
+          stdout: JSON.stringify({ result: { agent: { pane_id: 'pane-kimi' } } }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'pane' && args[1] === 'close') {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(' ')}`);
+    };
+
+    let mdPath: string;
+    try {
+      mdPath = reviewDispatch(
+        runId,
+        reviewId,
+        'kimi',
+        writePrompt('kimi pane review'),
+        options({
+          exec,
+          sleep: (ms) => {
+            assert.equal(ms, 3000);
+            sleeps += 1;
+            if (sleeps === 1) {
+              writeFileSync(
+                rawPath,
+                [
+                  JSON.stringify({ role: 'assistant', content: 'Inspecting the codebase' }),
+                  JSON.stringify({ role: 'meta', type: 'session.resume_hint', content: 'hint' }),
+                  JSON.stringify({ role: 'assistant', content: 'Planning the review' }),
+                ].join('\n') + '\n',
+                'utf8',
+              );
+            } else {
+              appendFileSync(
+                rawPath,
+                `${JSON.stringify({ role: 'assistant', content: 'Review complete' })}\n`,
+                'utf8',
+              );
+              writeFileSync(sentinelPath, '0', 'utf8');
+            }
+          },
+        }),
+      );
+    } finally {
+      restoreEnv('HYDRA_HERDR_PANES', previousPanes);
+      restoreEnv('HYDRA_REVIEW_TIMEOUT_MIN', previousTimeout);
+    }
+
+    const agentStart = calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'start');
+    assert.ok(agentStart);
+    const command = agentStart!.args[agentStart!.args.length - 1];
+    assert.match(command, /tail -n \+1 -f/);
+    assert.match(command, /TPID=/);
+    assert.match(command, /kill \$TPID/);
+
+    const progress = readFileSync(progressPath, 'utf8');
+    assert.match(progress, /Inspecting the codebase/);
+    assert.match(progress, /Planning the review/);
+    assert.match(progress, /Review complete/);
+    assert.doesNotMatch(progress, /hint/);
+    assert.equal(readFileSync(mdPath!, 'utf8').trim(), 'Review complete');
+  });
+
+  it('uses the PLAIN wrapper (no live tail) for codex/kimi when herdr is disabled -- nothing polls the progress file in that path', () => {
+    for (const vendor of ['codex', 'kimi'] as const) {
+      const runId = `no-pane-${vendor}-run`;
+      const reviewId = 'rev1';
+      let fallbackCommand: string | undefined;
+
+      reviewDispatch(
+        runId,
+        reviewId,
+        vendor,
+        writePrompt(`${vendor} review without a pane`),
+        options({
+          // HYDRA_HERDR_PANES defaults to '0' in this suite (see the outer
+          // before()); no exec branches for 'status'/'pane'/'agent' means
+          // launchInPane must never be attempted here.
+          exec: (file, args) => {
+            if (file === 'bash' && args[0] === '-lc') {
+              fallbackCommand = args[1];
+              return {
+                stdout: JSON.stringify({ role: 'assistant', content: 'ok' }),
+                stderr: '',
+                exitCode: 0,
+              };
+            }
+            throw new Error(`unexpected exec: ${file} ${args.join(' ')}`);
+          },
+        }),
+      );
+
+      assert.ok(fallbackCommand, `${vendor}: fallback command must have run`);
+      assert.doesNotMatch(fallbackCommand!, /tail -n \+1 -f/, `${vendor} fallback must not spawn a live tail`);
+      assert.doesNotMatch(fallbackCommand!, /TPID/, `${vendor} fallback must not reference TPID`);
+      assert.doesNotMatch(fallbackCommand!, /pane-progress\.txt/, `${vendor} fallback must not touch a progress file`);
+    }
+  });
+
+  it('does not create a live progress tail for claude reviewer panes', () => {
+    const runId = 'pane-claude-no-live-run';
+    const reviewId = 'rev1';
+    const sessionDir = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions');
+    const progressPath = join(sessionDir, `${reviewId}.claude.pane-progress.txt`);
+    const sentinelPath = join(sessionDir, `${reviewId}.claude.exit`);
+    const calls: Call[] = [];
+    const previousPanes = process.env.HYDRA_HERDR_PANES;
+    const previousTimeout = process.env.HYDRA_REVIEW_TIMEOUT_MIN;
+    process.env.HYDRA_HERDR_PANES = '1';
+    process.env.HYDRA_REVIEW_TIMEOUT_MIN = '1';
+
+    const exec: ExecFn = (file, args, opts) => {
+      calls.push({ file, args, cwd: opts?.cwd });
+      if (args[0] === 'status') {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      if (args[0] === 'pane' && args[1] === 'list') {
+        return {
+          stdout: JSON.stringify({ result: { panes: [{ agent: {}, cwd: TEST_TMP, workspace_id: 'workspace-1' }] } }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'agent' && args[1] === 'start') {
+        return {
+          stdout: JSON.stringify({ result: { agent: { pane_id: 'pane-claude' } } }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'pane' && args[1] === 'close') {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(' ')}`);
+    };
+
+    try {
+      reviewDispatch(
+        runId,
+        reviewId,
+        'claude',
+        writePrompt('claude pane review'),
+        options({
+          exec,
+          sleep: () => {
+            writeFileSync(sentinelPath, '0', 'utf8');
+          },
+        }),
+      );
+    } finally {
+      restoreEnv('HYDRA_HERDR_PANES', previousPanes);
+      restoreEnv('HYDRA_REVIEW_TIMEOUT_MIN', previousTimeout);
+    }
+
+    const agentStart = calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'start');
+    assert.ok(agentStart);
+    const command = agentStart!.args[agentStart!.args.length - 1];
+    assert.doesNotMatch(command, /tail -n \+1 -f/);
+    assert.doesNotMatch(command, /TPID/);
+    assert.equal(existsSync(progressPath), false);
+  });
+
+  it('does not create a live progress tail for opencode reviewer panes', () => {
+    const runId = 'pane-opencode-no-live-run';
+    const reviewId = 'rev1';
+    const sessionDir = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions');
+    const progressPath = join(sessionDir, `${reviewId}.opencode.pane-progress.txt`);
+    const sentinelPath = join(sessionDir, `${reviewId}.opencode.exit`);
+    const calls: Call[] = [];
+    const previousPanes = process.env.HYDRA_HERDR_PANES;
+    const previousTimeout = process.env.HYDRA_REVIEW_TIMEOUT_MIN;
+    process.env.HYDRA_HERDR_PANES = '1';
+    process.env.HYDRA_REVIEW_TIMEOUT_MIN = '1';
+
+    const exec: ExecFn = (file, args, opts) => {
+      calls.push({ file, args, cwd: opts?.cwd });
+      if (args[0] === 'status') {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      if (args[0] === 'pane' && args[1] === 'list') {
+        return {
+          stdout: JSON.stringify({ result: { panes: [{ agent: {}, cwd: TEST_TMP, workspace_id: 'workspace-1' }] } }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'agent' && args[1] === 'start') {
+        return {
+          stdout: JSON.stringify({ result: { agent: { pane_id: 'pane-opencode' } } }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'pane' && args[1] === 'close') {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(' ')}`);
+    };
+
+    try {
+      reviewDispatch(
+        runId,
+        reviewId,
+        'opencode',
+        writePrompt('opencode pane review'),
+        options({
+          exec,
+          sleep: () => {
+            writeFileSync(sentinelPath, '0', 'utf8');
+          },
+        }),
+      );
+    } finally {
+      restoreEnv('HYDRA_HERDR_PANES', previousPanes);
+      restoreEnv('HYDRA_REVIEW_TIMEOUT_MIN', previousTimeout);
+    }
+
+    const agentStart = calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'start');
+    assert.ok(agentStart);
+    const command = agentStart!.args[agentStart!.args.length - 1];
+    assert.doesNotMatch(command, /tail -n \+1 -f/);
+    assert.doesNotMatch(command, /TPID/);
+    assert.equal(existsSync(progressPath), false);
   });
 });
 

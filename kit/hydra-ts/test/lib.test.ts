@@ -2,6 +2,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -17,6 +18,10 @@ import {
   yamlList,
   now,
   deriveDropFromGit,
+  codexEventText,
+  kimiEventText,
+  pollJsonlFile,
+  type JsonlTailState,
 } from '../src/lib.ts';
 
 const TEST_TMP = join(import.meta.dirname, 'tmp');
@@ -424,5 +429,133 @@ describe('deriveDropFromGit', () => {
     const ok = deriveDropFromGit(spec, worktree, 'codex', 'sess3', out);
     assert.equal(ok, false);
     assert.equal(existsSync(out), false);
+  });
+});
+
+describe('codexEventText', () => {
+  it('extracts completed agent messages', () => {
+    assert.equal(
+      codexEventText(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } })),
+      'done',
+    );
+  });
+
+  it('extracts started command executions with a capped display', () => {
+    const longCommand = 'npm\nrun\ntest' + 'x'.repeat(200);
+    assert.equal(
+      codexEventText(JSON.stringify({ type: 'item.started', item: { type: 'command_execution', command: longCommand } })),
+      `\n[cmd] ${longCommand.replaceAll('\n', ' ').slice(0, 140)}`,
+    );
+  });
+
+  it('extracts file changes with basenames', () => {
+    assert.equal(
+      codexEventText(JSON.stringify({
+        type: 'item.started',
+        item: { type: 'file_change', changes: [{ path: 'src/foo.ts' }, { path: 'src/bar.ts' }] },
+      })),
+      '\n[edit] foo.ts, bar.ts',
+    );
+  });
+
+  it('extracts mcp tool calls', () => {
+    assert.equal(
+      codexEventText(JSON.stringify({ type: 'item.started', item: { type: 'mcp_tool_call', server: 'fs', tool: 'read' } })),
+      '\n[tool] fs.read',
+    );
+  });
+
+  it('ignores unsupported events and malformed lines', () => {
+    assert.equal(codexEventText(JSON.stringify({ type: 'item.started', item: { type: 'agent_message', text: 'ignored' } })), undefined);
+    assert.equal(codexEventText('{malformed'), undefined);
+    assert.equal(codexEventText(''), undefined);
+    assert.equal(codexEventText('null'), undefined);
+    assert.equal(codexEventText(JSON.stringify([1, 2, 3])), undefined);
+  });
+});
+
+describe('kimiEventText', () => {
+  it('extracts assistant content', () => {
+    assert.equal(kimiEventText(JSON.stringify({ role: 'assistant', content: 'hello' })), 'hello');
+  });
+
+  it('ignores empty assistant content and other roles', () => {
+    assert.equal(kimiEventText(JSON.stringify({ role: 'assistant', content: '' })), undefined);
+    assert.equal(kimiEventText(JSON.stringify({ role: 'user', content: 'hi' })), undefined);
+    assert.equal(kimiEventText(JSON.stringify({ role: 'tool', tool_call_id: 't1', content: 'result' })), undefined);
+  });
+
+  it('ignores malformed and non-object lines', () => {
+    assert.equal(kimiEventText('{malformed'), undefined);
+    assert.equal(kimiEventText('null'), undefined);
+    assert.equal(kimiEventText(JSON.stringify([1, 2, 3])), undefined);
+    assert.equal(kimiEventText('"bare string"'), undefined);
+  });
+});
+
+describe('pollJsonlFile', () => {
+  const DIR = join(TEST_TMP, 'poll');
+
+  before(() => mkdirSync(DIR, { recursive: true }));
+  after(cleanTmp);
+
+  it('parses new complete lines and appends extracted text', () => {
+    const events = join(DIR, 'events.jsonl');
+    const output = join(DIR, 'output.txt');
+    writeFileSync(
+      events,
+      [
+        JSON.stringify({ role: 'assistant', content: 'first' }),
+        JSON.stringify({ role: 'assistant', content: 'second' }),
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const state: JsonlTailState = { offset: 0 };
+    pollJsonlFile(events, output, kimiEventText, state);
+
+    assert.equal(readFileSync(output, 'utf8'), 'first\nsecond\n');
+    assert.equal(state.offset, readFileSync(events, 'utf8').length);
+  });
+
+  it('waits for a trailing newline unless polling final', () => {
+    const events = join(DIR, 'events2.jsonl');
+    const output = join(DIR, 'output2.txt');
+    writeFileSync(events, JSON.stringify({ role: 'assistant', content: 'partial' }), 'utf8');
+    const state: JsonlTailState = { offset: 0 };
+    pollJsonlFile(events, output, kimiEventText, state);
+    assert.equal(existsSync(output), false);
+
+    pollJsonlFile(events, output, kimiEventText, state, true);
+    assert.equal(readFileSync(output, 'utf8'), 'partial\n');
+  });
+
+  it('resumes from the previous offset when appending', () => {
+    const events = join(DIR, 'events3.jsonl');
+    const output = join(DIR, 'output3.txt');
+    writeFileSync(
+      events,
+      [JSON.stringify({ role: 'assistant', content: 'one' }), ''].join('\n'),
+      'utf8',
+    );
+    const state: JsonlTailState = { offset: 0 };
+    pollJsonlFile(events, output, kimiEventText, state);
+
+    appendFileSync(
+      events,
+      `${JSON.stringify({ role: 'assistant', content: 'two' })}\n`,
+      'utf8',
+    );
+    pollJsonlFile(events, output, kimiEventText, state);
+
+    assert.equal(readFileSync(output, 'utf8'), 'one\ntwo\n');
+  });
+
+  it('tolerates a missing events file', () => {
+    const events = join(DIR, 'missing.jsonl');
+    const output = join(DIR, 'output4.txt');
+    const state: JsonlTailState = { offset: 0 };
+    assert.doesNotThrow(() => pollJsonlFile(events, output, kimiEventText, state));
+    assert.equal(existsSync(output), false);
   });
 });

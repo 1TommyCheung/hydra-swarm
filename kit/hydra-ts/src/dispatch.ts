@@ -17,7 +17,20 @@ import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildWorkerPrompt } from './build-worker-prompt.ts';
 import { type LedgerEntry } from './current-attempt.ts';
-import { die, herdrState, killTree, log, now, stateRoot, warn, yamlScalar } from './lib.ts';
+import {
+  codexEventText,
+  die,
+  herdrState,
+  killTree,
+  kimiEventText,
+  log,
+  now,
+  pollJsonlFile,
+  stateRoot,
+  type JsonlTailState,
+  warn,
+  yamlScalar,
+} from './lib.ts';
 import { recordUsage } from './record-usage.ts';
 import {
   createLoopDetectorState,
@@ -625,94 +638,7 @@ function writePaneBanner(ctx: WorkerContext, label: string): string {
   return bannerPath;
 }
 
-function codexEventText(line: string): string | undefined {
-  let event: {
-    type?: string;
-    item?: {
-      type?: string;
-      text?: string;
-      command?: string;
-      changes?: Array<{ path?: string }>;
-      server?: string;
-      tool?: string;
-    };
-  };
-  try {
-    event = JSON.parse(line) as typeof event;
-  } catch {
-    return undefined;
-  }
-  const type = event.type;
-  const item = event.item;
-  if (!item) return undefined;
-
-  if (type === 'item.completed' && item.type === 'agent_message' && item.text) {
-    return item.text;
-  }
-  if (type === 'item.started' && item.type === 'command_execution' && item.command) {
-    const cmd = item.command.split('\n').join(' ').slice(0, 140);
-    return `\n[cmd] ${cmd}`;
-  }
-  if (type === 'item.started' && item.type === 'file_change') {
-    const paths = (item.changes ?? [])
-      .map((change) => {
-        const parts = (change.path ?? '').split('/');
-        return parts[parts.length - 1] ?? '';
-      })
-      .filter((segment) => segment !== '')
-      .join(', ');
-    return `\n[edit] ${paths}`;
-  }
-  if (type === 'item.started' && item.type === 'mcp_tool_call') {
-    return `\n[tool] ${item.server ?? ''}.${item.tool ?? ''}`;
-  }
-  return undefined;
-}
-
-export function kimiEventText(line: string): string | undefined {
-  let event: { role?: string; content?: unknown };
-  try {
-    event = JSON.parse(line) as typeof event;
-  } catch {
-    return undefined;
-  }
-  if (typeof event !== 'object' || event === null || Array.isArray(event)) return undefined;
-  if (event.role === 'assistant' && typeof event.content === 'string' && event.content !== '') {
-    return event.content;
-  }
-  return undefined;
-}
-
-interface JsonlTailState {
-  offset: number;
-}
-
-function pollJsonlFile(
-  eventsPath: string,
-  outputPath: string,
-  parseEvent: (line: string) => string | undefined,
-  state: JsonlTailState,
-  final = false,
-): void {
-  try {
-    const contents = readFileSync(eventsPath);
-    if (contents.length < state.offset) state.offset = 0;
-    const available = contents.subarray(state.offset);
-    const lastNewline = available.lastIndexOf(0x0a);
-    const consumed = final ? available.length : lastNewline + 1;
-    if (consumed > 0) {
-      const lines = available.subarray(0, consumed).toString('utf8').split('\n');
-      for (const line of lines) {
-        if (!line) continue;
-        const text = parseEvent(line);
-        if (text !== undefined) appendFileSync(outputPath, `${text}\n`, 'utf8');
-      }
-      state.offset += consumed;
-    }
-  } catch {
-    // The adapter creates capture files lazily; missing/partial files are normal.
-  }
-}
+export { codexEventText, kimiEventText, type JsonlTailState, pollJsonlFile } from './lib.ts';
 
 function monitorEventText(line: string): string | undefined {
   let event: { part?: { type?: unknown; text?: unknown; tool?: unknown; state?: { title?: unknown } } };

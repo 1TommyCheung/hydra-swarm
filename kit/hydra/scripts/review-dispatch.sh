@@ -45,13 +45,47 @@ rm -f "$sentinel" "$pidfile"
 # Build the vendor's READ-ONLY review command. The prompt comes from a file so
 # quoting is safe.
 case "$vendor" in
-  codex)    inner_cmd="codex exec --json -s read-only -C '$repo_root' \"\$(cat '$prompt_file')\" > '$raw' 2>&1" ;;
-  kimi)     inner_cmd="kimi -p \"\$(cat '$prompt_file')\" --output-format stream-json --add-dir '$repo_root' ${image:+--add-dir '$(dirname "$image")'} > '$raw' 2>&1" ;;
-  claude)   inner_cmd="claude -p \"\$(cat '$prompt_file')\" --output-format json --add-dir '$repo_root' > '$raw' 2>&1" ;;
-  opencode) inner_cmd="opencode run --model \"\${HYDRA_OPENCODE_MODEL:-zai-coding-plan/glm-5.2}\" --agent hydra-reviewer --format json --auto --dir '$repo_root' \"\$(cat '$prompt_file')\" > '$raw' 2>&1" ;;
+  codex)
+    # Live progress: codex --json emits NDJSON to stdout, so tail the raw file
+    # through a jq filter in the pane while the review runs. Matches dispatch.sh.
+    codex_filter='
+      if .type=="item.completed" and .item.type=="agent_message" and ((.item.text//"")!="") then .item.text
+      elif .type=="item.started" and .item.type=="command_execution" and ((.item.command//"")!="")
+        then ("\n[cmd] " + ((.item.command|gsub("\n";" ")) | .[0:140]))
+      elif .type=="item.started" and .item.type=="file_change"
+        then ("\n[edit] " + ([.item.changes[].path] | map(split("/")|last) | join(", ")))
+      elif .type=="item.started" and .item.type=="mcp_tool_call"
+        then ("\n[tool] " + (.item.server//"") + "." + (.item.tool//""))
+      else empty end'
+    inner_cmd="codex exec --json -s read-only -C '$repo_root' \"\$(cat '$prompt_file')\" > '$raw' 2>&1"
+    plain_wrapped="echo \$\$ > '$pidfile'; $inner_cmd; printf '%s' \$? > '$sentinel'"
+    # `tail | jq &` would make $! capture jq's PID (the pipeline's LAST
+    # command), not tail's -- killing that leaves `tail -f` orphaned forever.
+    # `tail ... > >(jq ...)` backgrounds tail alone (jq runs as bash's own
+    # process-substitution job, reading from a FIFO tail writes to), so $!
+    # is genuinely tail's PID; killing it closes the FIFO and jq exits on
+    # its own EOF, no separate tracking needed for it.
+    wrapped="echo \$\$ > '$pidfile'; touch '$raw' 2>/dev/null; tail -n +1 -f '$raw' 2>/dev/null > >(jq --unbuffered -r '$codex_filter' 2>/dev/null) & TPID=\$!; $inner_cmd; RC=\$?; kill \$TPID 2>/dev/null; printf '%s' \$RC > '$sentinel'"
+    ;;
+  kimi)
+    # Live progress: kimi --output-format stream-json emits NDJSON to stdout.
+    kimi_filter='if .role == "assistant" and ((.content // "") != "") then .content else empty end'
+    inner_cmd="kimi -p \"\$(cat '$prompt_file')\" --output-format stream-json --add-dir '$repo_root' ${image:+--add-dir '$(dirname "$image")'} > '$raw' 2>&1"
+    plain_wrapped="echo \$\$ > '$pidfile'; $inner_cmd; printf '%s' \$? > '$sentinel'"
+    wrapped="echo \$\$ > '$pidfile'; touch '$raw' 2>/dev/null; tail -n +1 -f '$raw' 2>/dev/null > >(jq --unbuffered -r '$kimi_filter' 2>/dev/null) & TPID=\$!; $inner_cmd; RC=\$?; kill \$TPID 2>/dev/null; printf '%s' \$RC > '$sentinel'"
+    ;;
+  claude)
+    inner_cmd="claude -p \"\$(cat '$prompt_file')\" --output-format json --add-dir '$repo_root' > '$raw' 2>&1"
+    plain_wrapped="echo \$\$ > '$pidfile'; $inner_cmd; printf '%s' \$? > '$sentinel'"
+    wrapped="$plain_wrapped"
+    ;;
+  opencode)
+    inner_cmd="opencode run --model \"\${HYDRA_OPENCODE_MODEL:-zai-coding-plan/glm-5.2}\" --agent hydra-reviewer --format json --auto --dir '$repo_root' \"\$(cat '$prompt_file')\" > '$raw' 2>&1"
+    plain_wrapped="echo \$\$ > '$pidfile'; $inner_cmd; printf '%s' \$? > '$sentinel'"
+    wrapped="$plain_wrapped"
+    ;;
   *) hydra_die "unknown vendor: $vendor" ;;
 esac
-wrapped="echo \$\$ > '$pidfile'; $inner_cmd; printf '%s' \$? > '$sentinel'"
 
 hydra_ledger_append "$run_id" review_started review_id "$review_id" vendor "$vendor"
 
@@ -82,8 +116,9 @@ if [ "${HYDRA_HERDR_PANES:-0}" = 1 ] && launch_in_pane; then
     herdr pane close "$HERDR_PANE" >/dev/null 2>&1 && hydra_log "closed reviewer pane $HERDR_PANE"
   fi
 else
-  # Fallback: run inline (no herdr).
-  ( cd "$repo_root" && bash -lc "$wrapped" ) || true
+  # Fallback: run inline (no herdr). Always the PLAIN wrapper -- no pane
+  # means no progress-file observer.
+  ( cd "$repo_root" && bash -lc "$plain_wrapped" ) || true
 fi
 
 # Extract the final assistant message per vendor stream format.

@@ -10,14 +10,18 @@ import { constants as osConstants } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
+  codexEventText,
   die,
   herdrState,
   killTree,
+  kimiEventText,
   ledgerAppend,
   log,
+  pollJsonlFile,
   repoRoot,
   runDir,
   stateRoot,
+  type JsonlTailState,
 } from './lib.ts';
 
 // ---------------------------------------------------------------------------
@@ -304,6 +308,10 @@ function sleepMs(ms: number): void {
   spawnSync('sleep', [String(ms / 1000)], { encoding: 'utf8', stdio: 'ignore' });
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point.
 // ---------------------------------------------------------------------------
@@ -338,6 +346,7 @@ export function reviewDispatch(
   const raw = join(sessions, `${reviewId}.${vendor}.raw`);
   const sentinel = join(sessions, `${reviewId}.${vendor}.exit`);
   const pidfile = join(sessions, `${reviewId}.${vendor}.pid`);
+  const progressPath = join(sessions, `${reviewId}.${vendor}.pane-progress.txt`);
 
   rmSync(sentinel, { force: true });
   rmSync(pidfile, { force: true });
@@ -345,11 +354,41 @@ export function reviewDispatch(
   const prompt = readFileSync(promptFile, 'utf8');
   const { file, args } = vendorCommand(vendor, prompt, repoRootPath, options.image);
 
-  // For a herdr pane we need a shell command string that writes its own pid,
-  // runs the vendor, and records the exit code.
-  const wrapped = `echo $$ > '${pidfile}'; ${file} ${args
+  const usesLiveProgressPane = vendor === 'codex' || vendor === 'kimi';
+  const liveProgressTailState: JsonlTailState = { offset: 0 };
+  const parseLiveProgress = vendor === 'kimi' ? kimiEventText : codexEventText;
+  const pollLiveProgress = (final = false): void => {
+    if (!usesLiveProgressPane) return;
+    pollJsonlFile(raw, progressPath, parseLiveProgress, liveProgressTailState, final);
+  };
+
+  // The plain wrapper writes its own pid, runs the vendor, and records the
+  // exit code -- no live tail. This is what the inline/fallback path always
+  // uses (herdr disabled, or pane launch fails): nothing polls the progress
+  // file in that path (the supervisor's poll loop only runs while a pane is
+  // actually hosting the run), so giving codex/kimi the live wrapper there
+  // would spawn a pointless background tail process for no observer.
+  const plainWrapped = `echo $$ > '${pidfile}'; ${file} ${args
     .map((a) => `'${a.replace(/'/g, "'\\''")}'`)
     .join(' ')} > '${raw}' 2>&1; printf '%s' $? > '${sentinel}'`;
+
+  // The live wrapper additionally tails a progress file into the pane's own
+  // terminal while the vendor command runs, for codex/kimi specifically --
+  // used ONLY for an actual pane-launch attempt.
+  let wrapped = plainWrapped;
+  if (usesLiveProgressPane) {
+    const inner = `${shellQuote(file)} ${args.map(shellQuote).join(' ')} > ${shellQuote(raw)} 2>&1`;
+    wrapped = [
+      `echo $$ > ${shellQuote(pidfile)}`,
+      `set +e`,
+      `touch ${shellQuote(progressPath)} 2>/dev/null`,
+      `tail -n +1 -f ${shellQuote(progressPath)} 2>/dev/null & TPID=$!`,
+      `${inner}`,
+      `RC=$?`,
+      `kill $TPID 2>/dev/null`,
+      `printf '%s' $RC > ${shellQuote(sentinel)}`,
+    ].join('; ');
+  }
 
   appendLedger(stateRootPath, runId, 'review_started', 'review_id', reviewId, 'vendor', vendor);
 
@@ -368,6 +407,9 @@ export function reviewDispatch(
     if (launched) {
       launchedInPane = true;
       pane = launched.pane;
+      if (usesLiveProgressPane) {
+        try { writeFileSync(progressPath, '', 'utf8'); } catch { /* best effort — pane uses touch */ }
+      }
       appendLedger(
         stateRootPath,
         runId,
@@ -394,7 +436,9 @@ export function reviewDispatch(
         (Date.now() - start) / 1000 < limitSeconds
       ) {
         sleep(3000);
+        pollLiveProgress();
       }
+      pollLiveProgress(true);
 
       if (!existsSync(sentinel) && existsSync(pidfile)) {
         const pid = Number(readFileSync(pidfile, 'utf8').trim());
@@ -411,9 +455,10 @@ export function reviewDispatch(
     }
   }
 
-  // Fallback: run inline when herdr is disabled or unavailable.
+  // Fallback: run inline when herdr is disabled or unavailable. Always the
+  // PLAIN wrapper -- no pane means no progress-file observer.
   if (!launchedInPane) {
-    const result = exec('bash', ['-lc', wrapped], { cwd: repoRootPath });
+    const result = exec('bash', ['-lc', plainWrapped], { cwd: repoRootPath });
     // A real shell writes these files from wrapped. Preserve useful command
     // errors for injected runners or a shell that fails before redirection.
     if (!existsSync(raw)) {
