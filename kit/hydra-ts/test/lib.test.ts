@@ -236,6 +236,41 @@ next: value
     const file = writeFixture('block', `cmd: echo a > b\n`);
     assert.equal(yamlBlock(file, 'cmd'), 'echo a > b');
   });
+
+  it('preserves indentation beyond the block\'s own base indent (nested content survives)', () => {
+    const file = writeFixture('block', `reason: |
+  Keep relative indentation:
+    child instruction
+      nested instruction
+next: value
+`);
+    const block = yamlBlock(file, 'reason');
+    assert.equal(
+      block,
+      'Keep relative indentation:\n  child instruction\n    nested instruction',
+    );
+  });
+
+  it('strips a trailing comment from an inline value, matching yamlScalar', () => {
+    const file = writeFixture('block', 'reason: Fix this # literal hash\n');
+    assert.equal(yamlBlock(file, 'reason'), 'Fix this');
+    assert.equal(yamlScalar(file, 'reason'), 'Fix this');
+  });
+
+  it('recognizes chomping/indentation block-header variants (|-, |+, >-, >+)', () => {
+    for (const header of ['|', '|-', '|+', '>', '>-', '>+']) {
+      const file = writeFixture('block', `reason: ${header}\n  content line\nnext: value\n`);
+      assert.equal(yamlBlock(file, 'reason'), 'content line', `header ${header}`);
+    }
+  });
+
+  it('returns empty (not the literal marker) for a block header with no content', () => {
+    const file = writeFixture('block', 'reason: |\n\nnext: value\n');
+    assert.equal(yamlBlock(file, 'reason'), '');
+    // The scalar reader, used as a fallback by callers, must not misread
+    // the bare header line as if "|" were real content either.
+    assert.equal(yamlScalar(file, 'reason'), '');
+  });
 });
 
 describe('yamlList', () => {

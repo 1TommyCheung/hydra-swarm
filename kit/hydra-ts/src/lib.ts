@@ -334,22 +334,41 @@ export function yamlList(file: string, key: string): string[] {
   return items;
 }
 
+// Any valid YAML block-scalar header: `|`, `>`, optionally followed by a
+// chomping indicator (`-`/`+`) and/or an explicit indentation digit.
+export const YAML_BLOCK_HEADER = /^[|>][+-]?\d*$/;
+
 export function yamlBlock(file: string, key: string): string {
   const lines = readLines(file);
   const collected: string[] = [];
   let grab = false;
+  let baseIndent: number | null = null;
   for (const rawLine of lines) {
     const line = rawLine.replace(/\r$/, '');
     const headerMatch = line.match(new RegExp(`^${key}:[\\s]*(.*)$`));
     if (headerMatch && !grab) {
       const rest = headerMatch[1].trim();
-      if (rest && rest !== '|' && rest !== '>') return rest;
+      if (rest && !YAML_BLOCK_HEADER.test(rest)) {
+        // Inline scalar on the header line -- strip a trailing comment and
+        // surrounding quotes the same way yamlScalar does, so a single-line
+        // value behaves identically regardless of which reader is used.
+        return rest.replace(/\s+#.*$/, '').replace(/^"|"$/g, '').trim();
+      }
       grab = true;
       continue;
     }
     if (grab) {
       if (/^\S/.test(line)) break;
-      collected.push(line.replace(/^\s+/, '').replace(/\s+$/, ''));
+      // Strip only the block's own base indentation (set by the first
+      // non-blank continuation line), not all leading whitespace -- content
+      // indented further than the base (nested lists, code) must survive.
+      if (line !== '' && baseIndent === null) {
+        baseIndent = line.match(/^\s*/)?.[0].length ?? 0;
+      }
+      const stripped = baseIndent !== null && line.length >= baseIndent
+        ? line.slice(baseIndent)
+        : line.replace(/^\s+/, '');
+      collected.push(stripped.replace(/\s+$/, ''));
     }
   }
   while (collected[0] === '') collected.shift();
@@ -366,6 +385,11 @@ export function yamlScalar(file: string, key: string): string {
       value = value.replace(/\s+#.*$/, '');
       value = value.replace(/^"|"$/g, '');
       value = value.replace(/\s+$/, '');
+      // A bare block-scalar header (e.g. from an empty/whitespace-only block
+      // body, or a caller that mistakenly used the scalar reader on a block
+      // field) is never legitimate plain-scalar content -- treat it as
+      // absent rather than returning the literal marker text.
+      if (YAML_BLOCK_HEADER.test(value)) return '';
       return value;
     }
   }

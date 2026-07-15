@@ -9,7 +9,7 @@ import {
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { dispatch } from './dispatch.ts';
-import { die, ledgerAppend, log, runDir, yamlScalar } from './lib.ts';
+import { die, ledgerAppend, log, runDir, YAML_BLOCK_HEADER, yamlScalar } from './lib.ts';
 
 // ---------------------------------------------------------------------------
 // Task-spec amendment (TypeScript port of the historical shell harness).
@@ -153,7 +153,7 @@ export function rewriteTaskSpec(
       out.push(`spec_version: ${toV}`);
     } else if (dropKeys.test(line)) {
       const header = line.slice(line.indexOf(':') + 1).trim();
-      if (header === '' || header === '|' || header === '>') skippingBlock = true;
+      if (header === '' || YAML_BLOCK_HEADER.test(header)) skippingBlock = true;
     } else {
       out.push(line);
     }

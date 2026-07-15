@@ -416,15 +416,26 @@ hydra_yaml_list() {
 hydra_yaml_block() {
   local file="$1" key="$2"
   awk -v key="$key" '
-    $0 ~ "^"key":[[:space:]]*[|>]?[[:space:]]*$" && !grab {
-      # Block-scalar header (key: , key: > , key: |). Start collecting.
-      inline=$0; sub("^"key":[[:space:]]*", "", inline); gsub(/[|>[:space:]]/, "", inline);
-      if (inline != "") { print inline; exit }   # actually an inline value
-      grab=1; next
+    # Any valid YAML block-scalar header: | or >, optionally with a chomping
+    # indicator (-/+) and/or an explicit indentation digit.
+    function is_block_header(s) { return s ~ /^[|>][+-]?[0-9]*$/ }
+    $0 ~ "^"key":[[:space:]]*[|>]?[+-]?[0-9]*[[:space:]]*$" && !grab {
+      inline=$0; sub("^"key":[[:space:]]*", "", inline); sub(/[[:space:]]*$/, "", inline);
+      if (inline != "" && !is_block_header(inline)) { print inline; exit }
+      grab=1; base=-1; next
     }
     grab {
       if ($0 ~ /^[^[:space:]]/) exit             # dedent to col 0 => block ended
-      line=$0; sub(/^[[:space:]]+/, "", line); print line
+      line=$0
+      if (line != "" && base < 0) {
+        base=match(line, /[^[:space:]]/) - 1
+        if (base < 0) base=0
+      }
+      # Strip only the block'\''s own base indentation, not all leading
+      # whitespace -- content indented further (nested lists, code) survives.
+      if (base >= 0 && length(line) >= base) line=substr(line, base + 1)
+      else sub(/^[[:space:]]+/, "", line)
+      print line
     }
   ' "$file" | sed -e 's/[[:space:]]*$//' | awk 'NF||p{print;p=1}'
 }
@@ -439,6 +450,9 @@ hydra_yaml_scalar() {
       sub(/[[:space:]]+#.*$/, "", line);
       gsub(/^"|"$/, "", line);
       gsub(/[[:space:]]*$/, "", line);
+      # A bare block-scalar header is never legitimate plain-scalar content
+      # (e.g. an empty/whitespace-only block body) -- treat it as absent.
+      if (line ~ /^[|>][+-]?[0-9]*$/) line="";
       print line; exit
     }
   ' "$file"
