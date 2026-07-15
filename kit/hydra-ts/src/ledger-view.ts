@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { authDir, ledger, log, runDir, yamlScalar } from './lib.ts';
+import { isCompiledBinary } from './kit-assets.ts';
 
 /**
  * Escape text for safe inclusion in HTML. Mirrors jq's @html filter:
@@ -137,7 +138,7 @@ export function main(args: string[] = process.argv.slice(2)): number {
   }
 }
 
-const isMain = process.argv[1] !== undefined
+const isMain = !isCompiledBinary() && process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {

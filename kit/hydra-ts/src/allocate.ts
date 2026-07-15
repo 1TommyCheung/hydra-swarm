@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { die, stateRoot, YAML_BLOCK_HEADER } from './lib.ts';
-import { kitAssetText } from './kit-assets.ts';
+import { isCompiledBinary, kitAssetText } from './kit-assets.ts';
 
 // ---------------------------------------------------------------------------
 // Allocation RECOMMENDATION (vendor-adapters.md §5).
@@ -271,7 +271,7 @@ export function main(args: string[] = process.argv.slice(2)): number {
   }
 }
 
-const isMain = process.argv[1] !== undefined
+const isMain = !isCompiledBinary() && process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {

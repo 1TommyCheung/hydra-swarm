@@ -3,6 +3,7 @@ import { existsSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { die, log, runDir, warn, yamlScalar } from './lib.ts';
+import { isCompiledBinary } from './kit-assets.ts';
 
 /**
  * Result of a freshness gate check.
@@ -96,7 +97,7 @@ export function main(args: string[] = process.argv.slice(2)): number {
   }
 }
 
-const isMain = process.argv[1] !== undefined
+const isMain = !isCompiledBinary() && process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {

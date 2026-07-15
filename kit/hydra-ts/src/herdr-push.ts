@@ -17,6 +17,7 @@ import {
   warn,
   yamlScalar,
 } from './lib.ts';
+import { isCompiledBinary } from './kit-assets.ts';
 
 // ---------------------------------------------------------------------------
 // Types.
@@ -366,6 +367,7 @@ export function main(args: string[] = process.argv.slice(2)): number {
 }
 
 const isMain =
+  !isCompiledBinary() &&
   process.argv[1] !== undefined &&
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 

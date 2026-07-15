@@ -11,6 +11,7 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { dispatch } from './dispatch.ts';
 import { die, ledgerAppend, log, runDir, YAML_BLOCK_HEADER, yamlScalar } from './lib.ts';
+import { isCompiledBinary } from './kit-assets.ts';
 
 // ---------------------------------------------------------------------------
 // Task-spec amendment (TypeScript port of the historical shell harness).
@@ -305,7 +306,7 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
   }
 }
 
-const isMain = process.argv[1] !== undefined
+const isMain = !isCompiledBinary() && process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {

@@ -10,6 +10,7 @@ import {
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { die, deriveDropFromGit, log, yamlBlock, yamlList, yamlScalar } from './lib.ts';
+import { isCompiledBinary } from './kit-assets.ts';
 
 // ---------------------------------------------------------------------------
 // Kimi CLI adapter (TypeScript port of hydra/adapters/kimi.sh).
@@ -689,7 +690,7 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
   }
 }
 
-const isMain = process.argv[1] !== undefined
+const isMain = !isCompiledBinary() && process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isMain) {

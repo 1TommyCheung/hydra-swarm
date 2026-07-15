@@ -17,6 +17,7 @@ import {
   yamlList,
   yamlScalar,
 } from './lib.ts';
+import { isCompiledBinary } from './kit-assets.ts';
 
 // ---------------------------------------------------------------------------
 // Types.
@@ -518,6 +519,7 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
 }
 
 const isMain =
+  !isCompiledBinary() &&
   process.argv[1] !== undefined &&
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 

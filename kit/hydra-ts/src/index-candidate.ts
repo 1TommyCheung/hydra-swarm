@@ -13,6 +13,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { die, ledgerAppend, log, now, repoId, stateRoot, yamlScalar } from './lib.ts';
+import { isCompiledBinary } from './kit-assets.ts';
 
 // ---------------------------------------------------------------------------
 // Harness-generated, post-freeze GitNexus index (TypeScript port of
@@ -260,7 +261,7 @@ export function main(args: string[] = process.argv.slice(2)): number {
   }
 }
 
-const isMain = process.argv[1] !== undefined
+const isMain = !isCompiledBinary() && process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isMain) {

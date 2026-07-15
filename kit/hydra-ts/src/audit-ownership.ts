@@ -3,6 +3,7 @@ import { lstatSync, readlinkSync, statSync } from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { die, pathInGlobs } from './lib.ts';
+import { isCompiledBinary } from './kit-assets.ts';
 
 // ---------------------------------------------------------------------------
 // Ownership audit — TypeScript port of hydra/scripts/audit-ownership.sh.
@@ -274,7 +275,7 @@ export function main(args: string[] = process.argv.slice(2)): number {
   }
 }
 
-const isMain = process.argv[1] !== undefined
+const isMain = !isCompiledBinary() && process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {

@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { die, yamlScalar } from './lib.ts';
+import { isCompiledBinary } from './kit-assets.ts';
 
 // ---------------------------------------------------------------------------
 // TEST FIXTURE ONLY: offline deterministic stub vendor adapter.
@@ -213,6 +214,7 @@ export function main(args: string[] = process.argv.slice(2)): number {
 }
 
 const isMain =
+  !isCompiledBinary() &&
   process.argv[1] !== undefined &&
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 

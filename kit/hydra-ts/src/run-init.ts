@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { log, die, runDir, repoId, repoRoot, now, ledgerAppend } from './lib.ts';
+import { isCompiledBinary } from './kit-assets.ts';
 
 /**
  * Create the external state layout for a run.
@@ -78,7 +79,7 @@ export function main(args: string[] = process.argv.slice(2)): number {
   }
 }
 
-const isMain = process.argv[1] !== undefined
+const isMain = !isCompiledBinary() && process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {

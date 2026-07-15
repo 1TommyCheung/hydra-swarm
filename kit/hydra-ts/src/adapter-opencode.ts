@@ -21,6 +21,7 @@ import {
   yamlList,
   yamlScalar,
 } from './lib.ts';
+import { isCompiledBinary } from './kit-assets.ts';
 
 // ---------------------------------------------------------------------------
 // OpenCode / GLM adapter (TypeScript port of hydra/adapters/opencode.sh).
@@ -640,7 +641,7 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
   }
 }
 
-const isMain = process.argv[1] !== undefined
+const isMain = !isCompiledBinary() && process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {

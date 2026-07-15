@@ -19,7 +19,7 @@ import {
   yamlList,
   yamlScalar,
 } from './lib.ts';
-import { kitAssetPath } from './kit-assets.ts';
+import { isCompiledBinary, kitAssetPath } from './kit-assets.ts';
 
 // ---------------------------------------------------------------------------
 // Worktree bootstrap (TypeScript port of hydra/scripts/create-worktree.sh).
@@ -341,7 +341,7 @@ export function main(args: string[] = process.argv.slice(2)): number {
   }
 }
 
-const isMain = process.argv[1] !== undefined
+const isMain = !isCompiledBinary() && process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isMain) {

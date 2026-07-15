@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { kitAssetPath } from './kit-assets.ts';
+import { isCompiledBinary, kitAssetPath } from './kit-assets.ts';
 import {
   ledgerAppend,
   log,
@@ -359,7 +359,7 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
   }
 }
 
-const isMain = process.argv[1] !== undefined
+const isMain = !isCompiledBinary() && process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {

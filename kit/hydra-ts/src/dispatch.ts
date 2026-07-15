@@ -37,6 +37,7 @@ import {
   loopDetectorTick,
   type LoopDetectorState,
 } from './loop-detector.ts';
+import { isCompiledBinary } from './kit-assets.ts';
 
 export type ExecFileSyncLike = (
   file: string,
@@ -1233,7 +1234,7 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
   }
 }
 
-const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+const isMain = !isCompiledBinary() && process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 if (isMain) {
   process.exitCode = await main();
 }

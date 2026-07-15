@@ -7,7 +7,7 @@ import {
   type AuditOwnershipOptions,
   type AuditOwnershipResult,
 } from './audit-ownership.ts';
-import { kitAssetPath, kitAssetText } from './kit-assets.ts';
+import { isCompiledBinary, kitAssetPath, kitAssetText } from './kit-assets.ts';
 import {
   ledgerAppend,
   log,
@@ -536,7 +536,7 @@ export async function main(
   }
 }
 
-const isMain = process.argv[1] !== undefined
+const isMain = !isCompiledBinary() && process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {
