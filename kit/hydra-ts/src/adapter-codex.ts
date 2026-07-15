@@ -167,7 +167,10 @@ export function defaultSpawn(
     });
 
     let exitCode: number | null;
-    if (result.status !== null) {
+    // Loose `!= null`: Bun reports `status: undefined` (not null) on spawn
+    // error; strict `!== null` would misbranch there. Node behavior (null on
+    // error) is unchanged.
+    if (result.status != null) {
       exitCode = result.status;
     } else if (result.signal) {
       exitCode = null;
@@ -498,17 +501,22 @@ export async function adapterCodex(
 // CLI entry point.
 // ---------------------------------------------------------------------------
 
+export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
+  try {
+    const [verb, taskSpec, worktree, inbox, sessions, agentRunId] = args;
+    await adapterCodex(verb, taskSpec, worktree, inbox, sessions, agentRunId);
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
 const isMain =
   process.argv[1] !== undefined &&
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {
-  try {
-    const [verb, taskSpec, worktree, inbox, sessions, agentRunId] = process.argv.slice(2);
-    await adapterCodex(verb, taskSpec, worktree, inbox, sessions, agentRunId);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`${message}\n`);
-    process.exitCode = 1;
-  }
+  process.exitCode = await main();
 }

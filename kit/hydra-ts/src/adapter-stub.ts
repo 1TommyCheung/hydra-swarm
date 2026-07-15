@@ -200,17 +200,22 @@ export default { stub };
 // CLI entry point — node --experimental-strip-types hydra-ts/src/adapter-stub.ts
 // ---------------------------------------------------------------------------
 
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    const [verb, taskSpec, worktree, inbox, sessions, agentRunId] = args;
+    stub(verb, taskSpec, worktree, inbox, sessions, agentRunId);
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
 const isMain =
   process.argv[1] !== undefined &&
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {
-  try {
-    const [verb, taskSpec, worktree, inbox, sessions, agentRunId] = process.argv.slice(2);
-    stub(verb, taskSpec, worktree, inbox, sessions, agentRunId);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`${message}\n`);
-    process.exitCode = 1;
-  }
+  process.exitCode = main();
 }

@@ -215,24 +215,29 @@ export function allocate(
 // CLI entry point.
 // ---------------------------------------------------------------------------
 
-const isMain = process.argv[1] !== undefined
-  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
-
-if (isMain) {
+export function main(args: string[] = process.argv.slice(2)): number {
   try {
-    const role = process.argv[2];
-    const taskType = process.argv[3];
-    const risk = process.argv[4] || 'medium';
+    const role = args[0];
+    const taskType = args[1];
+    const risk = args[2] || 'medium';
 
-    const excludeVendor = process.argv[5] === '--exclude-vendor'
-      ? (process.argv[6] || '')
+    const excludeVendor = args[3] === '--exclude-vendor'
+      ? (args[4] || '')
       : '';
 
     const result = allocate(role, taskType, risk, excludeVendor);
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(`${message}\n`);
-    process.exitCode = 1;
+    return 1;
   }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
 }

@@ -652,39 +652,42 @@ export default {
 // CLI entry point.
 // ---------------------------------------------------------------------------
 
+export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
+  try {
+    const verb = args[0];
+    if (verb === 'visual') {
+      const outputPath = await kimiVisual(
+        args[1],
+        args[2],
+        args[3],
+        args[4],
+        args[5],
+      );
+      process.stdout.write(`${outputPath}\n`);
+    } else if (verb === 'start') {
+      const agentRunId = await kimiStart(
+        args[1],
+        args[2],
+        args[3],
+        args[4],
+        args[5],
+      );
+      process.stdout.write(`${agentRunId}\n`);
+    } else {
+      requireKimi(defaultCommandExists);
+      die('usage: adapter-kimi.ts visual|start ...');
+    }
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
 const isMain = process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isMain) {
-  (async () => {
-    try {
-      const verb = process.argv[2];
-      if (verb === 'visual') {
-        const outputPath = await kimiVisual(
-          process.argv[3],
-          process.argv[4],
-          process.argv[5],
-          process.argv[6],
-          process.argv[7],
-        );
-        process.stdout.write(`${outputPath}\n`);
-      } else if (verb === 'start') {
-        const agentRunId = await kimiStart(
-          process.argv[3],
-          process.argv[4],
-          process.argv[5],
-          process.argv[6],
-          process.argv[7],
-        );
-        process.stdout.write(`${agentRunId}\n`);
-      } else {
-        requireKimi(defaultCommandExists);
-        die('usage: adapter-kimi.ts visual|start ...');
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      process.stderr.write(`${message}\n`);
-      process.exitCode = 1;
-    }
-  })();
+  process.exitCode = await main();
 }
