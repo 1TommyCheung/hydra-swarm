@@ -54,7 +54,9 @@ export default {
   otelEnvShell,
 };
 
-export function main(): number {
+// otel-env takes no arguments; the unused `args` parameter keeps the
+// signature uniform with the other modules' router-callable main(args) shape.
+export function main(args: string[] = process.argv.slice(2)): number {
   process.stdout.write(otelEnvShell());
   return 0;
 }

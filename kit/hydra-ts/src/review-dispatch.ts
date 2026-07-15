@@ -73,7 +73,9 @@ export function defaultExec(
   });
 
   let exitCode: number;
-  if (result.status !== null) {
+  // Tolerate Bun's spawn-error shape: Node reports `status: null` while Bun
+  // reports `status: undefined`; loose `!= null` covers both.
+  if (result.status != null) {
     exitCode = result.status;
   } else if (result.signal) {
     const signalNumber = osConstants.signals[result.signal] ?? 0;
@@ -499,22 +501,27 @@ export function reviewDispatch(
 // CLI entry point.
 // ---------------------------------------------------------------------------
 
-const isMain =
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
-
-if (isMain) {
+export function main(args: string[] = process.argv.slice(2)): number {
   try {
-    const [runId, reviewId, vendor, promptFile, ...rest] = process.argv.slice(2);
+    const [runId, reviewId, vendor, promptFile, ...rest] = args;
     let image: string | undefined;
     const imageIdx = rest.indexOf('--image');
     if (imageIdx !== -1) {
       image = rest[imageIdx + 1];
     }
     reviewDispatch(runId, reviewId, vendor, promptFile, { image });
+    return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(`${message}\n`);
-    process.exitCode = 1;
+    return 1;
   }
+}
+
+const isMain =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  process.exitCode = main();
 }

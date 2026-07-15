@@ -173,18 +173,22 @@ export function writeScorecard(
 // CLI entry point.
 // ---------------------------------------------------------------------------
 
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    const scorecard = measureDivergence(args.length > 0 ? args : undefined);
+    writeScorecard(scorecard);
+    process.stdout.write(`${JSON.stringify(scorecard, null, 2)}\n`);
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
 const isMain = process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {
-  try {
-    const runIds = process.argv.slice(2);
-    const scorecard = measureDivergence(runIds.length > 0 ? runIds : undefined);
-    writeScorecard(scorecard);
-    process.stdout.write(`${JSON.stringify(scorecard, null, 2)}\n`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`${message}\n`);
-    process.exitCode = 1;
-  }
+  process.exitCode = main();
 }
