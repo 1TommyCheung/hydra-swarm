@@ -243,7 +243,7 @@ function discoverRepoRoot(options: DispatchOptions, cwd: string): string {
       stdio: ['pipe', 'pipe', 'pipe'],
     })).trim();
   } catch {
-    die('not inside a git repository');
+    die(`not inside a git repository (cwd: ${cwd}) — hydra resolves its state dir from the repo root; cd into the target repo (or one of its worktrees) and re-run`);
   }
 }
 
@@ -996,7 +996,7 @@ function safeRecordUsage(ctx: WorkerContext): void {
 }
 
 async function runWorker(ctx: WorkerContext, recorder: ExitRecorder): Promise<void> {
-  const panesEnabled = ctx.env.HYDRA_HERDR_PANES === '1';
+  const panesEnabled = ctx.env.HYDRA_HERDR_PANES !== '0';
   const herdrLive = panesEnabled && safeHerdrLive(ctx.herdr);
   if (ctx.vendor === 'opencode') {
     await runWorkerPlain(ctx, recorder, herdrLive);

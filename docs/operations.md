@@ -66,7 +66,7 @@ future decision, not part of the cutover.
 | `HYDRA_GITNEXUS_REPO` | Override the code-intelligence repository id passed to `gitnexus` (default is the derived repo id; see `kit/hydra/scripts/code-intel.sh`). |
 | `HYDRA_HERDR_PANE` | Fallback lead pane id for `herdr-push.sh` when no live pane matches the repo root (see `kit/hydra/scripts/herdr-push.sh`). |
 | `HYDRA_LOOP_DETECTOR` | Loop-thinking detector. Enabled by default (`1` or unset); set to `0` to disable for a task/session where false positives are expected (e.g., legitimately long silent reasoning phases). |
-| `HYDRA_HERDR_PANES=1` | Host each worker/reviewer in a herdr pane (Layer-1 live monitor). |
+| `HYDRA_HERDR_PANES` | Host each worker/reviewer in a herdr pane (Layer-1 live monitor). Enabled by default (`1` or unset) when herdr is live; set to `0` to force headless subprocess hosting. |
 | `HYDRA_HERDR_KEEP_PANE=1` | Don't auto-close panes on completion (for inspection). |
 | `HYDRA_REVIEW_TIMEOUT_MIN` | Harness timeout for a pane-hosted review (default 15). |
 | `HYDRA_OPENCODE_MODEL` | e.g. `zai-coding-plan/glm-5.2` (the working id; NOT `zhipu/…`). |

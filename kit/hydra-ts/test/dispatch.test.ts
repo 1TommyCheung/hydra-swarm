@@ -793,7 +793,10 @@ describe('dispatch Bash parity', () => {
     herdr.live = true;
     const mock = fakeSpawn();
 
-    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { herdr }));
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+      env: { HYDRA_HERDR_PANES: '0' },
+      herdr,
+    }));
 
     assert.equal(mock.calls.length, 1);
     assert.deepEqual(herdr.starts, []);

@@ -106,7 +106,7 @@ launch_in_pane() {
 }
 
 HERDR_PANE=""
-if [ "${HYDRA_HERDR_PANES:-0}" = 1 ] && launch_in_pane; then
+if [ "${HYDRA_HERDR_PANES:-1}" = 1 ] && launch_in_pane; then
   # Harness-owned timeout while the pane runs the reviewer.
   waited=0 limit=$(( ${HYDRA_REVIEW_TIMEOUT_MIN:-15} * 60 ))
   while [ ! -f "$sentinel" ] && [ "$waited" -lt "$limit" ]; do sleep 3; waited=$(( waited + 3 )); done

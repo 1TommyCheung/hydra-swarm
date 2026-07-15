@@ -55,12 +55,22 @@ function restoreEnv(name: string, previous: string | undefined): void {
   }
 }
 
+let previousDefaultPanes: string | undefined;
+
 before(() => {
   cleanTmp();
   mkdirSync(TEST_TMP, { recursive: true });
+  // Panes now default to on; pin off here so tests that don't care about
+  // pane hosting exercise the plain-exec path. Tests that specifically
+  // cover pane hosting set HYDRA_HERDR_PANES='1' themselves.
+  previousDefaultPanes = process.env.HYDRA_HERDR_PANES;
+  process.env.HYDRA_HERDR_PANES = '0';
 });
 
-after(cleanTmp);
+after(() => {
+  restoreEnv('HYDRA_HERDR_PANES', previousDefaultPanes);
+  cleanTmp();
+});
 
 describe('reviewDispatch', () => {
   function options(
