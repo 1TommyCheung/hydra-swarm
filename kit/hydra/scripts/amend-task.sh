@@ -40,17 +40,44 @@ from_v="$(hydra_yaml_scalar "$task_spec" 'spec_version')"
 to_v=$(( from_v + 1 ))
 
 # Rewrite version + stamp amendment metadata (idempotent on the four keys).
+#
+# amendment_reason/delivered_via may be multi-line free text; a plain scalar
+# cannot span lines, so a multi-line value is emitted as a literal block
+# scalar (`key: |` + 2-space-indented lines) instead, and any PRIOR block
+# scalar's continuation lines are skipped (not just its header) when dropping
+# stale amendment metadata from a spec that was already amended once before.
 tmp="$(mktemp)"
 awk -v to="$to_v" -v from="$from_v" -v reason="$reason" -v delivery="$delivery" '
-  /^spec_version:/   { print "spec_version: " to; next }
-  /^supersedes:/     { next }
-  /^amendment_reason:/ { next }
-  /^delivered_via:/  { next }
-  { print }
+  function print_kv(key, value,    n, i, parts) {
+    if (index(value, "\n") == 0) {
+      print key ": " value
+      return
+    }
+    print key ": |"
+    n = split(value, parts, "\n")
+    for (i = 1; i <= n; i++) {
+      if (parts[i] == "") print ""
+      else print "  " parts[i]
+    }
+  }
+  {
+    if (skipping) {
+      if ($0 == "" || $0 ~ /^[[:space:]]/) next
+      skipping = 0
+    }
+    if ($0 ~ /^spec_version:/) { print "spec_version: " to; next }
+    if ($0 ~ /^(supersedes|amendment_reason|delivered_via):/) {
+      header = $0
+      sub(/^[a-zA-Z_]+:[[:space:]]*/, "", header)
+      if (header == "" || header == "|" || header == ">") skipping = 1
+      next
+    }
+    print
+  }
   END {
     print "supersedes: " from
-    print "amendment_reason: " reason
-    print "delivered_via: " delivery
+    print_kv("amendment_reason", reason)
+    print_kv("delivered_via", delivery)
   }
 ' "$task_spec" >"$tmp"
 mv "$tmp" "$task_spec"

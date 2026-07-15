@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { amendTask, rewriteTaskSpec } from '../src/amend-task.ts';
-import { ledger, runDir, yamlScalar } from '../src/lib.ts';
+import { ledger, runDir, yamlBlock, yamlScalar } from '../src/lib.ts';
 
 const TEST_TMP = join(import.meta.dirname, 'amend-task-tmp');
 
@@ -83,8 +83,51 @@ objective: >
   it('matches awk -v escape processing for reason and delivery', () => {
     const content = 'task_id: t1\nspec_version: 1\n';
     const out = rewriteTaskSpec(content, 1, 2, 'first\\nsecond\\\\third', 're\\tstart');
-    assert.ok(out.includes('amendment_reason: first\nsecond\\third\n'));
+    // The decoded reason now contains a real newline, so it must be written
+    // as a block scalar (a plain `key: value` line cannot span lines without
+    // corrupting the YAML) -- see the round-trip test below.
+    assert.ok(out.includes('amendment_reason: |\n  first\n  second\\third\n'));
     assert.ok(out.includes('delivered_via: re\tstart\n'));
+  });
+
+  it('emits a literal block scalar for a multi-line reason, and it round-trips exactly via yamlBlock', () => {
+    const content = 'task_id: t1\nspec_version: 1\n';
+    const reason = 'SPEC VERSION 2 -- REQUIRED FIX.\n\n1. Fix the thing.\n2. Also fix this # not a comment.\n';
+    const out = rewriteTaskSpec(content, 1, 2, reason, 'restart');
+
+    assert.match(out, /^amendment_reason: \|$/m);
+    // A plain scalar line for the same key must not also be present.
+    assert.doesNotMatch(out, /^amendment_reason: [^|]/m);
+
+    mkdirSync(TEST_TMP, { recursive: true });
+    const specPath = join(TEST_TMP, 'roundtrip.yaml');
+    writeFileSync(specPath, out, 'utf8');
+    const roundTripped = yamlBlock(specPath, 'amendment_reason');
+    // yamlBlock only trims a LEADING blank line, not a trailing one; a
+    // reason ending in "\n" round-trips byte-for-byte because the block
+    // scalar's final empty continuation line reconstitutes it on join.
+    assert.equal(roundTripped, reason);
+  });
+
+  it('drops a prior multi-line amendment_reason block in full (header + continuation lines) when re-amending', () => {
+    const firstPass = rewriteTaskSpec(
+      'task_id: t1\nspec_version: 1\n',
+      1,
+      2,
+      'first reason\nwith a second line\nand a third',
+      'restart',
+    );
+    const secondPass = rewriteTaskSpec(firstPass, 2, 3, 'second reason', 'resume');
+
+    const lines = secondPass.trim().split('\n');
+    assert.equal(lines.filter((l) => l.startsWith('amendment_reason:')).length, 1);
+    assert.equal(lines.filter((l) => l.startsWith('delivered_via:')).length, 1);
+    assert.equal(lines.filter((l) => l.startsWith('supersedes:')).length, 1);
+    // None of the first pass's continuation lines survived as stray content.
+    assert.doesNotMatch(secondPass, /with a second line/);
+    assert.doesNotMatch(secondPass, /and a third/);
+    assert.match(secondPass, /^amendment_reason: second reason$/m);
+    assert.match(secondPass, /^supersedes: 2$/m);
   });
 });
 

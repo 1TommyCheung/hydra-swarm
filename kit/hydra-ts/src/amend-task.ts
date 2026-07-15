@@ -102,6 +102,20 @@ async function defaultDispatch(runId: string, taskId: string, delivery: string):
   });
 }
 
+// Render a `key: value` YAML pair, promoting to a literal block scalar
+// (`key: |` + indented lines) whenever the value contains a newline. A plain
+// scalar cannot span multiple lines, so writing a multi-line reason directly
+// after `key: ` would corrupt the file structurally -- everything past the
+// first line would land as bare, unindented top-level text instead of part
+// of the value.
+function yamlKeyValue(key: string, value: string): string {
+  if (!value.includes('\n')) {
+    return `${key}: ${value}`;
+  }
+  const indented = value.split('\n').map((line) => (line ? `  ${line}` : ''));
+  return [`${key}: |`, ...indented].join('\n');
+}
+
 /**
  * Rewrite a task-spec YAML body: bump spec_version, drop any prior amendment
  * metadata, and append fresh supersedes / amendment_reason / delivered_via keys.
@@ -121,23 +135,33 @@ export function rewriteTaskSpec(
   }
 
   const out: string[] = [];
+  const dropKeys = /^(supersedes|amendment_reason|delivered_via):/;
+  // A dropped key's value may be a literal block scalar (`key: |` followed by
+  // indented continuation lines, as yamlKeyValue emits for a multi-line
+  // reason) rather than a plain single-line value. When re-amending an
+  // already-amended spec, those continuation lines must be dropped along with
+  // the header -- otherwise they survive as stray, unindented top-level text.
+  let skippingBlock = false;
   for (const line of lines) {
+    if (skippingBlock) {
+      if (line === '' || /^\s/.test(line)) continue;
+      skippingBlock = false;
+      // Fall through: this dedented line is real content and still needs
+      // the normal handling below (it could itself be one of dropKeys).
+    }
     if (/^spec_version:/.test(line)) {
       out.push(`spec_version: ${toV}`);
-    } else if (/^supersedes:/.test(line)) {
-      continue;
-    } else if (/^amendment_reason:/.test(line)) {
-      continue;
-    } else if (/^delivered_via:/.test(line)) {
-      continue;
+    } else if (dropKeys.test(line)) {
+      const header = line.slice(line.indexOf(':') + 1).trim();
+      if (header === '' || header === '|' || header === '>') skippingBlock = true;
     } else {
       out.push(line);
     }
   }
 
   out.push(`supersedes: ${fromV}`);
-  out.push(`amendment_reason: ${awkAssignmentValue(reason)}`);
-  out.push(`delivered_via: ${awkAssignmentValue(delivery)}`);
+  out.push(yamlKeyValue('amendment_reason', awkAssignmentValue(reason)));
+  out.push(yamlKeyValue('delivered_via', awkAssignmentValue(delivery)));
   return out.join('\n') + '\n';
 }
 

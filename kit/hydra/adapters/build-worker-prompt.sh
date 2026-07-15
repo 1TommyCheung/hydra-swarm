@@ -32,7 +32,10 @@ base_commit="$(hydra_yaml_scalar "$task_spec" 'base_commit')"
 # just the header line (which is empty).
 objective="$(hydra_yaml_block "$task_spec" 'objective')"
 [ -n "$objective" ] || objective="$(hydra_yaml_scalar "$task_spec" 'objective')"
-amendment_reason="$(hydra_yaml_scalar "$task_spec" 'amendment_reason')"
+amendment_reason="$(hydra_yaml_block "$task_spec" 'amendment_reason')"
+if [ -z "$amendment_reason" ]; then
+  amendment_reason="$(hydra_yaml_scalar "$task_spec" 'amendment_reason')"
+fi
 
 if [ -n "$amendment_reason" ]; then
   task_section="## Task ${task_id} (run ${run_id}, spec v${spec_version})

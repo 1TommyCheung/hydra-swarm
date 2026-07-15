@@ -45,7 +45,10 @@ export function buildWorkerPrompt(
     objective = yamlScalar(specPath, 'objective');
   }
 
-  const amendmentReason = yamlScalar(specPath, 'amendment_reason');
+  let amendmentReason = yamlBlock(specPath, 'amendment_reason');
+  if (!amendmentReason) {
+    amendmentReason = yamlScalar(specPath, 'amendment_reason');
+  }
 
   const writable = yamlList(specPath, 'writable_paths')
     .map((p) => `  - ${p}`)

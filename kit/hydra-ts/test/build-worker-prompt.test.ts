@@ -219,6 +219,41 @@ acceptance_criteria:
     assert.match(prompt, /Amendment reason:/);
   });
 
+  it('renders a full multi-line block-scalar amendment_reason, not just its first line', () => {
+    const spec = join(TEST_TMP, makeRunId(), 'task.yaml');
+    writeTaskSpec(
+      spec,
+      `task_id: amended-task
+run_id: r6
+spec_version: 2
+branch: main
+base_commit: abc123
+objective: Do the original thing.
+amendment_reason: |
+  SPEC VERSION 2 -- REQUIRED FIX.
+
+  1. Fix the off-by-one error in the frobnulator.
+  2. Also add a regression test.
+writable_paths:
+  - src/**
+read_only_paths: []
+acceptance_criteria:
+  - frobnulator corrected
+`,
+    );
+
+    const prompt = buildWorkerPrompt(spec, { cwd: TEST_TMP });
+
+    assert.ok(
+      prompt.includes('1. Fix the off-by-one error in the frobnulator.'),
+      'rendered prompt must include block-scalar continuation lines, not just the header line',
+    );
+    assert.ok(
+      prompt.includes('2. Also add a regression test.'),
+      'rendered prompt must include every continuation line of the block scalar',
+    );
+  });
+
   it('renders the prompt identically when no amendment_reason is present', () => {
     const spec = join(TEST_TMP, makeRunId(), 'task.yaml');
     writeTaskSpec(
