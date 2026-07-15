@@ -11,7 +11,9 @@
     "test:promote": "node --experimental-strip-types --test test/promote.test.ts",
     "typecheck": "tsc --noEmit",
     "build:bin": "bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --outfile dist/hydra-cli src/cli.ts",
-    "build:cli-check": "node --experimental-strip-types src/cli.ts"
+    "build:matrix": "node --experimental-strip-types scripts/build-matrix.ts",
+    "build:cli-check": "node --experimental-strip-types src/cli.ts",
+    "test:blackbox": "node --experimental-strip-types scripts/blackbox-compiled.ts"
   },
   "devDependencies": { "typescript": "^5.5.0" }
 }
