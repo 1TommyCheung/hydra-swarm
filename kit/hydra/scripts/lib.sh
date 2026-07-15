@@ -417,9 +417,16 @@ hydra_yaml_block() {
   local file="$1" key="$2"
   awk -v key="$key" '
     # Any valid YAML block-scalar header: | or >, optionally with a chomping
-    # indicator (-/+) and/or an explicit indentation digit.
-    function is_block_header(s) { return s ~ /^[|>][+-]?[0-9]*$/ }
-    $0 ~ "^"key":[[:space:]]*[|>]?[+-]?[0-9]*[[:space:]]*$" && !grab {
+    # indicator (-/+) and/or a single explicit indentation digit (1-9), in
+    # EITHER order (YAML permits both "|2-" and "|-2").
+    #
+    # Known accepted gap: an explicit indentation digit is recognized as a
+    # header but not honored -- the base indent is still inferred from the
+    # first content line rather than the declared digit. This harness never
+    # writes an explicit indentation digit (amend-task.sh always emits a
+    # bare "|"), so this is unreachable via any harness-generated spec.
+    function is_block_header(s) { return s ~ /^[|>]([1-9][+-]?|[+-][1-9]?)?$/ }
+    $0 ~ "^"key":[[:space:]]*[|>]?([1-9][+-]?|[+-][1-9]?)?[[:space:]]*$" && !grab {
       inline=$0; sub("^"key":[[:space:]]*", "", inline); sub(/[[:space:]]*$/, "", inline);
       if (inline != "" && !is_block_header(inline)) { print inline; exit }
       grab=1; base=-1; next
@@ -448,11 +455,15 @@ hydra_yaml_scalar() {
       line=$0; sub("^"key":[[:space:]]*", "", line);
       # Strip an inline comment introduced by whitespace + # (not a leading #).
       sub(/[[:space:]]+#.*$/, "", line);
+      trimmed=line; sub(/[[:space:]]*$/, "", trimmed);
+      was_quoted = (trimmed ~ /^".*"$/);
       gsub(/^"|"$/, "", line);
       gsub(/[[:space:]]*$/, "", line);
-      # A bare block-scalar header is never legitimate plain-scalar content
-      # (e.g. an empty/whitespace-only block body) -- treat it as absent.
-      if (line ~ /^[|>][+-]?[0-9]*$/) line="";
+      # A bare, UNQUOTED block-scalar header is never legitimate plain-scalar
+      # content (e.g. an empty/whitespace-only block body) -- treat it as
+      # absent. A quoted value like key: "|" is real content and must not
+      # be swallowed by this check.
+      if (!was_quoted && line ~ /^[|>]([1-9][+-]?|[+-][1-9]?)?$/) line="";
       print line; exit
     }
   ' "$file"

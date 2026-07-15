@@ -334,9 +334,20 @@ export function yamlList(file: string, key: string): string[] {
   return items;
 }
 
-// Any valid YAML block-scalar header: `|`, `>`, optionally followed by a
-// chomping indicator (`-`/`+`) and/or an explicit indentation digit.
-export const YAML_BLOCK_HEADER = /^[|>][+-]?\d*$/;
+// Any valid YAML block-scalar header: `|`/`>`, optionally followed by a
+// chomping indicator (`-`/`+`) and/or a single explicit indentation digit
+// (1-9), in EITHER order -- YAML permits both `|2-` and `|-2`.
+//
+// Known accepted gap: an explicit indentation digit (`|2`, `>1-`, etc.) is
+// recognized as a header but NOT honored -- yamlBlock still infers the base
+// indent from the first content line rather than using the declared number,
+// so a body whose first line is indented deeper than the declared digit
+// reads incorrectly. This harness's own writer (amend-task.ts's
+// rewriteTaskSpec) never emits an explicit indentation digit -- it always
+// writes a bare `|` and lets the reader infer the base -- so this gap is
+// unreachable via any value the harness itself generates; it only matters
+// for a hand-authored task spec using that specific YAML feature.
+export const YAML_BLOCK_HEADER = /^[|>](?:[1-9][+-]?|[+-][1-9]?)?$/;
 
 export function yamlBlock(file: string, key: string): string {
   const lines = readLines(file);
@@ -383,13 +394,16 @@ export function yamlScalar(file: string, key: string): string {
     if (match) {
       let value = line.slice(match[0].length);
       value = value.replace(/\s+#.*$/, '');
+      const wasQuoted = /^".*"$/.test(value.trim());
       value = value.replace(/^"|"$/g, '');
       value = value.replace(/\s+$/, '');
-      // A bare block-scalar header (e.g. from an empty/whitespace-only block
-      // body, or a caller that mistakenly used the scalar reader on a block
-      // field) is never legitimate plain-scalar content -- treat it as
-      // absent rather than returning the literal marker text.
-      if (YAML_BLOCK_HEADER.test(value)) return '';
+      // A bare, UNQUOTED block-scalar header (e.g. from an empty/whitespace-
+      // only block body, or a caller that mistakenly used the scalar reader
+      // on a block field) is never legitimate plain-scalar content -- treat
+      // it as absent rather than returning the literal marker text. A
+      // quoted value like `key: "|"` is real content (the string "|") and
+      // must NOT be swallowed by this check.
+      if (!wasQuoted && YAML_BLOCK_HEADER.test(value)) return '';
       return value;
     }
   }

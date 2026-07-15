@@ -69,7 +69,7 @@ awk -v to="$to_v" -v from="$from_v" -v reason="$reason" -v delivery="$delivery" 
     if ($0 ~ /^(supersedes|amendment_reason|delivered_via):/) {
       header = $0
       sub(/^[a-zA-Z_]+:[[:space:]]*/, "", header)
-      if (header == "" || header ~ /^[|>][+-]?[0-9]*$/) skipping = 1
+      if (header == "" || header ~ /^[|>]([1-9][+-]?|[+-][1-9]?)?$/) skipping = 1
       next
     }
     print
