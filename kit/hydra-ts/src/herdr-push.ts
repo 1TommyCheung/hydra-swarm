@@ -352,18 +352,23 @@ export default {
 // CLI entry point.
 // ---------------------------------------------------------------------------
 
+export function main(args: string[] = process.argv.slice(2)): number {
+  const runId = args[0] ?? '';
+  const notify = args[1] === '--notify';
+  try {
+    herdrPush(runId, { notify });
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
 const isMain =
   process.argv[1] !== undefined &&
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {
-  const runId = process.argv[2] ?? '';
-  const notify = process.argv[3] === '--notify';
-  try {
-    herdrPush(runId, { notify });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`${message}\n`);
-    process.exitCode = 1;
-  }
+  process.exitCode = main();
 }

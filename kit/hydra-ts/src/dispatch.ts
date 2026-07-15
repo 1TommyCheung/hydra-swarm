@@ -1201,12 +1201,19 @@ export async function dispatch(
 
 export default { dispatch };
 
+export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
+  try {
+    await dispatch(args[0] ?? '', args[1] ?? '', {
+      background: args[2] === '--background',
+    });
+    return 0;
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+}
+
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 if (isMain) {
-  dispatch(process.argv[2] ?? '', process.argv[3] ?? '', {
-    background: process.argv[4] === '--background',
-  }).catch((error) => {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    process.exitCode = 1;
-  });
+  process.exitCode = await main();
 }

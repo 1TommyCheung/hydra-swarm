@@ -401,13 +401,21 @@ export async function graphifyRepo(
   die('usage: graphify-repo.sh build|update|query "<q>"|status');
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
   try {
-    await graphifyRepo(process.argv.slice(2));
+    await graphifyRepo(args);
+    return 0;
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    process.exit(1);
+    return 1;
   }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isMain) {
+  process.exitCode = await main();
 }
 
 export default graphifyRepo;

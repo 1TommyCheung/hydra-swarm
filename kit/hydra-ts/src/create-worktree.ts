@@ -327,15 +327,20 @@ export default { createWorktree };
 // CLI entry point.
 // ---------------------------------------------------------------------------
 
+export function main(args: string[] = process.argv.slice(2)): number {
+  try {
+    createWorktree(args[0], args[1], args[2]);
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+}
+
 const isMain = process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isMain) {
-  try {
-    createWorktree(process.argv[2], process.argv[3], process.argv[4]);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`${message}\n`);
-    process.exitCode = 1;
-  }
+  process.exitCode = main();
 }

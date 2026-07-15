@@ -248,15 +248,23 @@ export function indexCandidate(
 }
 
 // CLI entrypoint for parity with hydra/scripts/index-candidate.sh.
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+export function main(args: string[] = process.argv.slice(2)): number {
   try {
-    const [runId, taskId, logicalLabel] = process.argv.slice(2);
+    const [runId, taskId, logicalLabel] = args;
     const indexName = indexCandidate(runId, taskId, logicalLabel);
     process.stdout.write(`${indexName}\n`);
+    return 0;
   } catch (err) {
     process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-    process.exit(1);
+    return 1;
   }
+}
+
+const isMain = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isMain) {
+  process.exitCode = main();
 }
 
 // Backwards-compatible default export for consumers that import the module.
