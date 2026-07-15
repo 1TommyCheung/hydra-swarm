@@ -22,3 +22,6 @@ graphify-out/
 
 # Logs
 *.log
+
+# macOS
+.DS_Store
