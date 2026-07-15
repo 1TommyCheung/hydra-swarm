@@ -82,6 +82,20 @@ awk -v to="$to_v" -v from="$from_v" -v reason="$reason" -v delivery="$delivery" 
 ' "$task_spec" >"$tmp"
 mv "$tmp" "$task_spec"
 
+# The worktree's own .hydra-task.yaml (written once by create-worktree.sh,
+# read-only, and the ONLY task spec the sandboxed vendor CLI ever sees -- it
+# has no access to the authoritative state root) must be refreshed to match,
+# or a resumed/restarted worker silently keeps reading the PRE-amendment
+# spec: no error, just the old objective and no amendment_reason at all.
+worktree="$(hydra_yaml_scalar "$task_spec" 'worktree')"
+if [ -n "$worktree" ]; then
+  [ -d "$worktree" ] || hydra_die "amend-task: worktree not found, cannot refresh its task spec copy: $worktree"
+  worktree_spec="$worktree/.hydra-task.yaml"
+  [ -f "$worktree_spec" ] && chmod u+w "$worktree_spec"
+  cp "$task_spec" "$worktree_spec"
+  chmod 444 "$worktree_spec"
+fi
+
 hydra_ledger_append "$run_id" task_spec_amended task_id "$task_id" \
   from "v$from_v" to "v$to_v" delivery "$delivery" reason "$reason"
 hydra_log "amended $task_id v$from_v -> v$to_v ($delivery): $reason"

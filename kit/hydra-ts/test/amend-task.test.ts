@@ -177,6 +177,61 @@ objective: Do work.
     assert.deepEqual(dispatches[0], { runId, taskId, delivery: 'restart' });
   });
 
+  it('refreshes the worktree\'s own read-only .hydra-task.yaml copy, not just the authoritative spec', async () => {
+    // The vendor CLI reads ONLY the worktree-local .hydra-task.yaml (it has
+    // no access to the authoritative state root) -- if amendTask() only
+    // rewrote the authoritative copy, a resumed/restarted worker would
+    // silently keep reading the pre-amendment spec: no error, just the old
+    // objective and no amendment_reason. This was a real bug found live.
+    const runId = 'worktree-refresh';
+    const taskId = 'task-refresh';
+    const worktreeDir = join(TEST_TMP, 'wt-refresh');
+    mkdirSync(worktreeDir, { recursive: true });
+    setupRun(runId);
+    writeTaskSpec(runId, taskId, `task_id: ${taskId}
+run_id: run-${runId}
+worktree: ${worktreeDir}
+spec_version: 1
+objective: Original objective.
+`);
+
+    // Simulate create-worktree.ts's own read-only worktree copy.
+    const worktreeSpecPath = join(worktreeDir, '.hydra-task.yaml');
+    writeFileSync(
+      worktreeSpecPath,
+      `task_id: ${taskId}\nrun_id: run-${runId}\nworktree: ${worktreeDir}\nspec_version: 1\nobjective: Original objective.\n`,
+      { mode: 0o444 },
+    );
+
+    await amendTask(runId, taskId, 'REQUIRED FIX: do the other thing', 'restart', {
+      dispatch: () => {},
+    });
+
+    assert.equal(yamlScalar(worktreeSpecPath, 'spec_version'), '2');
+    assert.equal(
+      yamlScalar(worktreeSpecPath, 'amendment_reason'),
+      'REQUIRED FIX: do the other thing',
+    );
+    // Still read-only afterward, matching create-worktree.ts's own convention.
+    const mode = statSync(worktreeSpecPath).mode & 0o777;
+    assert.equal(mode, 0o444);
+  });
+
+  it('dies with a clear error when the recorded worktree does not exist', async () => {
+    const runId = 'worktree-missing';
+    const taskId = 'task-missing-wt';
+    setupRun(runId);
+    writeTaskSpec(runId, taskId, `task_id: ${taskId}
+worktree: ${join(TEST_TMP, 'does-not-exist')}
+spec_version: 1
+`);
+
+    await assert.rejects(
+      amendTask(runId, taskId, 'reason', 'restart', { dispatch: () => {} }),
+      /worktree not found/,
+    );
+  });
+
   it('defaults delivery to restart', async () => {
     const runId = '002';
     const taskId = 'task-y';

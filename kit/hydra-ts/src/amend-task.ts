@@ -1,4 +1,6 @@
 import {
+  chmodSync,
+  copyFileSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -195,10 +197,29 @@ export async function amendTask(
   const toV = (fromV + 1n).toString();
 
   const content = readFileSync(taskSpec, 'utf8');
-  replaceFileAtomically(
-    taskSpec,
-    rewriteTaskSpec(content, fromVStr, toV, reason, delivery),
-  );
+  const rewritten = rewriteTaskSpec(content, fromVStr, toV, reason, delivery);
+  replaceFileAtomically(taskSpec, rewritten);
+
+  // The worktree's own .hydra-task.yaml (written once by create-worktree.ts,
+  // read-only, and the ONLY task spec the sandboxed vendor CLI ever sees --
+  // it has no access to the authoritative state root) must be refreshed to
+  // match, or a resumed/restarted worker silently keeps reading the PRE-
+  // amendment spec: no error, no crash, just the old objective and no
+  // amendment_reason at all, indistinguishable from "nothing was amended."
+  // This was found live: two consecutive redispatches reported false
+  // completion because the worker never saw the amendment.
+  const worktree = yamlScalar(taskSpec, 'worktree');
+  if (worktree) {
+    const worktreeSpec = join(worktree, '.hydra-task.yaml');
+    if (!existsSync(worktree)) {
+      die(`amend-task: worktree not found, cannot refresh its task spec copy: ${worktree}`);
+    }
+    if (existsSync(worktreeSpec)) {
+      chmodSync(worktreeSpec, 0o644);
+    }
+    copyFileSync(taskSpec, worktreeSpec);
+    chmodSync(worktreeSpec, 0o444);
+  }
 
   ledgerAppend(
     runId,
