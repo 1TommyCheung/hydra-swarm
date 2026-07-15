@@ -10,7 +10,7 @@
     "test:concurrent": "node --experimental-strip-types --test $(find test -name '*.test.ts' ! -name 'promote.test.ts' -print)",
     "test:promote": "node --experimental-strip-types --test test/promote.test.ts",
     "typecheck": "tsc --noEmit",
-    "build:bin": "bun build --compile --outfile dist/hydra-bin-stage0 src/bin-cli.ts",
+    "build:bin": "bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --outfile dist/hydra-cli src/cli.ts",
     "build:cli-check": "node --experimental-strip-types src/cli.ts"
   },
   "devDependencies": { "typescript": "^5.5.0" }

@@ -17,8 +17,8 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SELF_DIR/lib.sh"
 if [ "${HYDRA_HARNESS:-ts}" != "bash" ]; then
-HYDRA_NODE="$(hydra_resolve_node)"
-exec "$HYDRA_NODE" --experimental-strip-types "$SELF_DIR/../../hydra-ts/src/record-review.ts" "$@"
+if [ "${HYDRA_HARNESS:-ts}" = "bin" ] && HYDRA_BIN_PATH="$(hydra_resolve_bin)"; then exec "$HYDRA_BIN_PATH" record-review "$@"; fi
+HYDRA_NODE="$(hydra_resolve_node)"; exec "$HYDRA_NODE" --experimental-strip-types "$SELF_DIR/../../hydra-ts/src/cli.ts" record-review "$@"
 fi
 
 run_id="${1:?usage: record-review.sh <run_id> <task_id> <verdict.json>}"

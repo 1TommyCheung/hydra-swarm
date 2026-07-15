@@ -117,6 +117,33 @@ hydra_resolve_node() {
   hydra_die "Node.js >=22.6 is required for the TypeScript harness; install Node.js >=22.6 or set HYDRA_HARNESS=bash as a temporary workaround"
 }
 
+# Resolve the compiled single-binary CLI for HYDRA_HARNESS=bin. HYDRA_BIN
+# (operator/rollback override — point at a specific build) wins when it names
+# an executable file; otherwise the default `npm run build:bin` output
+# (kit/hydra-ts/dist/hydra-cli) is used. Prints the resolved path and returns
+# 0 on success. When no binary is available it warns on stderr and returns 1
+# so the caller falls back to the ts lane — it never hard-fails: an operator
+# who has not run build:bin yet must never be left without a working command.
+hydra_resolve_bin() {
+  local lib_dir candidate
+  if [ -n "${HYDRA_BIN:-}" ]; then
+    if [ -x "$HYDRA_BIN" ]; then
+      printf '%s\n' "$HYDRA_BIN"
+      return 0
+    fi
+    hydra_warn "HYDRA_HARNESS=bin requested but HYDRA_BIN=$HYDRA_BIN not found, falling back to ts"
+    return 1
+  fi
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  candidate="$lib_dir/../../hydra-ts/dist/hydra-cli"
+  if [ -x "$candidate" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  hydra_warn "HYDRA_HARNESS=bin requested but $candidate not found, falling back to ts"
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # Repository + state locations.
 # ---------------------------------------------------------------------------

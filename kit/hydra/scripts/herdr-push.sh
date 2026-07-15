@@ -25,8 +25,8 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SELF_DIR/lib.sh"
 if [ "${HYDRA_HARNESS:-ts}" != "bash" ]; then
-HYDRA_NODE="$(hydra_resolve_node)"
-exec "$HYDRA_NODE" --experimental-strip-types "$SELF_DIR/../../hydra-ts/src/herdr-push.ts" "$@"
+if [ "${HYDRA_HARNESS:-ts}" = "bin" ] && HYDRA_BIN_PATH="$(hydra_resolve_bin)"; then exec "$HYDRA_BIN_PATH" herdr-push "$@"; fi
+HYDRA_NODE="$(hydra_resolve_node)"; exec "$HYDRA_NODE" --experimental-strip-types "$SELF_DIR/../../hydra-ts/src/cli.ts" herdr-push "$@"
 fi
 
 run_id="${1:?usage: herdr-push.sh <run_id> [--notify]}"

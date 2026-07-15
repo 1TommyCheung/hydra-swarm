@@ -19,8 +19,8 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SELF_DIR/lib.sh"
 if [ "${HYDRA_HARNESS:-ts}" != "bash" ]; then
-HYDRA_NODE="$(hydra_resolve_node)"
-exec "$HYDRA_NODE" --experimental-strip-types "$SELF_DIR/../../hydra-ts/src/graphify-baseline.ts" "$@"
+if [ "${HYDRA_HARNESS:-ts}" = "bin" ] && HYDRA_BIN_PATH="$(hydra_resolve_bin)"; then exec "$HYDRA_BIN_PATH" graphify-baseline "$@"; fi
+HYDRA_NODE="$(hydra_resolve_node)"; exec "$HYDRA_NODE" --experimental-strip-types "$SELF_DIR/../../hydra-ts/src/cli.ts" graphify-baseline "$@"
 fi
 
 command -v graphify >/dev/null 2>&1 || hydra_die "graphify CLI not found (Wave 2 dependency)"
