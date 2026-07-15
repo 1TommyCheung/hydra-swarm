@@ -203,3 +203,70 @@ The black-box harness run (45/45, exit 0) against the
   and the npm registry is unreachable from this sandbox (pre-existing
   restriction documented in every prior stage doc). Both new scripts are
   plain TS exercised at runtime by the runs above.
+
+## Lead verification (post-integration, real network + Docker access)
+
+Performed after this task's candidate was merged to master, on
+commit `18772b4` (this doc's own commit):
+
+- **All 4 targets built successfully**, including the `bun-darwin-x64`
+  artifact the sandboxed worker could not reach (network-blocked runtime
+  download there; unblocked here). Manifest: `dist/manifest.json` (real
+  SHA-256/size/commit/bun-version per target, regenerable via
+  `npm run build:matrix -- --targets=bun-darwin-arm64,bun-darwin-x64,bun-linux-x64,bun-linux-arm64`).
+- **`bun-darwin-arm64` (native)**: `blackbox-compiled.ts` → 45/45 PASS,
+  including `routes-drift` (source tree present) — this is also the first
+  real confirmation that Phase 2's asset-embedding design
+  (`docs/bun-migration-stage2-assets.md`) actually works in a genuine
+  compiled binary, not just in theory: `cwd-independence[allocate-embeds-profiles]`
+  and the two `record-review-embeds-schema*` checks prove the 4 EMBED-set
+  assets are read correctly from inside the binary with the checkout tree
+  entirely absent.
+- **`bun-linux-x64` and `bun-linux-arm64` (real execution, not just
+  cross-compile)**: run via Docker (`node:22-bookworm-slim`,
+  `--platform linux/amd64` and `linux/arm64` respectively) with the binary
+  as the sole mounted executable and the harness run from the host against
+  it → **44/44 PASS on both architectures** (`routes-drift` gracefully
+  skipped per its documented design when the source tree isn't mounted
+  into the container — not a failure). This is the decisive evidence that
+  was explicitly deferred by both this task and the original plan's Linux
+  scope-cut: **the compiled binary runs correctly on real Linux, both
+  x86-64 and arm64, including the Phase 2 asset-embedding and Phase 2
+  guard-neutralization fixes holding under a genuinely different OS/libc**.
+- **`bun-darwin-x64` under Rosetta 2** (no physical Intel Mac available):
+  functionally correct (44/45 — see below for the one exception), including
+  usage/exit-code correctness. **One known, understood, non-product
+  discrepancy**: Rosetta 2 does not expose AVX CPUID flags to translated
+  x86-64 processes, regardless of whether the binary is the default or
+  `-baseline` Bun target (`bun-darwin-x64-baseline` was independently built
+  and shows the identical warning under Rosetta) — Bun's own runtime
+  startup prints `warn: CPU lacks AVX support, strange crashes may occur`
+  to stderr before any hydra output, which breaks exactly one harness check
+  (`unknown-subcommand`'s exact-stderr-prefix match) that assumes hydra's
+  own usage banner is the first line. This is a Rosetta *emulation*
+  artifact, not a hydra-cli or build-config defect — genuine Intel
+  hardware (virtually all Intel Macs since ~2011) exposes AVX natively and
+  would not trigger this warning. **`bun-darwin-x64` therefore remains
+  formally unverified on real hardware** (no Intel Mac available in this
+  environment) — the Rosetta run is strong circumstantial evidence of
+  correctness but is not a substitute for real-hardware CI, consistent
+  with the plan's existing "smoke each on matching hardware" requirement.
+  Follow-up worth considering: switch the `bun-darwin-x64` target to the
+  `-baseline` variant in the shipped build matrix regardless, since it
+  removes an entire class of "requires AVX" risk on any x86-64 host
+  (including older/virtualized ones) at negligible cost for a CLI tool
+  that is not numerically performance-sensitive — not yet done, this is a
+  recommendation, not a change made here.
+
+Net effect on the plan's Linux deferral: the original scope-cut rationale
+("Linux needs sandbox, libc, process, and shell test matrices") has now
+been substantively addressed for the process/spawn/libc dimensions that
+this migration's own black-box suite covers (ENOENT mapping, cwd
+independence, asset embedding, guard neutralization) on both Linux
+architectures, via real container execution, not supposition. What is
+still NOT covered on Linux: live vendor CLI dispatch (claude/codex/kimi/
+opencode binaries are not installed in the test containers), herdr
+integration, and any macOS-specific shell/tooling assumptions elsewhere in
+the bash fallback lane (which is explicitly out of scope for Linux — the
+bash lane remains a frozen macOS-oriented rollback path, not a
+cross-platform target).
