@@ -232,6 +232,16 @@ next: value
     assert.equal(yamlBlock(file, 'cmd'), 'echo a | b');
   });
 
+  it('skips a whitespace-only leading line when inferring the base indent, not just an empty one', () => {
+    // A line of pure whitespace is blank in YAML terms -- its own
+    // indentation is meaningless and must not become the inferred base.
+    // Using it as the base (as an earlier version of this code did, since
+    // it only checked for a zero-length string) left "  actual" partially
+    // un-stripped instead of correctly reading "actual".
+    const file = writeFixture('block', 'reason: |\n \n  actual\nnext: value\n');
+    assert.equal(yamlBlock(file, 'reason'), 'actual');
+  });
+
   it('returns an inline value that itself contains a greater-than character', () => {
     const file = writeFixture('block', `cmd: echo a > b\n`);
     assert.equal(yamlBlock(file, 'cmd'), 'echo a > b');

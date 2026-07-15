@@ -371,7 +371,10 @@ export function yamlBlock(file: string, key: string): string {
       // digit if it declared one, otherwise inferred from the first
       // non-blank continuation line), not all leading whitespace -- content
       // indented further than the base (nested lists, code) must survive.
-      if (line !== '' && baseIndent === null) {
+      // A line consisting ENTIRELY of whitespace is blank in YAML terms
+      // (its own indentation is meaningless), not the first content line --
+      // /\S/ finds a real character, not just a non-zero-length string.
+      if (/\S/.test(line) && baseIndent === null) {
         baseIndent = line.match(/^\s*/)?.[0].length ?? 0;
       }
       const stripped = baseIndent !== null && line.length >= baseIndent

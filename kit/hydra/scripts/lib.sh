@@ -435,7 +435,10 @@ hydra_yaml_block() {
     grab {
       if ($0 ~ /^[^[:space:]]/) exit             # dedent to col 0 => block ended
       line=$0
-      if (line != "" && base < 0) {
+      # A line consisting ENTIRELY of whitespace is blank in YAML terms (its
+      # own indentation is meaningless), not the first content line --
+      # require an actual non-whitespace character, not just non-empty.
+      if (line ~ /[^[:space:]]/ && base < 0) {
         base=match(line, /[^[:space:]]/) - 1
         if (base < 0) base=0
       }
