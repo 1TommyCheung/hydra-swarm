@@ -242,6 +242,28 @@ spec_version: 1
     assert.equal(existsSync(ledger(runId)), false);
   });
 
+  it('dies (not ENOTDIR-crashes) when the recorded worktree is a regular file, not a directory', async () => {
+    // existsSync() alone accepts a regular file too -- an earlier version of
+    // this check used existsSync, so mkdtempSync() would throw ENOTDIR
+    // later, AFTER the authoritative spec was already rewritten, recreating
+    // the exact half-amended state the preflight exists to prevent.
+    const runId = 'worktree-is-a-file';
+    const taskId = 'task-file-wt';
+    setupRun(runId);
+    const notADir = join(TEST_TMP, 'worktree-as-file.txt');
+    writeFileSync(notADir, 'not a directory', 'utf8');
+    const specPath = writeTaskSpec(runId, taskId, `task_id: ${taskId}
+worktree: ${notADir}
+spec_version: 1
+`);
+
+    await assert.rejects(
+      amendTask(runId, taskId, 'reason', 'restart', { dispatch: () => {} }),
+      /worktree not found/,
+    );
+    assert.equal(yamlScalar(specPath, 'spec_version'), '1');
+  });
+
   it('defaults delivery to restart', async () => {
     const runId = '002';
     const taskId = 'task-y';

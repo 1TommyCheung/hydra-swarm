@@ -98,18 +98,23 @@ mv "$tmp" "$task_spec"
 # or a resumed/restarted worker silently keeps reading the PRE-amendment
 # spec: no error, just the old objective and no amendment_reason at all.
 #
-# Written via a temp file created with mode 444 up front, then renamed over
-# the destination -- a chmod-writable/copy/chmod-readonly sequence leaves the
-# destination genuinely writable for the whole window between the two
-# chmods, and if the copy fails in between, it never gets re-locked: a real
-# trust-boundary violation (workers must not be able to self-amend their own
-# instructions), not just a missed refresh.
+# Written to a TEMP file, chmod'd read-only, THEN renamed over the
+# destination -- the actual served .hydra-task.yaml is therefore either the
+# old, complete, correctly-permissioned file or the new one, atomically,
+# never a partially-written or briefly-writable version of itself (mv only
+# runs after chmod, and rename is atomic). The temp file itself is
+# necessarily writable while `cp` populates it (mktemp cannot pre-create a
+# 0444 file you can then write into); the trap below removes it if `cp` or
+# `chmod` fails under `set -e`, instead of leaving a stray writable file
+# behind in the worktree.
 if [ -n "$worktree" ]; then
   worktree_spec="$worktree/.hydra-task.yaml"
   wt_tmp="$(mktemp "$worktree/.hydra-task-XXXXXX")"
+  trap 'rm -f "$wt_tmp"' EXIT
   cp "$task_spec" "$wt_tmp"
   chmod 444 "$wt_tmp"
   mv "$wt_tmp" "$worktree_spec"
+  trap - EXIT
 fi
 
 hydra_ledger_append "$run_id" task_spec_amended task_id "$task_id" \

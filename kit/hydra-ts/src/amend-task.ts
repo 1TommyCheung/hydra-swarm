@@ -4,6 +4,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -199,8 +200,20 @@ export async function amendTask(
   // on a missing worktree: spec_version bumped, amendment_reason set, but
   // no refreshed worktree copy, no ledger event, and no redispatch.
   const worktree = yamlScalar(taskSpec, 'worktree');
-  if (worktree && !existsSync(worktree)) {
-    die(`amend-task: worktree not found, cannot refresh its task spec copy: ${worktree}`);
+  if (worktree) {
+    // existsSync alone accepts a regular file too -- mkdtempSync() would
+    // then throw ENOTDIR later, AFTER the authoritative spec is already
+    // rewritten, recreating the exact half-amended state this preflight
+    // exists to prevent. Require an actual directory.
+    let isDir = false;
+    try {
+      isDir = statSync(worktree).isDirectory();
+    } catch {
+      isDir = false;
+    }
+    if (!isDir) {
+      die(`amend-task: worktree not found, cannot refresh its task spec copy: ${worktree}`);
+    }
   }
 
   const content = readFileSync(taskSpec, 'utf8');
