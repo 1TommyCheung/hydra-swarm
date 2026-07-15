@@ -44,8 +44,15 @@
 // read live from src/cli.ts's `routes` object by text-parsing it (never by
 // importing cli.ts) and checked for drift against the expectation table
 // below — a mismatch is a hard FAIL, so the table cannot silently drift from
-// the real routing table. When the source tree is absent the harness falls
-// back to the embedded table and says so.
+// the real routing table. The parser accepts single-quoted, double-quoted,
+// and unquoted identifier keys, and ANY parse anomaly while the source tree
+// is present (missing routes object, unrecognized line, zero keys parsed) is
+// also a hard FAIL — silently falling back to the embedded table while the
+// source is present would let a reformatting or a differently-styled new
+// route escape the check entirely (stage-4 review finding 4). The embedded
+// table is used as-is ONLY when the source tree is genuinely absent (e.g.
+// testing a binary in a container with no checkout mounted, the Stage 3
+// Docker scenario); that case prints a note saying drift cannot be detected.
 //
 // EXPECTATION TABLE DERIVATION (keep in sync when cli.ts/modules change!):
 // derived empirically at commit 90f146e0 (base of run 0040) by invoking each
@@ -210,14 +217,45 @@ function run(
   };
 }
 
-/** Read the routed subcommand names live from src/cli.ts (text parse only). */
+/**
+ * Read the routed subcommand names live from src/cli.ts (text parse only).
+ *
+ * Returns null ONLY when the source tree is genuinely absent (the Stage 3
+ * Docker scenario: a binary-only container with no checkout mounted). Any
+ * parse anomaly while the source IS present — unreadable file, no routes
+ * object literal, an unrecognized line inside it, zero keys parsed — throws,
+ * and main() records routes-drift as a hard FAIL rather than falling back to
+ * the embedded table (stage-4 review finding 4: a silent fallback is exactly
+ * the failure mode this check exists to catch).
+ *
+ * Parsing strategy: cli.ts's routes object is flat, one route per line, so
+ * the object body is parsed line by line. Each non-blank, non-comment line
+ * must match /^\s*['"]?([a-z0-9-]+)['"]?\s*:/ — single-quoted, double-quoted,
+ * and unquoted identifier keys all parse. A line that does not match (a new
+ * formatting style, a computed key, a multi-line value) is a loud parse
+ * error, never a silent skip, so a route can only escape this parser by
+ * making the whole check fail loudly first.
+ */
 function readRoutesFromSource(): string[] | null {
   if (!existsSync(SRC_CLI)) return null;
-  const text = readFileSync(SRC_CLI, 'utf8');
+  const text = readFileSync(SRC_CLI, 'utf8'); // unreadable source -> throw
   const block = text.match(/export const routes[^=]*=\s*\{([\s\S]*?)\};/);
-  if (block === null) return null;
-  const names = [...block[1].matchAll(/'([a-z0-9-]+)':/g)].map((m) => m[1]);
-  return names.length > 0 ? names.sort() : null;
+  if (block === null) {
+    throw new Error('could not locate the routes object literal in src/cli.ts');
+  }
+  const names: string[] = [];
+  for (const line of block[1].split('\n')) {
+    if (/^\s*(?:\/\/.*)?$/.test(line)) continue; // blank or comment-only line
+    const m = line.match(/^\s*['"]?([a-z0-9-]+)['"]?\s*:/);
+    if (m === null) {
+      throw new Error(`unrecognized line in src/cli.ts routes object: ${JSON.stringify(line.trim())}`);
+    }
+    names.push(m[1]);
+  }
+  if (names.length === 0) {
+    throw new Error('routes object located in src/cli.ts but no route keys parsed from it');
+  }
+  return names.sort();
 }
 
 /** cost_hint values from the checkout's seed profiles (for the embed check). */
@@ -276,14 +314,27 @@ function main(argv: string[]): number {
 
   // Drift guard: subcommand names must match src/cli.ts's routes object.
   const tableNames = Object.keys(EXPECTATIONS).sort();
-  const sourceNames = readRoutesFromSource();
+  let sourceNames: string[] | null = null;
+  let sourceParseError: string | null = null;
+  try {
+    sourceNames = readRoutesFromSource();
+  } catch (error) {
+    sourceParseError = error instanceof Error ? error.message : String(error);
+  }
   let names = tableNames;
-  if (sourceNames === null) {
+  if (sourceNames === null && sourceParseError === null) {
+    // Genuinely source-absent (binary-only container): the ONLY case where
+    // the embedded table is used as-is.
     process.stdout.write(
       'note: src/cli.ts not reachable from this script; using the embedded expectation\n'
       + '      table as-is (drift between table and routing table cannot be detected).\n\n',
     );
-  } else {
+  } else if (sourceParseError !== null) {
+    // Source present but unparseable: hard FAIL, never a silent fallback
+    // (stage-4 review finding 4).
+    record('routes-drift', false,
+      `src/cli.ts IS present but its routes could not be parsed: ${sourceParseError} — refusing to fall back to the embedded expectation table while the source tree is present; fix the routes object's formatting or update the parser in scripts/blackbox-compiled.ts`);
+  } else if (sourceNames !== null) {
     const missing = sourceNames.filter((n) => !tableNames.includes(n));
     const extra = tableNames.filter((n) => !sourceNames.includes(n));
     if (missing.length > 0 || extra.length > 0) {

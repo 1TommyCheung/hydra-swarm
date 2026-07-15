@@ -15,13 +15,29 @@
 // ($HYDRA_BUN, then ~/.bun/bin/bun), the binary is executed once to assert and
 // record its version, and there is deliberately NO fallback to a bare `bun`
 // on PATH (the plan's build-time PATH-shadowing risk). Missing/unusable Bun is
-// a loud error, never a silent fallback.
+// a loud error, never a silent fallback. HYDRA_BUN must be an ABSOLUTE path:
+// a relative value would be existence-checked relative to the caller's cwd
+// but executed via PATH resolution, so the checked binary would not
+// necessarily be the one that runs (stage-4 review finding 2). Every
+// candidate is therefore guaranteed absolute, so the exact path string that
+// is existence-checked and version-asserted is the one execFileSync invokes
+// for the build, with no PATH-dependent resolution in between.
 //
 // Cross-compiling a non-native target makes Bun download that target's
 // runtime once (printed as `Downloading [...]`); that is expected, not an
 // error. A target whose runtime cannot be downloaded (e.g. no network) fails
 // that target only: it is omitted from the manifests (never faked), the
 // summary marks it FAILED, and the script exits non-zero.
+//
+// Stale-artifact hygiene (stage-4 review finding 3): before each target's
+// build, any prior-run dist/<target>/hydra-cli and dist/<target>/manifest.json
+// are removed, and the binary is built into a temporary path that is
+// atomically renamed into place only on success (manifests are written the
+// same way). A failed or interrupted build therefore never leaves a stale or
+// partial artifact that looks like a fresh product of this run. The aggregate
+// dist/manifest.json is written from THIS run's successes only; if every
+// requested target fails, any prior-run aggregate is removed so a packaging
+// step gets a loud ENOENT instead of silently shipping stale binaries.
 //
 // Usage:
 //   node --experimental-strip-types scripts/build-matrix.ts [--targets=a,b,...]
@@ -40,11 +56,13 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HYDRA_TS_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -90,13 +108,26 @@ function isExecutable(path: string): boolean {
 
 /**
  * Resolve the pinned Bun executable from controlled locations only and assert
- * its version. Never falls back to a bare `bun` on PATH.
+ * its version. Never falls back to a bare `bun` on PATH. Every candidate is
+ * an absolute path, so the string that is existence-checked and
+ * version-asserted is exactly the string execFileSync invokes later — no
+ * PATH-dependent resolution is possible in between.
  */
 function resolveBun(): { path: string; version: string } {
   const candidates: string[] = [];
-  if (process.env.HYDRA_BUN !== undefined && process.env.HYDRA_BUN !== '') {
-    candidates.push(process.env.HYDRA_BUN);
+  const override = process.env.HYDRA_BUN;
+  if (override !== undefined && override !== '') {
+    if (!isAbsolute(override)) {
+      die(
+        `HYDRA_BUN must be an absolute path, got ${JSON.stringify(override)}. `
+        + 'A relative value is existence-checked against the caller\'s cwd but '
+        + 'executed via PATH resolution, so the binary that is checked is not '
+        + 'necessarily the binary that runs (PATH-shadowing escape).',
+      );
+    }
+    candidates.push(override);
   }
+  // join(homedir(), ...) is absolute by construction — same invariant.
   candidates.push(join(homedir(), '.bun', 'bin', 'bun'));
 
   for (const candidate of candidates) {
@@ -138,6 +169,17 @@ function sha256File(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
+/**
+ * Write `data` to `path` via a temp file + atomic rename (same directory, so
+ * same filesystem): a reader never observes a partially written file, and an
+ * interrupted run leaves either the old file or the new one, never a stub.
+ */
+function writeFileAtomic(path: string, data: string): void {
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, data);
+  renameSync(tmp, path);
+}
+
 function parseTargets(argv: string[]): string[] {
   const flag = argv.find((arg) => arg.startsWith('--targets='));
   const unknown = argv.filter((arg) => !arg.startsWith('--targets='));
@@ -162,7 +204,18 @@ function buildTarget(
 ): ArtifactManifest | null {
   const outDir = join(DIST_DIR, target);
   const outfile = join(outDir, OUTFILE_NAME);
+  const manifestPath = join(outDir, 'manifest.json');
+  const tmpOutfile = `${outfile}.tmp-${process.pid}`;
   mkdirSync(outDir, { recursive: true });
+
+  // Stale-artifact hygiene (stage-4 review finding 3): remove any prior-run
+  // binary and manifest for THIS target before building, and build into a
+  // temp path that is renamed into place only on success. A failed or
+  // interrupted build never leaves a stale or partial artifact that looks
+  // like a fresh product of this run — the target directory is left empty.
+  rmSync(outfile, { force: true });
+  rmSync(manifestPath, { force: true });
+  rmSync(tmpOutfile, { force: true }); // leftover from a killed earlier run
 
   process.stdout.write(`\n[build] ${target} -> ${relative(HYDRA_TS_ROOT, outfile)}\n`);
   // execFileSync returns normally only on exit 0; a non-zero exit throws with
@@ -173,13 +226,14 @@ function buildTarget(
   try {
     execFileSync(
       bun.path,
-      ['build', ...BUILD_FLAGS, `--target=${target}`, '--outfile', outfile, ENTRYPOINT],
+      ['build', ...BUILD_FLAGS, `--target=${target}`, '--outfile', tmpOutfile, ENTRYPOINT],
       { cwd: HYDRA_TS_ROOT, stdio: 'inherit' },
     );
   } catch (error) {
     status = (error as { status?: number }).status ?? 1;
   }
   if (status !== 0) {
+    rmSync(tmpOutfile, { force: true }); // drop any partial output
     process.stderr.write(
       `[build] ${target} FAILED (bun exited ${status}). Cross-compiling a non-native target\n`
       + `        downloads that target's Bun runtime once; without network access that\n`
@@ -187,10 +241,12 @@ function buildTarget(
     );
     return null;
   }
-  if (!existsSync(outfile) || statSync(outfile).size === 0) {
+  if (!existsSync(tmpOutfile) || statSync(tmpOutfile).size === 0) {
+    rmSync(tmpOutfile, { force: true });
     process.stderr.write(`[build] ${target} FAILED (bun exited 0 but ${outfile} is missing/empty)\n`);
     return null;
   }
+  renameSync(tmpOutfile, outfile); // atomic publish: the final path only ever appears complete
 
   const manifest: ArtifactManifest = {
     schema_version: 1,
@@ -205,7 +261,7 @@ function buildTarget(
     size_bytes: statSync(outfile).size,
     sha256: sha256File(outfile),
   };
-  writeFileSync(join(outDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  writeFileAtomic(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   process.stdout.write(`[build] ${target} ok: ${manifest.size_bytes} bytes, sha256 ${manifest.sha256}\n`);
   return manifest;
 }
@@ -228,6 +284,7 @@ function main(argv: string[]): number {
     else built.push(manifest);
   }
 
+  const aggregatePath = join(DIST_DIR, 'manifest.json');
   if (built.length > 0) {
     const aggregate = {
       schema_version: 1,
@@ -241,7 +298,16 @@ function main(argv: string[]): number {
         { target, outfile, size_bytes, sha256 }
       )),
     };
-    writeFileSync(join(DIST_DIR, 'manifest.json'), `${JSON.stringify(aggregate, null, 2)}\n`);
+    writeFileAtomic(aggregatePath, `${JSON.stringify(aggregate, null, 2)}\n`);
+  } else if (existsSync(aggregatePath)) {
+    // Zero successes (stage-4 review finding 3): a prior run's aggregate must
+    // not stay behind looking current. Removal is loud for any packaging
+    // step (ENOENT) where a stale file would be silently shippable.
+    rmSync(aggregatePath);
+    process.stderr.write(
+      'build-matrix: warning: all targets failed; removed stale prior-run dist/manifest.json '
+      + 'so it cannot be packaged as if it were a product of this run\n',
+    );
   }
 
   process.stdout.write('\nbuild-matrix summary\n');
