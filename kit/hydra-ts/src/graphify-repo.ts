@@ -116,7 +116,10 @@ export function defaultRunCommand(
   return new Promise((resolve) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
-      env: options.env,
+      // Extend (not replace) the caller's env, but strip BUN_BE_BUN so a leaked
+      // BUN_BE_BUN=1 cannot hijack the external `graphify` CLI if it is ever a
+      // Bun-compiled binary (spike: docs/bun-migration-spike-results.md).
+      env: { ...options.env, BUN_BE_BUN: undefined },
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,

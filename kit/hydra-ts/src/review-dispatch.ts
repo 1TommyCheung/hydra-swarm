@@ -68,6 +68,10 @@ export function defaultExec(
 ): ExecResult {
   const result = spawnSync(file, args, {
     cwd: options?.cwd,
+    // Strip BUN_BE_BUN so a leaked BUN_BE_BUN=1 cannot hijack a Bun-compiled
+    // child (vendor CLIs via `bash -lc`, or herdr itself — spike:
+    // docs/bun-migration-spike-results.md); Bun omits undefined env keys.
+    env: { ...process.env, BUN_BE_BUN: undefined },
     encoding: 'utf8',
     stdio: 'pipe',
   });

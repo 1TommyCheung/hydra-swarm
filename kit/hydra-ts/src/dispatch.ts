@@ -135,7 +135,14 @@ class RealHerdrClient implements HerdrClient {
 
   isLive(): boolean {
     try {
-      this.run('herdr', ['status'], { encoding: 'utf8', stdio: 'ignore' });
+      // Strip BUN_BE_BUN from herdr children: herdr is hydra's own tooling and
+      // a leaked BUN_BE_BUN=1 hijacks Bun-compiled binaries (spike:
+      // docs/bun-migration-spike-results.md); Bun omits undefined env keys.
+      this.run('herdr', ['status'], {
+        encoding: 'utf8',
+        stdio: 'ignore',
+        env: { ...process.env, BUN_BE_BUN: undefined },
+      });
       return true;
     } catch {
       return false;
@@ -147,6 +154,7 @@ class RealHerdrClient implements HerdrClient {
       const output = String(this.run('herdr', ['pane', 'list'], {
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'ignore'],
+        env: { ...process.env, BUN_BE_BUN: undefined },
       }));
       const parsed = JSON.parse(output) as {
         result?: { panes?: Array<{ focused?: boolean; workspace_id?: string }> };
@@ -170,6 +178,7 @@ class RealHerdrClient implements HerdrClient {
       const output = String(this.run('herdr', args, {
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'ignore'],
+        env: { ...process.env, BUN_BE_BUN: undefined },
       }));
       const parsed = JSON.parse(output) as { result?: { agent?: { pane_id?: string } } };
       return parsed.result?.agent?.pane_id;
@@ -180,7 +189,11 @@ class RealHerdrClient implements HerdrClient {
 
   paneClose(paneId: string): boolean {
     try {
-      this.run('herdr', ['pane', 'close', paneId], { encoding: 'utf8', stdio: 'ignore' });
+      this.run('herdr', ['pane', 'close', paneId], {
+        encoding: 'utf8',
+        stdio: 'ignore',
+        env: { ...process.env, BUN_BE_BUN: undefined },
+      });
       return true;
     } catch {
       return false;
@@ -1029,6 +1042,13 @@ export async function dispatch(
   const spec = readTaskSpec(taskSpecPath);
   const repo = discoverRepoRoot(options, cwd);
   const env = options.env ?? process.env;
+  // Strip BUN_BE_BUN in place so the worker spawn (runWorkerPlain passes
+  // `env: ctx.env` explicitly, by reference — see dispatch.test.ts's identity
+  // assertion) can never leak a hijacking BUN_BE_BUN=1 to a Bun-compiled
+  // adapter binary (spike: docs/bun-migration-spike-results.md). Mirrors
+  // bin-cli.ts's startup delete; safe under Node, effective under Bun because
+  // the env object is passed explicitly.
+  delete env.BUN_BE_BUN;
   const adapterRuntime = (
     options.adapterRuntime
     ?? env.HYDRA_ADAPTER_RUNTIME

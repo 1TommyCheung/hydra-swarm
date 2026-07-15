@@ -16,7 +16,7 @@ import { die, pathInGlobs } from './lib.ts';
 export type ExecLike = (
   command: string,
   args: string[],
-  options?: { encoding?: string; stdio?: any },
+  options?: { encoding?: string; stdio?: any; env?: NodeJS.ProcessEnv },
 ) => string | Buffer;
 
 export interface AuditOwnershipOptions {
@@ -98,9 +98,15 @@ export function auditOwnership(
   }
 
   try {
+    // Explicit env passthrough: under Bun, in-process process.env mutations
+    // (e.g. GIT_CEILING_DIRECTORIES set by tests/callers) are NOT inherited by
+    // spawned children unless env is passed explicitly (spike item #10.3,
+    // docs/bun-migration-spike-testing.md). Under Node this matches the
+    // implicit behavior exactly.
     run('git', ['-C', worktreeAbs, 'rev-parse', '--git-dir'], {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'ignore'],
+      env: { ...process.env },
     });
   } catch {
     die(`not a git worktree: ${worktree}`);
@@ -128,6 +134,9 @@ export function auditOwnership(
       run('git', ['-C', worktreeAbs, 'diff', '--name-status', '-z', '-M', '-C', `${base}...${head}`], {
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'ignore'],
+        // See the rev-parse call above: explicit env so in-process
+        // process.env mutations reach the git child under Bun (#10.3).
+        env: { ...process.env },
       }),
     );
   } catch {
@@ -151,6 +160,9 @@ export function auditOwnership(
           run('git', ['-C', worktreeAbs, 'ls-tree', head, '--', p], {
             encoding: 'utf8',
             stdio: ['pipe', 'pipe', 'ignore'],
+            // See the rev-parse call above: explicit env so in-process
+            // process.env mutations reach the git child under Bun (#10.3).
+            env: { ...process.env },
           }),
         );
         if (lsTree.split('\n').some((line) => line.startsWith('160000 '))) {
@@ -171,6 +183,9 @@ export function auditOwnership(
       run('git', ['-C', worktreeAbs, 'ls-files', '--others', '--exclude-standard', '-z'], {
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'ignore'],
+        // See the rev-parse call above: explicit env so in-process
+        // process.env mutations reach the git child under Bun (#10.3).
+        env: { ...process.env },
       }),
     );
   } catch {
@@ -189,6 +204,9 @@ export function auditOwnership(
       run('git', ['-C', worktreeAbs, 'diff', '--name-only', '-z', `${base}...${head}`], {
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'ignore'],
+        // See the rev-parse call above: explicit env so in-process
+        // process.env mutations reach the git child under Bun (#10.3).
+        env: { ...process.env },
       }),
     );
   } catch {

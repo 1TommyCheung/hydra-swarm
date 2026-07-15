@@ -64,6 +64,10 @@ export function defaultRunCommand(
 ): RunResult {
   const result = spawnSync(command, args, {
     cwd: options.cwd,
+    // Strip BUN_BE_BUN so a leaked BUN_BE_BUN=1 cannot hijack a Bun-compiled
+    // child (spike: docs/bun-migration-spike-results.md); Bun omits env keys
+    // whose value is undefined.
+    env: { ...process.env, BUN_BE_BUN: undefined },
     encoding: 'utf8',
     input: '',
     stdio: ['pipe', 'pipe', 'pipe'],

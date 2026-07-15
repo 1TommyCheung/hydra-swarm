@@ -343,6 +343,10 @@ function runStreaming(
     try {
       child = options.spawn(command, args, {
         cwd: options.cwd,
+        // Strip BUN_BE_BUN so a leaked BUN_BE_BUN=1 cannot hijack a Bun-compiled
+        // child (spike: docs/bun-migration-spike-results.md); Bun omits env keys
+        // whose value is undefined.
+        env: { ...process.env, BUN_BE_BUN: undefined },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch {
