@@ -198,6 +198,9 @@ It's recommend-only — a human pins the role.
 ## Health checks
 
 ```bash
+bash kit/scripts/doctor.sh                   # Wave 3 preflight check (PASS/WARN/FAIL)
+bash kit/scripts/doctor.sh --json            # structured output for tooling/automation
+bash kit/scripts/doctor-fix.sh <check-name>  # single-fix executor (used by /hydra-doctor's opt-in remediation; never run standalone without understanding what it will execute)
 bash kit/hydra/tests/run-boundary-tests.sh   # the trust boundary's unit tests (expect 9/9)
 bash kit/hydra/tests/recovery-drill.sh       # lead-kill reconstruction (expect 3/3)
 ```
