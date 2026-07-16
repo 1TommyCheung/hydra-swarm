@@ -176,6 +176,13 @@ export interface SrtSettings {
 }
 
 /**
+ * Kimi CLI provider endpoints that must always be reachable from inside the
+ * sandbox for the CLI to function at all. Used as the baseline fallback when
+ * the operator's kimi-sandbox-domains.json is missing or invalid.
+ */
+export const KIMI_PROVIDER_DOMAINS = ['api.kimi.com', 'api.moonshot.ai', 'api.moonshot.cn'];
+
+/**
  * Write an srt settings file that permits network access only to the merged
  * domain allowlist and writes only beneath the supplied roots.
  */
@@ -528,9 +535,17 @@ export async function kimiStart(
     baselineDomains = undefined;
   }
   const taskDomains = yamlList(taskSpec, 'network_domains');
-  const allowedDomains = validStringArray(baselineDomains, true)
-    ? [...new Set([...baselineDomains, ...taskDomains])]
-    : [];
+  let baseline: string[];
+  if (validStringArray(baselineDomains, true)) {
+    baseline = baselineDomains;
+  } else {
+    // A machine without the operator baseline must not produce an empty
+    // allowlist: that blocks the Kimi CLI's own provider endpoints and every
+    // dispatch dies with provider.connection_error after its retry budget.
+    log(`kimi: sandbox baseline missing or invalid at ${baselinePath}; falling back to provider domains (${KIMI_PROVIDER_DOMAINS.join(', ')})`);
+    baseline = KIMI_PROVIDER_DOMAINS;
+  }
+  const allowedDomains = [...new Set([...baseline, ...taskDomains])];
 
   const settingsPath = join(sessionsAbs, `${agentRunId}.srt-settings.json`);
   const settingsFactory = options.makeSrtSettings ?? makeSrtSettings;
