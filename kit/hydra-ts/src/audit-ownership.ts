@@ -17,7 +17,7 @@ import { isCompiledBinary } from './kit-assets.ts';
 export type ExecLike = (
   command: string,
   args: string[],
-  options?: { encoding?: string; stdio?: any; env?: NodeJS.ProcessEnv },
+  options?: { encoding?: BufferEncoding; stdio?: any; env?: NodeJS.ProcessEnv },
 ) => string | Buffer;
 
 export interface AuditOwnershipOptions {

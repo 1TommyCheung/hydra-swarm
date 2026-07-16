@@ -18,7 +18,11 @@ export function escapeHtml(text: string): string {
 
 interface LedgerEntry {
   event?: string;
-  time?: string;
+  // Ledger entries are parsed from arbitrary external JSON (`JSON.parse(...) as
+  // LedgerEntry`), so `time` may legitimately be `false` (jq's ledger pipeline
+  // treats `null`/`false` as "no timestamp") even though most entries carry a
+  // string.
+  time?: string | boolean;
   run_id?: string;
   [key: string]: unknown;
 }

@@ -827,7 +827,7 @@ writable_paths:
   it('uses injected git exec for git evidence checks', async () => {
     const f = makeFixture();
     let gitCalled = false;
-    const exec = (command: string, args: string[], options?: { encoding?: string; stdio?: any }) => {
+    const exec = (command: string, args: string[], options?: { encoding?: BufferEncoding; stdio?: any }) => {
       if (command === 'git') gitCalled = true;
       return execFileSync(command, args, options);
     };

@@ -75,7 +75,7 @@ function cleanTmp(): void {
 }
 
 function passThroughExec(): ExecLike {
-  return (command: string, args: string[], options?: { encoding?: string; stdio?: any }) =>
+  return (command: string, args: string[], options?: { encoding?: BufferEncoding; stdio?: any }) =>
     execFileSync(command, args, options);
 }
 
@@ -244,7 +244,7 @@ describe('auditOwnership', () => {
     const base = commitFile(worktree, 'src/app.js', 'hello');
     const head = base;
 
-    const exec = ((command: string, args: string[], options?: { encoding?: string; stdio?: any }) => {
+    const exec = ((command: string, args: string[], options?: { encoding?: BufferEncoding; stdio?: any }) => {
       const joined = args.join(' ');
       if (joined.includes('diff --name-status')) {
         return 'M\0/etc/passwd\0';
@@ -263,7 +263,7 @@ describe('auditOwnership', () => {
     const base = commitFile(worktree, 'src/app.js', 'hello');
     const head = base;
 
-    const exec = ((command: string, args: string[], options?: { encoding?: string; stdio?: any }) => {
+    const exec = ((command: string, args: string[], options?: { encoding?: BufferEncoding; stdio?: any }) => {
       const joined = args.join(' ');
       if (joined.includes('diff --name-status')) {
         return 'M\0src/../../secret\0';
@@ -307,7 +307,7 @@ describe('auditOwnership', () => {
     const base = commitFile(worktree, 'src/app.js', 'hello');
     const head = base;
 
-    const exec = ((command: string, args: string[], options?: { encoding?: string; stdio?: any }) => {
+    const exec = ((command: string, args: string[], options?: { encoding?: BufferEncoding; stdio?: any }) => {
       const joined = args.join(' ');
       if (joined.includes('diff --name-status')) {
         return 'M\0external/lib\0';
@@ -333,7 +333,7 @@ describe('auditOwnership', () => {
     const head = base;
 
     let called = false;
-    const exec = ((command: string, args: string[], options?: { encoding?: string; stdio?: any }) => {
+    const exec = ((command: string, args: string[], options?: { encoding?: BufferEncoding; stdio?: any }) => {
       called = true;
       return passThroughExec()(command, args, options);
     }) as ExecLike;

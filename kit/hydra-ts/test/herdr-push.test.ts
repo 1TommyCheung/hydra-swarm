@@ -69,14 +69,14 @@ interface MockExecState {
   repoRoot?: string;
 }
 
-function makeMockExec(state: MockExecState): HerdrPushOptions['exec'] {
+function makeMockExec(state: MockExecState): NonNullable<HerdrPushOptions['exec']> {
   return (
     file: string,
     args: string[],
     options?: ExecFileSyncOptions,
   ): string => {
     const call: ExecCall = { file, args: args.slice() };
-    if (options?.cwd) call.cwd = options.cwd;
+    if (options?.cwd) call.cwd = options.cwd.toString();
     state.calls.push(call);
 
     if (file === 'herdr' && args[0] === 'status') {

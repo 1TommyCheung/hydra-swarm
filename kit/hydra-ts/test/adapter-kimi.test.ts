@@ -146,13 +146,14 @@ interface ExecCall {
 function adapterExec(
   calls: ExecCall[],
 ): typeof execFileSync {
-  return (command: string, args: string[], options?: ExecFileSyncOptions): string | Buffer => {
-    calls.push({ command, args, options });
+  return ((command: string, args?: readonly string[], options?: ExecFileSyncOptions): string | Buffer => {
+    const argList = args ? [...args] : [];
+    calls.push({ command, args: argList, options });
     if (command === 'git') {
-      return execFileSync(command, args, options);
+      return execFileSync(command, argList, options);
     }
     throw new Error(`unexpected exec command: ${command}`);
-  };
+  }) as typeof execFileSync;
 }
 
 function commandLookup(

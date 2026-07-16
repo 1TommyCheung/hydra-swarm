@@ -174,7 +174,9 @@ objective: Do work.
 
     const dispatches: Array<{ runId: string; taskId: string; delivery: string }> = [];
     await amendTask(runId, taskId, 'clarify objective', 'restart', {
-      dispatch: (r, t, d) => dispatches.push({ runId: r, taskId: t, delivery: d }),
+      dispatch: (r, t, d) => {
+        dispatches.push({ runId: r, taskId: t, delivery: d });
+      },
     });
 
     const specPath = join(runDir(runId), 'tasks', `${taskId}.yaml`);
@@ -296,7 +298,9 @@ objective: Do work.
 
     const dispatches: Array<{ delivery: string }> = [];
     await amendTask(runId, taskId, 'reason', undefined, {
-      dispatch: (r, t, d) => dispatches.push({ delivery: d }),
+      dispatch: (r, t, d) => {
+        dispatches.push({ delivery: d });
+      },
     });
 
     assert.equal(dispatches[0].delivery, 'restart');

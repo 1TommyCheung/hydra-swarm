@@ -17,7 +17,7 @@ import { verify } from './verify.ts';
 export type ExecFunction = (
   file: string,
   args: string[],
-  options?: { encoding?: string; cwd?: string; stdio?: any },
+  options?: { encoding?: BufferEncoding; cwd?: string; stdio?: any },
 ) => string;
 
 export type VerifyFunction = (
@@ -57,7 +57,7 @@ function fail(message: string, exitCode = 1): never {
 function defaultExec(
   file: string,
   args: string[],
-  options?: { encoding?: string; cwd?: string; stdio?: any },
+  options?: { encoding?: BufferEncoding; cwd?: string; stdio?: any },
 ): string {
   return execFileSync(file, args, {
     encoding: 'utf8',

@@ -172,6 +172,7 @@ function extractCodexSignatures(line: string, worktree: string): ActionSignature
       server?: string;
       tool?: string;
       id?: string;
+      text?: string;
     };
     call_id?: string;
     error?: unknown;

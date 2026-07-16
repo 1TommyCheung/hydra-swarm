@@ -153,7 +153,7 @@ const LOOP_TERMINAL_EVENTS = new Set([
 function deriveLoopSuspicion(events: LedgerEntry[]): LoopSuspicion | null {
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const event = events[i].event;
-    if (!LOOP_TERMINAL_EVENTS.has(event)) continue;
+    if (event === undefined || !LOOP_TERMINAL_EVENTS.has(event)) continue;
     if (event === 'agent_loop_suspected' || event === 'agent_loop_confirmed') {
       const hash = events[i].dominant_action_hash;
       if (typeof hash !== 'string' || hash === '') return null;

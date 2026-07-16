@@ -185,16 +185,16 @@ describe('createWorktree', () => {
     const taskId = 'task-git-add-fail';
     writeTaskSpec(runId, taskId, `task_id: ${taskId}\nrun_id: ${runId}\nbase_commit: ${headCommit}\n`);
 
-    const mockExec = (
+    const mockExec = ((
       command: string,
-      args: string[],
+      args: string[] = [],
       options?: ExecFileSyncOptions,
     ): string | Buffer => {
       if (command === 'git' && args.includes('worktree') && args.includes('add')) {
         throw new Error('raw child-process failure');
       }
       return execFileSync(command, args, options);
-    };
+    }) as typeof execFileSync;
 
     assert.throws(
       () => createWorktree(runId, taskId, undefined, { repoRoot, exec: mockExec }),
@@ -405,9 +405,9 @@ describe('createWorktree', () => {
     writeTaskSpec(runId, taskId, `task_id: ${taskId}\nrun_id: ${runId}\nbase_commit: ${headCommit}\n`);
 
     const commonSteps: string[] = [];
-    const mockExec = (
+    const mockExec = ((
       command: string,
-      args: string[],
+      args: string[] = [],
       options?: ExecFileSyncOptions,
     ): string | Buffer => {
       if (command === 'bash') {
@@ -415,7 +415,7 @@ describe('createWorktree', () => {
         return '';
       }
       return execFileSync(command, args, options);
-    };
+    }) as typeof execFileSync;
 
     createWorktree(runId, taskId, undefined, { repoRoot, exec: mockExec });
 
@@ -462,9 +462,9 @@ describe('createWorktree', () => {
     const wave1Steps: string[] = [];
     const stderrChunks: string[] = [];
     const originalStderrWrite = process.stderr.write;
-    const mockExec = (
+    const mockExec = ((
       command: string,
-      args: string[],
+      args: string[] = [],
       options?: ExecFileSyncOptions,
     ): string | Buffer => {
       if (command === 'bash') {
@@ -475,7 +475,7 @@ describe('createWorktree', () => {
         return '';
       }
       return execFileSync(command, args, options);
-    };
+    }) as typeof execFileSync;
 
     process.stderr.write = ((chunk: string | Uint8Array) => {
       stderrChunks.push(String(chunk));
@@ -530,9 +530,9 @@ describe('createWorktree', () => {
     writeTaskSpec(runId, taskId, `task_id: ${taskId}\nrun_id: ${runId}\nbase_commit: ${headCommit}\n`);
 
     const wave1Steps: string[] = [];
-    const mockExec = (
+    const mockExec = ((
       command: string,
-      args: string[],
+      args: string[] = [],
       options?: ExecFileSyncOptions,
     ): string | Buffer => {
       if (command === 'bash') {
@@ -541,7 +541,7 @@ describe('createWorktree', () => {
         return '';
       }
       return execFileSync(command, args, options);
-    };
+    }) as typeof execFileSync;
 
     createWorktree(runId, taskId, undefined, { repoRoot, exec: mockExec });
 
@@ -568,9 +568,9 @@ describe('createWorktree', () => {
     writeTaskSpec(runId, taskId, `task_id: ${taskId}\nrun_id: ${runId}\nbase_commit: ${headCommit}\n`);
 
     const wave1Steps: string[] = [];
-    const mockExec = (
+    const mockExec = ((
       command: string,
-      args: string[],
+      args: string[] = [],
       options?: ExecFileSyncOptions,
     ): string | Buffer => {
       if (command === 'bash') {
@@ -581,7 +581,7 @@ describe('createWorktree', () => {
         return '';
       }
       return execFileSync(command, args, options);
-    };
+    }) as typeof execFileSync;
 
     createWorktree(runId, taskId, undefined, {
       repoRoot,

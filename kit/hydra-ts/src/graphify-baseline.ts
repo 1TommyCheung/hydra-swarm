@@ -135,10 +135,11 @@ function findGraphJson(outDir: string): string | undefined {
       return join(entry.parentPath, entry.name);
     }
     // node <22 uses path instead of parentPath on Dirent.
+    const legacyEntry = entry as unknown as { path?: string; name: string; parentPath?: string };
     if (!('parentPath' in entry)) {
-      const legacyPath = (entry as unknown as { path?: string }).path;
+      const legacyPath = legacyEntry.path;
       if (legacyPath) {
-        return join(legacyPath, entry.name);
+        return join(legacyPath, legacyEntry.name);
       }
     }
   }

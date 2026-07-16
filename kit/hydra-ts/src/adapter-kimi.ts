@@ -1,4 +1,9 @@
-import { execFileSync, spawn, type ChildProcess, type SpawnOptionsWithoutStdio } from 'node:child_process';
+import {
+  execFileSync,
+  spawn,
+  type ChildProcess,
+  type SpawnOptionsWithoutStdio,
+} from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -348,7 +353,10 @@ function runStreaming(
         // child (spike: docs/bun-migration-spike-results.md); Bun omits env keys
         // whose value is undefined.
         env: { ...process.env, BUN_BE_BUN: undefined },
-        stdio: ['ignore', 'pipe', 'pipe'],
+        // `SpawnOptionsWithoutStdio['stdio']` (the injected SpawnLike's option
+        // type) is typed as StdioPipeNamed | StdioPipe[], which excludes
+        // "ignore" even though it's a valid StdioOptions value at runtime.
+        stdio: ['ignore', 'pipe', 'pipe'] as unknown as SpawnOptionsWithoutStdio['stdio'],
       });
     } catch {
       resolvePromise({ exitCode: null });

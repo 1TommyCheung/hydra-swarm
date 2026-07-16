@@ -33,7 +33,7 @@ export interface RunResult {
 export type ExecLike = (
   command: string,
   args: string[],
-  options?: { encoding?: string; cwd?: string; stdio?: any },
+  options?: { encoding?: BufferEncoding; cwd?: string; stdio?: any },
 ) => string | Buffer;
 
 /** Injectable long-running command runner (codex exec). */
@@ -136,7 +136,7 @@ harness will verify):
 export function defaultExec(
   command: string,
   args: string[],
-  options?: { encoding?: string; cwd?: string; stdio?: any },
+  options?: { encoding?: BufferEncoding; cwd?: string; stdio?: any },
 ): string {
   return String(execFileSync(command, args, options));
 }

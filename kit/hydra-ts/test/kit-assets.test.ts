@@ -188,7 +188,7 @@ describe('isCompiledBinary', () => {
   });
 
   it('is true only when BOTH the $bunfs URL prefix and process.versions.bun hold', () => {
-    const bunVersions = { bun: '1.2.3' } as NodeJS.ProcessVersions;
+    const bunVersions = { bun: '1.2.3' } as unknown as NodeJS.ProcessVersions;
     // The compiled-binary shape: synthetic URL + Bun runtime marker.
     assert.equal(
       isCompiledBinary('file:///$bunfs/root/kit-assets.ts', bunVersions),

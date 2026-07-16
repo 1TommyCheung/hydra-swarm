@@ -40,7 +40,9 @@ function makeClock(start = 0): { now: () => number; advance: (ms: number) => voi
   };
 }
 
-function baseOptions(overrides: Partial<LoopDetectorOptions> = {}): LoopDetectorOptions {
+function baseOptions(
+  overrides: Partial<LoopDetectorOptions> = {},
+): LoopDetectorOptions & { clock: ReturnType<typeof makeClock> } {
   const clock = makeClock();
   const ledger: LedgerEntry[] = [];
   const dispatchInstanceId = overrides.dispatchInstanceId ?? 'deadbeefdeadbeef';
@@ -57,7 +59,7 @@ function baseOptions(overrides: Partial<LoopDetectorOptions> = {}): LoopDetector
     agent_run_id: agentRunId,
     dispatch_instance_id: dispatchInstanceId,
   });
-  const options: LoopDetectorOptions = {
+  const options: LoopDetectorOptions & { clock: ReturnType<typeof makeClock> } = {
     runId,
     taskId,
     worktree: TEST_TMP,
@@ -66,7 +68,6 @@ function baseOptions(overrides: Partial<LoopDetectorOptions> = {}): LoopDetector
     vendor: 'codex',
     dispatchInstanceId,
     pollIntervalMs: 2000,
-    clock,
     appendLedger: (event, ...kvs) => {
       const entry: LedgerEntry = {
         event,
@@ -87,6 +88,7 @@ function baseOptions(overrides: Partial<LoopDetectorOptions> = {}): LoopDetector
       return '';
     },
     ...overrides,
+    clock,
   };
   (options as unknown as { ledger: LedgerEntry[] }).ledger = ledger;
   return options;
@@ -289,7 +291,7 @@ describe('git fingerprint', () => {
       if (_args.includes('status')) return '';
       return '';
     };
-    sampleGitSignature(worktree, execGit, readFileSync, {});
+    sampleGitSignature(worktree, execGit, readFileSync, statSync, {});
     assert.ok(calls.length > 0);
     for (const call of calls) assert.equal(call.env?.GIT_OPTIONAL_LOCKS, '0');
   });

@@ -45,7 +45,7 @@ function defaultVerifyPolicyPath(): string {
 export type ExecLike = (
   command: string,
   args: string[],
-  options?: { encoding?: string; stdio?: any },
+  options?: { encoding?: BufferEncoding; stdio?: any },
 ) => string | Buffer;
 
 /** Testable options for promote(), mirroring sibling modules. */

@@ -19,7 +19,7 @@ import { amendTask } from '../src/amend-task.ts';
 import { recordUsage } from '../src/record-usage.ts';
 import { reviewRequired } from '../src/review-required.ts';
 import { squash } from '../src/squash.ts';
-import { aggregateScorecard } from '../src/measure-divergence.ts';
+import { measureDivergence } from '../src/measure-divergence.ts';
 import { renderLedgerView } from '../src/ledger-view.ts';
 import { buildOtelEnv } from '../src/otel-env.ts';
 import { freshnessGate } from '../src/freshness-gate.ts';
@@ -136,7 +136,7 @@ describe('e2e smoke: ported modules compose over one state root', () => {
     );
 
     // 9. measure-divergence: scorecard aggregates this run's promoted result
-    const scorecard = aggregateScorecard(STATE);
+    const scorecard = measureDivergence([RUN], { stateRoot: STATE });
     assert.ok(scorecard);
 
     // 10. ledger-view: renders the SAME ledger every stage above wrote to
