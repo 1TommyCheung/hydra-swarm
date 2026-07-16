@@ -1,16 +1,16 @@
 # shellcheck shell=bash
-# hydra/scripts/lib.sh — shared harness helpers (sourced by every script).
+# hydra/scripts/lib.sh — shared launcher helpers (sourced by every wrapper).
 #
-# Design contract (architecture.md §4.8, Wave 0 trust decision):
-#   - The lead calls scripts; scripts are the ONLY writers of authoritative state.
-#   - Workers never source this file (they never see the state store).
-#   - Every state mutation goes through a logged function here.
+# The Bash implementation lane is RETIRED (docs/bash-lane-retirement-plan.md).
+# The 28 wrappers in this directory are thin launchers that only route their
+# subcommand to the TypeScript harness or a pinned compiled binary. This file
+# retains exactly what that routing needs:
+#   - logging helpers (hydra_die / hydra_warn / hydra_log)
+#   - strict HYDRA_HARNESS validation + dispatch (hydra_launch)
+#   - Node.js >=22.6 resolution for the default ts lane (hydra_resolve_node)
+#   - hardened compiled-binary resolution for the bin lane (hydra_resolve_bin)
 #
 # This file defines functions only. It performs no work when sourced.
-
-# ---------------------------------------------------------------------------
-# Strict-mode helper: callers `set -euo pipefail`; we provide the plumbing.
-# ---------------------------------------------------------------------------
 
 hydra_die() { printf 'hydra: error: %s\n' "$*" >&2; exit 1; }
 hydra_warn() { printf 'hydra: warn: %s\n' "$*" >&2; }
@@ -114,12 +114,12 @@ hydra_resolve_node() {
     fi
   done
 
-  hydra_die "Node.js >=22.6 is required for the TypeScript harness; install Node.js >=22.6 or set HYDRA_HARNESS=bash as a temporary workaround"
+  hydra_die "Node.js >=22.6 is required for the TypeScript harness; install Node.js >=22.6 or select a pinned compiled binary with HYDRA_HARNESS=bin HYDRA_BIN=<absolute path>"
 }
 
 # A candidate compiled binary must be an ABSOLUTE path naming a regular
 # executable FILE. `-x` alone is also true for a searchable directory (bash
-# then crashes with "is a directory" at exec instead of falling back), and a
+# then crashes with "is a directory" at exec instead of failing cleanly), and a
 # relative path would make the override's meaning depend on the caller's cwd.
 _hydra_bin_is_usable() {
   case "$1" in
@@ -130,13 +130,15 @@ _hydra_bin_is_usable() {
 }
 
 # Resolve the compiled single-binary CLI for HYDRA_HARNESS=bin. HYDRA_BIN
-# (operator/rollback override — point at a specific build) wins when it names
-# an absolute, regular, executable file; otherwise the default
+# (operator/rollback override — point at a specific pinned build) wins when it
+# names an absolute, regular, executable file; otherwise the default
 # `npm run build:bin` output (kit/hydra-ts/dist/hydra-cli) is used. Prints the
-# resolved path and returns 0 on success. When no binary is available it warns
-# on stderr and returns 1 so the caller falls back to the ts lane — it never
-# hard-fails: an operator who has not run build:bin yet must never be left
-# without a working command.
+# resolved path and returns 0 on success.
+#
+# An unusable binary is a HARD ERROR, never a silent fallback to the ts lane:
+# an operator who explicitly asked for `bin` and got quietly downgraded to `ts`
+# would not notice the rollback path was broken until they needed it
+# (docs/bash-lane-retirement-plan.md §3, Lane 1 runtime contract).
 hydra_resolve_bin() {
   local lib_dir candidate
   if [ -n "${HYDRA_BIN:-}" ]; then
@@ -144,8 +146,7 @@ hydra_resolve_bin() {
       printf '%s\n' "$HYDRA_BIN"
       return 0
     fi
-    hydra_warn "HYDRA_HARNESS=bin requested but HYDRA_BIN=$HYDRA_BIN is missing, not a regular file, or not executable, falling back to ts"
-    return 1
+    hydra_die "HYDRA_HARNESS=bin requested but HYDRA_BIN=$HYDRA_BIN is missing, not a regular file, or not executable; an explicit HYDRA_BIN never falls back to ts — point it at a usable pinned binary (e.g. \$HOME/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64)"
   fi
   lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   candidate="$lib_dir/../../hydra-ts/dist/hydra-cli"
@@ -153,362 +154,40 @@ hydra_resolve_bin() {
     printf '%s\n' "$candidate"
     return 0
   fi
-  hydra_warn "HYDRA_HARNESS=bin requested but $candidate is missing, not a regular file, or not executable, falling back to ts"
-  return 1
+  hydra_die "HYDRA_HARNESS=bin requested but no compiled binary at $candidate; run 'npm run build:bin' in kit/hydra-ts or set HYDRA_BIN to a pinned known-good binary (e.g. \$HOME/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64)"
 }
 
-# ---------------------------------------------------------------------------
-# Repository + state locations.
-# ---------------------------------------------------------------------------
-
-# Absolute path to the main repository checkout.
-hydra_repo_root() {
-  git rev-parse --show-toplevel 2>/dev/null \
-    || hydra_die "not inside a git repository (cwd: $PWD) — hydra resolves its state dir from the repo root; cd into the target repo (or one of its worktrees) and re-run"
-}
-
-# Stable identifier for this repository. Overridable so a clone on another
-# machine can pin the same id. Defaults to the checkout's basename.
-hydra_repo_id() {
-  if [ -n "${HYDRA_REPO_ID:-}" ]; then
-    printf '%s' "$HYDRA_REPO_ID"
-  else
-    basename "$(hydra_repo_root)"
-  fi
-}
-
-# External runtime-state root (Domain 2). Never inside any worktree; never
-# tracked. Overridable via HYDRA_STATE_ROOT (the boundary tests use this to
-# redirect state into a throwaway directory).
-hydra_state_root() {
-  if [ -n "${HYDRA_STATE_ROOT:-}" ]; then
-    printf '%s' "$HYDRA_STATE_ROOT"
-  else
-    local base="${XDG_STATE_HOME:-$HOME/.local/state}"
-    printf '%s/%s-hydra' "$base" "$(hydra_repo_id)"
-  fi
-}
-
-# Worktree parent (Domain 3). Overridable via HYDRA_WORKTREE_ROOT.
-hydra_worktree_root() {
-  if [ -n "${HYDRA_WORKTREE_ROOT:-}" ]; then
-    printf '%s' "$HYDRA_WORKTREE_ROOT"
-  else
-    printf '%s/worktrees/%s' "$HOME" "$(hydra_repo_id)"
-  fi
-}
-
-# Derived code-intelligence indexes (Wave 1+). External state, never tracked,
-# keyed by repo-id then commit (code-intelligence.md §2.1).
-hydra_indexes_root() { printf '%s/indexes' "$(hydra_state_root)"; }
-hydra_gitnexus_dir() { printf '%s/gitnexus/%s/%s' "$(hydra_indexes_root)" "$(hydra_repo_id)" "$1"; }
-# Graphify graphs are run-scoped by default (code-intelligence §3): keyed by run.
-hydra_graphify_dir() { printf '%s/graphify/%s/run-%s' "$(hydra_indexes_root)" "$(hydra_repo_id)" "$1"; }
-
-hydra_run_dir()   { printf '%s/runs/run-%s' "$(hydra_state_root)" "$1"; }
-hydra_auth_dir()  { printf '%s/authoritative' "$(hydra_run_dir "$1")"; }
-hydra_inbox_dir() { printf '%s/inbox' "$(hydra_run_dir "$1")"; }
-hydra_ledger()    { printf '%s/ledger/events.jsonl' "$(hydra_auth_dir "$1")"; }
-
-# ---------------------------------------------------------------------------
-# Time. Deterministic ISO-8601 UTC.
-# ---------------------------------------------------------------------------
-
-hydra_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-
-# ---------------------------------------------------------------------------
-# Ledger. Append-only, harness-written (task-result-review-contracts.md §7).
-# Usage: hydra_ledger_append <run_id> <event> [k v]...
-# Builds a JSON object with time+event and any extra key/value string pairs.
-# ---------------------------------------------------------------------------
-
-hydra_ledger_append() {
-  local run_id="$1" event="$2"; shift 2
-  local ledger; ledger="$(hydra_ledger "$run_id")"
-  mkdir -p "$(dirname "$ledger")"
-  local args=(--arg time "$(hydra_now)" --arg event "$event")
-  local filter='{time:$time, event:$event, run_id:$rid}'
-  args+=(--arg rid "$run_id")
-  while [ "$#" -ge 2 ]; do
-    args+=(--arg "k_$1" "$2")
-    filter="$filter + {\"$1\":\$k_$1}"
-    shift 2
-  done
-  jq -cn "${args[@]}" "$filter" >>"$ledger" \
-    || hydra_die "failed to append ledger event: $event"
-}
-
-# ---------------------------------------------------------------------------
-# Derive a result drop from GIT EVIDENCE when a worker committed but did not
-# write .hydra-result.json (some vendors implement + commit yet skip the
-# self-report). head_commit + files_changed are git-observable FACTS, not worker
-# claims; verification_claims stays empty and promote.sh re-verifies everything,
-# so this is safe and honest — it turns a silent-but-real candidate into a
-# promotable one instead of a false "failed". Returns 0 if a drop was written
-# (worker advanced HEAD past base), 1 otherwise (nothing committed).
-# Usage: hydra_derive_drop_from_git <task_spec> <worktree> <vendor> <session_id> <out_json>
-# ---------------------------------------------------------------------------
-
-hydra_derive_drop_from_git() {
-  local task_spec="$1" worktree="$2" vendor="$3" session_id="$4" out="$5"
-  local base head; base="$(hydra_yaml_scalar "$task_spec" 'base_commit')"
-  head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || return 1
-  # Nothing committed (HEAD still at base) => not a real candidate.
-  [ -n "$head" ] && [ "$(git -C "$worktree" rev-parse "$base" 2>/dev/null)" != "$head" ] || return 1
-  local files
-  files="$(git -C "$worktree" diff --name-only "$base...HEAD" 2>/dev/null | jq -R . | jq -sc .)"
-  jq -n \
-    --arg t "$(hydra_yaml_scalar "$task_spec" 'task_id')" \
-    --arg r "$(hydra_yaml_scalar "$task_spec" 'run_id')" \
-    --argjson sv "$(hydra_yaml_scalar "$task_spec" 'spec_version')" \
-    --arg v "$vendor" --arg sid "$session_id" \
-    --arg b "$(hydra_yaml_scalar "$task_spec" 'branch')" \
-    --arg bc "$base" --arg h "$head" --argjson files "${files:-[]}" '{
-      task_id:$t, run_id:$r, spec_version:$sv, vendor:$v, session_id:$sid,
-      status:"completed", branch:$b, base_commit:$bc, head_commit:$h,
-      summary:"harness-derived from git (worker committed without a self-report)",
-      files_changed:$files, verification_claims:[],
-      risks:["no worker self-report; drop derived from git evidence"],
-      unresolved_questions:[], suggested_additional_checks:[]
-    }' >"$out"
-  return 0
-}
-
-# ---------------------------------------------------------------------------
-# Portable timeout. macOS ships no coreutils `timeout`. Prefer real binaries,
-# fall back to perl's alarm (present on macOS).
-# Usage: hydra_timeout <seconds> <cmd> [args...]
-# Exit 124 on timeout, matching GNU timeout convention.
-# ---------------------------------------------------------------------------
-
-# Push a worker pane's agent state INTO herdr (Layer-1 live monitor).
-#
-# The herdr vendor integrations hook SESSION lifecycle events (SessionStart /
-# UserPromptSubmit / Stop). Our workers run one-shot non-interactive (`codex
-# exec`, `kimi -p`), so those events never fire and the pane sits at
-# agent=null/unknown. That is precisely why the roadmap says the HARNESS pushes
-# pane state from LEDGER events rather than herdr inferring it — so we drive the
-# same installed hook ourselves, with the worker's pane id.
-# Live state stays ADVISORY; Git + the ledger remain authoritative.
-# We speak herdr's socket protocol directly rather than shelling out to a
-# vendor's installed hook: each vendor hook hardcodes its own agent id (the kimi
-# hook would label a Codex pane "kimi"), and the claude/codex hooks only accept
-# the `session` action. Reporting ourselves lets us name the REAL vendor and
-# identify the harness as the source.
-#   method: pane.report_agent
-#   params: {pane_id, source, agent, state, seq}   (newline-delimited JSON, AF_UNIX)
-# Usage: hydra_herdr_state <pane_id> <vendor> <working|idle|blocked>
-hydra_herdr_state() {
-  local pane="${1:-}" vendor="${2:-}" state="${3:-}"
-  [ -n "$pane" ] && [ -n "$vendor" ] && [ -n "$state" ] || return 0
-  local sock="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
-  [ -S "$sock" ] || return 0
-  command -v python3 >/dev/null 2>&1 || return 0
-  HYDRA_PANE="$pane" HYDRA_VENDOR="$vendor" HYDRA_STATE="$state" HYDRA_SOCK="$sock" \
-  python3 - <<'PY' >/dev/null 2>&1 || true
-import json, os, socket, time, random
-req = {
-    "id": f"herdr:hydra:{int(time.time()*1000)}:{random.randrange(1_000_000):06d}",
-    "method": "pane.report_agent",
-    "params": {
-        "pane_id": os.environ["HYDRA_PANE"],
-        "source": "herdr:hydra",          # the HARNESS is the reporter
-        "agent": os.environ["HYDRA_VENDOR"],
-        "state": os.environ["HYDRA_STATE"],
-        "seq": time.time_ns(),
-    },
-}
-try:
-    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    c.settimeout(0.5)
-    c.connect(os.environ["HYDRA_SOCK"])
-    c.sendall((json.dumps(req) + "\n").encode())
-    try: c.recv(4096)
-    except Exception: pass
-    c.close()
-except Exception:
-    pass
-PY
-}
-
-# Kill a process and every descendant. Backgrounding a shell FUNCTION creates a
-# subshell, so the recorded pid is the subshell — signalling it alone orphans the
-# real worker (and leaves an agent burning tokens). Walk the tree instead.
-hydra_kill_tree() {
-  local pid="$1" child
-  for child in $(pgrep -P "$pid" 2>/dev/null); do
-    hydra_kill_tree "$child"
-  done
-  kill -TERM "$pid" 2>/dev/null || true
-  ( sleep 2; kill -KILL "$pid" 2>/dev/null || true ) >/dev/null 2>&1 &
-}
-
-hydra_timeout() {
-  local secs="$1"; shift
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$secs" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$secs" "$@"
-  elif command -v perl >/dev/null 2>&1; then
-    # The wrapper MUST forward termination to its child, or killing the wrapper
-    # leaves an orphaned worker running (and a stray agent burning tokens).
-    perl -e '
-      my $s = shift;
-      my $pid = fork();
-      if ($pid == 0) { exec @ARGV or exit 127; }
-      my $reap = sub {
-        my ($code) = @_;
-        kill "TERM", $pid; sleep 1; kill "KILL", $pid;
-        exit $code;
-      };
-      local $SIG{ALRM} = sub { $reap->(124) };   # timeout
-      local $SIG{TERM} = sub { $reap->(143) };   # cancelled
-      local $SIG{INT}  = sub { $reap->(130) };
-      local $SIG{HUP}  = sub { $reap->(129) };
-      alarm $s;
-      waitpid($pid, 0);
-      exit($? >> 8);
-    ' "$secs" "$@"
-  else
-    hydra_warn "no timeout mechanism available; running without a time limit"
-    "$@"
-  fi
-}
-
-# ---------------------------------------------------------------------------
-# Path normalization + hygiene (trust-and-permissions.md §5, "Path hygiene").
-# Rejects absolute paths and `..` traversal. Returns a clean repo-relative
-# path or fails. Does not touch the filesystem (works on strings).
-# ---------------------------------------------------------------------------
-
-hydra_normalize_relpath() {
-  local p="$1"
-  case "$p" in
-    /*) hydra_die "absolute path not allowed: $p" ;;
+# The ONE call every wrapper makes: hydra_launch <subcommand> [args...].
+# Selects the implementation strictly by HYDRA_HARNESS:
+#   unset | ts  resolve Node >=22.6 and exec src/cli.ts <subcommand> "$@"
+#               (default; argv byte-identical to the historical preamble)
+#   bin         resolve a usable compiled binary and exec it via
+#               `env -u BUN_BE_BUN` <subcommand> "$@"
+# `bash` is retired and any other value is invalid: both exit 2 BEFORE any
+# runtime is resolved, so a retired or mistyped selection can never silently
+# launch the wrong implementation.
+hydra_launch() {
+  local subcommand="$1"; shift
+  local harness="${HYDRA_HARNESS:-ts}"
+  case "$harness" in
+    ts)
+      local node lib_dir
+      node="$(hydra_resolve_node)"
+      lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+      exec "$node" --experimental-strip-types "$lib_dir/../../hydra-ts/src/cli.ts" "$subcommand" "$@"
+      ;;
+    bin)
+      local bin
+      bin="$(hydra_resolve_bin)"
+      exec env -u BUN_BE_BUN "$bin" "$subcommand" "$@"
+      ;;
+    bash)
+      printf '%s\n' 'HYDRA_HARNESS=bash was retired; use HYDRA_HARNESS=bin with a pinned HYDRA_BIN, or use ts' >&2
+      exit 2
+      ;;
+    *)
+      printf 'hydra: error: unknown HYDRA_HARNESS=%s; accepted values: ts, bin\n' "$harness" >&2
+      exit 2
+      ;;
   esac
-  # Reject any `..` component.
-  case "/$p/" in
-    */../*) hydra_die "path traversal not allowed: $p" ;;
-  esac
-  # Strip leading ./ and collapse duplicate slashes.
-  p="${p#./}"
-  while [ "$p" != "${p//\/\//\/}" ]; do p="${p//\/\//\/}"; done
-  printf '%s' "$p"
-}
-
-# Glob match: does repo-relative PATH fall under any of the given `**` globs?
-# Globs use `**` for "any depth". Returns 0 (match) / 1 (no match).
-# Usage: hydra_path_in_globs <path> <glob1> <glob2> ...
-hydra_path_in_globs() {
-  local path="$1"; shift
-  local g re
-  for g in "$@"; do
-    [ -n "$g" ] || continue
-    # Translate a hydra glob to an ERE anchored at both ends.
-    #   **  -> .*        (any depth, including zero segments)
-    #   *   -> [^/]*     (single segment)
-    #   .   -> \.
-    # Sentinel must be a byte bash can hold in a variable — NUL cannot, so use
-    # \x1f (unit separator), which never appears in a repo-relative path.
-    local sentinel=$'\x1f'
-    re="$g"
-    re="${re//./\\.}"
-    re="${re//\*\*/$sentinel}"  # placeholder for **
-    re="${re//\*/[^/]*}"        # single-segment *
-    re="${re//$sentinel/.*}"    # restore ** as .*
-    if printf '%s' "$path" | grep -Eq "^${re}$"; then
-      return 0
-    fi
-  done
-  return 1
-}
-
-# ---------------------------------------------------------------------------
-# YAML-ish accessor for the simple key/list shapes in policy + task files.
-# We keep policies deliberately flat so we can parse without a YAML dep.
-# Usage: hydra_yaml_list <file> <top_key>   -> prints one list item per line
-# Matches:
-#   top_key:
-#     - item one
-#     - item two
-# ---------------------------------------------------------------------------
-
-hydra_yaml_list() {
-  local file="$1" key="$2"
-  awk -v key="$key" '
-    $0 ~ "^"key":[[:space:]]*$" { grab=1; next }
-    grab && /^[[:space:]]*-[[:space:]]*/ {
-      line=$0; sub(/^[[:space:]]*-[[:space:]]*/, "", line);
-      # strip surrounding quotes
-      gsub(/^"|"$/, "", line);
-      print line; next
-    }
-    grab && /^[^[:space:]-]/ { grab=0 }
-  ' "$file"
-}
-
-# Block-scalar accessor: reads a YAML folded/literal block (`key: >` or `key: |`)
-# — the indented lines that follow the key. Falls back to an inline value if the
-# key has one on its own line. This existed as a latent gap: hydra_yaml_scalar
-# only reads the same line, so `objective: >` blocks came back EMPTY, silently
-# dropping the objective from every worker prompt.
-# Usage: hydra_yaml_block <file> <top_key>   -> prints the block text (dedented)
-hydra_yaml_block() {
-  local file="$1" key="$2"
-  awk -v key="$key" '
-    # Any valid YAML block-scalar header: | or >, optionally with a chomping
-    # indicator (-/+) and/or a single explicit indentation digit (1-9), in
-    # EITHER order (YAML permits both "|2-" and "|-2").
-    function is_block_header(s) { return s ~ /^[|>]([1-9][+-]?|[+-][1-9]?)?$/ }
-    $0 ~ "^"key":[[:space:]]*[|>]?([1-9][+-]?|[+-][1-9]?)?[[:space:]]*$" && !grab {
-      inline=$0; sub("^"key":[[:space:]]*", "", inline); sub(/[[:space:]]*$/, "", inline);
-      if (inline != "" && !is_block_header(inline)) { print inline; exit }
-      grab=1
-      # An explicit indentation digit fixes the base indent from the header
-      # itself instead of leaving it to be inferred from the first content
-      # line below -- honor it if present (base becomes non-negative right
-      # away), otherwise fall through to inference (base stays -1).
-      if (match(inline, /[1-9]/)) base = substr(inline, RSTART, RLENGTH) + 0
-      else base = -1
-      next
-    }
-    grab {
-      if ($0 ~ /^[^[:space:]]/) exit             # dedent to col 0 => block ended
-      line=$0
-      # A line consisting ENTIRELY of whitespace is blank in YAML terms (its
-      # own indentation is meaningless), not the first content line --
-      # require an actual non-whitespace character, not just non-empty.
-      if (line ~ /[^[:space:]]/ && base < 0) {
-        base=match(line, /[^[:space:]]/) - 1
-        if (base < 0) base=0
-      }
-      # Strip only the block'\''s own base indentation, not all leading
-      # whitespace -- content indented further (nested lists, code) survives.
-      if (base >= 0 && length(line) >= base) line=substr(line, base + 1)
-      else sub(/^[[:space:]]+/, "", line)
-      print line
-    }
-  ' "$file" | sed -e 's/[[:space:]]*$//' | awk 'NF||p{print;p=1}'
-}
-
-# Scalar accessor: `key: value` at top level. Strips quotes.
-hydra_yaml_scalar() {
-  local file="$1" key="$2"
-  awk -v key="$key" '
-    $0 ~ "^"key":[[:space:]]*" {
-      line=$0; sub("^"key":[[:space:]]*", "", line);
-      # Strip an inline comment introduced by whitespace + # (not a leading #).
-      sub(/[[:space:]]+#.*$/, "", line);
-      trimmed=line; sub(/[[:space:]]*$/, "", trimmed);
-      was_quoted = (trimmed ~ /^".*"$/);
-      gsub(/^"|"$/, "", line);
-      gsub(/[[:space:]]*$/, "", line);
-      # A bare, UNQUOTED block-scalar header is never legitimate plain-scalar
-      # content (e.g. an empty/whitespace-only block body) -- treat it as
-      # absent. A quoted value like key: "|" is real content and must not
-      # be swallowed by this check.
-      if (!was_quoted && line ~ /^[|>]([1-9][+-]?|[+-][1-9]?)?$/) line="";
-      print line; exit
-    }
-  ' "$file"
 }
