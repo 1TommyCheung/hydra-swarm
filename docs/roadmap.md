@@ -184,6 +184,26 @@ Dates are the day the wave's exit criteria were met in this repo.
   running for real) and all four `HYDRA_HARNESS` resolution paths were
   spot-checked through real wrapper invocations before this landed.
 
+### Post-cutover cleanup · 2026-07-16 (v0.6.1)
+
+- **`hydra doctor`'s stale Bash-4 preflight gate fixed.** Its shell check
+  still required Bash 4+ — a leftover from when the (now-retired) Bash
+  implementation lane needed `mapfile`. Left as-is, it would `FAIL` and
+  block `hydra doctor`/setup on any stock Mac without Homebrew bash
+  installed, even though nothing in the current harness needs Bash 4+
+  (the launcher scripts were specifically verified against real
+  `/bin/bash` 3.2 during the retirement work). Now reports the detected
+  shell informationally with no minimum version enforced, consistent with
+  `docs/bash-lane-retirement-plan.md`'s "No runtime Bash-version guard"
+  principle. Verified: full 15-check `doctor.sh` suite passes clean under
+  both bash 5.3 and real bash 3.2.
+- Full doc/skill sweep confirmed the installed plugin cache
+  (`~/.claude/plugins/cache/hydra-swarm/hydra-swarm/0.6.0`) matched
+  `origin/master` byte-for-byte on the files checked, and no other stale
+  `HYDRA_HARNESS=bash`, deleted-adapter-path, or `mapfile`/`readarray`
+  references remained anywhere in `kit/hydra/scripts/` or the current
+  (non-historical) docs.
+
 ### Wave 3 preflight tooling — first real artifact · 2026-07-13
 
 - **`srt` replaces `sandbox-exec` for Kimi sandboxing** (run 0041, commit
@@ -296,8 +316,12 @@ policy) are still design-only. Scope is informed by a portability audit
   API keys + the global herdr integrations — none of which clone with the repo.
 - **bash 4+ requirement removed.** The retired Bash lane needed `mapfile` (5
   scripts) and so required Bash 4+ while macOS ships 3.2; the `ts`/`bin`
-  launchers have no such dependency. (`hydra doctor` still checks for a usable
-  shell for the launcher preambles.)
+  launchers have no such dependency. `hydra doctor`'s own preflight check
+  still gated on Bash 4+ for a full day after the lane retirement (a stale
+  leftover check, not a real dependency) — it would FAIL and block setup on
+  any stock Mac without Homebrew bash installed; fixed 2026-07-16 to report
+  the detected shell informationally with no minimum version, verified clean
+  under both bash 5.3 and real `/bin/bash` 3.2.
 - **Kimi write-role portability** was a real cross-platform gap under
   `sandbox-exec` (macOS-only); now closed by migrating to `srt`, which works on
   both macOS and Linux with the same CLI/config.

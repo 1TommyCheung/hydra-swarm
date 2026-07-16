@@ -40,7 +40,7 @@ before install. `hydra doctor` checks, and refuses to proceed on any miss:
 
 | Class | Requirement | Failure mode if absent |
 |---|---|---|
-| Shell | **bash ≥ 4** (`mapfile`; macOS ships 3.2) | scripts break cryptically |
+| Shell | any bash (no minimum version — the retired Bash lane needed `mapfile`/bash≥4; the current `ts`/`bin` launchers are verified against real macOS bash 3.2) | none — `hydra doctor` reports the detected version informationally |
 | Core | `jq`, `node`, `git` | harness can't run |
 | Vendor CLIs + auth | `claude`, `codex`, `opencode` (+ Z.AI), `kimi` (+ OAuth) — headless smoke each | dispatch fails; adapter reports it |
 | Code intelligence | `gitnexus`, `graphify` (+ `MOONSHOT_API_KEY`/`ANTHROPIC_API_KEY`) | Wave 1/2 code-intel omitted (advisory, non-fatal) |
