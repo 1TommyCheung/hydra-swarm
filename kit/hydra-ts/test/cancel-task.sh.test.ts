@@ -1,13 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -15,202 +8,82 @@ import { after, before, describe, it } from 'node:test';
 const TEST_TMP = join(tmpdir(), `hydra-cancel-task-sh-${process.pid}`);
 const CANCEL_TASK_SH = join(import.meta.dirname, '../../hydra/scripts/cancel-task.sh');
 
-interface Fixture {
-  runId: string;
-  taskId: string;
-  stateRoot: string;
-  runDir: string;
-  ledgerPath: string;
-  helperPath: string;
-  readyPath: string;
-  processListPath: string;
-  fakeBin: string;
-}
-
-type DispatcherMode = 'terminate' | 'delayed-terminal' | 'ignore-term' | 'change-identity';
+/**
+ * Launcher-routing coverage for the `cancel-task` wrapper. The shell-adapter/
+ * bash body lane was retired in run 0045 (docs/bash-lane-retirement-plan.md);
+ * these cases verify the wrapper routes to the TypeScript implementation
+ * (`ts`, the default) and to a pinned compiled binary (`bin`) with the
+ * documented argv and BUN_BE_BUN hygiene. The retired-`bash` and
+ * unrecognized-value rejections are exercised at the dispatch layer in
+ * dispatch.test.ts.
+ */
 
 function cleanTmp(): void {
   if (existsSync(TEST_TMP)) rmSync(TEST_TMP, { recursive: true, force: true });
 }
 
-function writeDispatcher(f: Fixture, mode: DispatcherMode = 'terminate'): void {
-  const cancelled = JSON.stringify({
-    time: '2026-07-14T00:00:02Z',
-    event: 'agent_cancelled',
-    run_id: f.runId,
-    task_id: f.taskId,
-    vendor: 'codex',
-    source: `fake_dispatcher_${mode}`,
-  });
-  let trap: string;
-  if (mode === 'terminate') {
-    trap = "trap 'printf \"%s\\n\" \"$terminal\" >>\"$ledger\"; exit 0' TERM";
-  } else if (mode === 'delayed-terminal') {
-    trap = "trap '(sleep 1.2; printf \"%s\\n\" \"$terminal\" >>\"$ledger\") &' TERM";
-  } else if (mode === 'change-identity') {
-    trap = "trap ': >\"$ready.identity\"; exec sleep 30' TERM";
-  } else {
-    trap = "trap '' TERM";
-  }
-  writeFileSync(f.helperPath, [
-    '#!/usr/bin/env bash',
-    'ledger="$3"',
-    'ready="$4"',
-    `terminal='${cancelled}'`,
-    trap,
-    ': >"$ready"',
-    'while :; do sleep 0.05; done',
-    '',
-  ].join('\n'));
-  chmodSync(f.helperPath, 0o755);
+function uniqueRunId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function fixture(overrides: { runId?: string } = {}): Fixture {
-  const runId = overrides.runId
-    ?? `bash-cancel-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const taskId = 'task-a';
-  const stateRoot = join(TEST_TMP, runId, 'state');
-  const runDir = join(stateRoot, 'runs', `run-${runId}`);
+interface Fixture {
+  runId: string;
+  taskId: string;
+  stateRoot: string;
+}
+
+function fixture(id: string): Fixture {
+  const stateRoot = join(TEST_TMP, id, 'state');
+  const runDir = join(stateRoot, 'runs', `run-${id}`);
+  const taskSpecPath = join(runDir, 'tasks', 'task-a.yaml');
   const ledgerPath = join(runDir, 'authoritative', 'ledger', 'events.jsonl');
-  const helperPath = join(TEST_TMP, runId, 'dispatch.sh');
-  const readyPath = join(TEST_TMP, runId, 'ready');
-  const processListPath = join(TEST_TMP, runId, 'processes.tsv');
-  const fakeBin = join(TEST_TMP, runId, 'bin');
+  const worktree = join(TEST_TMP, id, 'worktree');
+  const taskId = 'task-a';
+
   mkdirSync(join(runDir, 'tasks'), { recursive: true });
   mkdirSync(dirname(ledgerPath), { recursive: true });
-  mkdirSync(dirname(helperPath), { recursive: true });
-  mkdirSync(fakeBin, { recursive: true });
-  writeFileSync(processListPath, '');
-  const fakePs = join(fakeBin, 'ps');
-  writeFileSync(fakePs, [
-    '#!/usr/bin/env bash',
-    'while IFS=$\'\\t\' read -r pid command marker; do',
-    '  [ -n "$pid" ] || continue',
-    '  if [ "$marker" != "-" ] && [ -f "$marker" ]; then',
-    '    command="sleep 30"',
-    '  fi',
-    '  printf "  %s %s\\n" "$pid" "$command"',
-    'done <"$HYDRA_TEST_PROCESS_LIST"',
-    '',
-  ].join('\n'));
-  chmodSync(fakePs, 0o755);
-  writeFileSync(join(runDir, 'tasks', `${taskId}.yaml`), [
+  mkdirSync(worktree, { recursive: true });
+  writeFileSync(taskSpecPath, [
     `task_id: ${taskId}`,
-    `run_id: ${runId}`,
+    `run_id: ${id}`,
     'assigned_vendor: codex',
-    `worktree: ${join(TEST_TMP, runId, 'worktree')}`,
+    `worktree: ${worktree}`,
     'timeout_minutes: 45',
     'spec_version: 1',
-    `branch: hydra/${runId}/${taskId}`,
+    `branch: hydra/${id}/${taskId}`,
     'base_commit: 71bcbcf9acf0aeadc5d8eb5d1c0d3868b45b6070',
     '',
   ].join('\n'));
-  const entries = [
-    {
-      time: '2026-07-14T00:00:00Z',
-      event: 'task_started',
-      run_id: runId,
-      task_id: taskId,
-      vendor: 'codex',
-      agent_run_id: `${runId}-${taskId}-v1`,
-    },
-  ];
-  writeFileSync(ledgerPath, entries.map((entry) => `${JSON.stringify(entry)}\n`).join(''));
+  // An already-terminal task: cancel-task must be idempotent (exit 0, print
+  // the terminal event) rather than attempting to signal anything.
+  writeFileSync(ledgerPath, [
+    `${JSON.stringify({ time: '2026-07-14T00:00:00Z', event: 'task_started', run_id: id, task_id: taskId, vendor: 'codex', agent_run_id: `${id}-${taskId}-v1` })}\n`,
+    `${JSON.stringify({ time: '2026-07-14T00:00:30Z', event: 'agent_exited', run_id: id, task_id: taskId, vendor: 'codex', exit_code: '0' })}\n`,
+  ].join(''));
 
-  const result = {
-    runId,
-    taskId,
-    stateRoot,
-    runDir,
-    ledgerPath,
-    helperPath,
-    readyPath,
-    processListPath,
-    fakeBin,
-  };
-  writeDispatcher(result);
-  return result;
+  return { runId: id, taskId, stateRoot };
 }
 
-function envFor(f: Fixture): NodeJS.ProcessEnv {
-  return {
-    ...process.env,
-    HYDRA_HARNESS: 'bash',
-    HYDRA_STATE_ROOT: f.stateRoot,
-    HYDRA_REPO_ID: `test-${f.runId}`,
-    HYDRA_TEST_PROCESS_LIST: f.processListPath,
-    PATH: `${f.fakeBin}:${process.env.PATH ?? ''}`,
-  };
+function writeFakeBin(dir: string): { bin: string; record: string } {
+  const bin = join(dir, 'fake-hydra-cli');
+  const record = join(dir, 'fake-bin.record');
+  writeFileSync(bin, [
+    '#!/usr/bin/env bash',
+    '{',
+    '  printf \'argv:\';',
+    '  for a in "$@"; do printf \' %s\' "$a"; done',
+    '  printf \'\\n\'',
+    '  if [ -n "${BUN_BE_BUN+x}" ]; then printf \'BUN_BE_BUN=set\\n\';',
+    '  else printf \'BUN_BE_BUN=unset\\n\'; fi',
+    '} >"$HYDRA_FAKE_BIN_RECORD"',
+    'exit 0',
+    '',
+  ].join('\n'));
+  chmodSync(bin, 0o755);
+  return { bin, record };
 }
 
-function appendEvent(f: Fixture, event: Record<string, unknown>): void {
-  writeFileSync(f.ledgerPath, `${readFileSync(f.ledgerPath, 'utf8')}${JSON.stringify(event)}\n`);
-}
-
-function registerProcess(
-  f: Fixture,
-  pid: number,
-  taskId: string,
-  marker = '-',
-): void {
-  const command = `bash ${f.helperPath} ${f.runId} ${taskId} ${f.ledgerPath} ${f.readyPath}`;
-  writeFileSync(
-    f.processListPath,
-    `${readFileSync(f.processListPath, 'utf8')}${pid}\t${command}\t${marker}\n`,
-  );
-}
-
-function registerUnrelated(f: Fixture, pid: number): void {
-  writeFileSync(
-    f.processListPath,
-    `${readFileSync(f.processListPath, 'utf8')}${pid}\tsleep 30\t-\n`,
-  );
-}
-
-async function waitFor(path: string): Promise<void> {
-  const deadline = Date.now() + 3000;
-  while (!existsSync(path)) {
-    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`);
-    await new Promise<void>((resolve) => setTimeout(resolve, 20));
-  }
-}
-
-async function stopChild(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  child.kill('SIGKILL');
-  await new Promise<void>((resolve) => child.once('exit', () => resolve()));
-}
-
-function spawnDispatcher(f: Fixture, taskId = f.taskId, readyPath = f.readyPath): ChildProcess {
-  return spawn('bash', [f.helperPath, f.runId, taskId, f.ledgerPath, readyPath], {
-    stdio: 'ignore',
-  });
-}
-
-function writePidfile(f: Fixture, pid: number): void {
-  const pidfile = join(
-    f.runDir,
-    'sessions',
-    'supervisor',
-    `${f.runId}-${f.taskId}-v1.dispatch.pid`,
-  );
-  mkdirSync(dirname(pidfile), { recursive: true });
-  writeFileSync(pidfile, `${pid}\n`, 'utf8');
-}
-
-function runCancel(f: Fixture, waitSeconds: number): ReturnType<typeof spawnSync> {
-  return spawnSync(
-    'bash',
-    [CANCEL_TASK_SH, f.runId, f.taskId, '--wait-seconds', String(waitSeconds)],
-    {
-      encoding: 'utf8',
-      env: envFor(f),
-      timeout: 10_000,
-    },
-  );
-}
-
-describe('cancel-task.sh bash fallback', () => {
+describe('cancel-task.sh launcher routing', () => {
   before(() => {
     cleanTmp();
     mkdirSync(TEST_TMP, { recursive: true });
@@ -220,165 +93,67 @@ describe('cancel-task.sh bash fallback', () => {
     cleanTmp();
   });
 
-  it('signals a dispatcher from its pidfile and observes its terminal event', async () => {
-    const f = fixture();
-    const dispatcher = spawnDispatcher(f);
-    assert.ok(dispatcher.pid);
-
-    try {
-      await waitFor(f.readyPath);
-      registerProcess(f, dispatcher.pid, f.taskId);
-      writePidfile(f, dispatcher.pid);
-      const result = runCancel(f, 3);
-
-      assert.equal(
-        result.status,
-        0,
-        `stdout: ${result.stdout}\nstderr: ${result.stderr}`,
-      );
-      assert.match(result.stdout, /agent_cancelled/);
-      assert.match(result.stdout, /fake_dispatcher_terminate/);
-      const events = readFileSync(f.ledgerPath, 'utf8')
-        .split('\n')
-        .filter(Boolean)
-        .map((line) => JSON.parse(line) as { event: string });
-      assert.deepEqual(events.map(({ event }) => event), [
-        'task_started',
-        'agent_cancelled',
-      ]);
-    } finally {
-      await stopChild(dispatcher);
-    }
+  it('routes the default/ts path to the TypeScript implementation and is idempotent on a terminal task', () => {
+    const f = fixture(uniqueRunId('ts'));
+    const result = spawnSync(
+      'bash',
+      [CANCEL_TASK_SH, f.runId, f.taskId, '--wait-seconds', '0'],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          HYDRA_HARNESS: 'ts',
+          HYDRA_STATE_ROOT: f.stateRoot,
+          HYDRA_REPO_ID: `test-${f.runId}`,
+        },
+      },
+    );
+    assert.equal(
+      result.status,
+      0,
+      `ts route exited ${result.status}\nstdout: ${result.stdout}\nstderr: ${result.stderr}`,
+    );
+    assert.match(result.stdout, /agent_exited/, 'ts cancel-task must report the existing terminal event');
   });
 
-  it('is idempotent when the current attempt is already terminal', () => {
-    const f = fixture();
-    appendEvent(f, {
-      time: '2026-07-14T00:00:01Z',
-      event: 'agent_exited',
-      run_id: f.runId,
-      task_id: f.taskId,
-      agent_run_id: `${f.runId}-${f.taskId}-v1`,
-      exit_code: 0,
-    });
+  it('routes the bin path to a pinned HYDRA_BIN with the cancel-task subcommand and original argv', () => {
+    const f = fixture(uniqueRunId('bin'));
+    const dir = join(TEST_TMP, f.runId);
+    mkdirSync(dir, { recursive: true });
+    const { bin, record } = writeFakeBin(dir);
 
-    const result = runCancel(f, 0);
-
-    assert.equal(result.status, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
-    assert.match(result.stdout, /agent_exited/);
-    assert.equal(readFileSync(f.ledgerPath, 'utf8').split('\n').filter(Boolean).length, 2);
-  });
-
-  it('finds the queued dispatcher by literal full-process scan and rejects a non-match', async () => {
-    const f = fixture({
-      runId: `bash+cancel-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    });
-    appendEvent(f, {
-      time: '2026-07-14T00:00:01Z',
-      event: 'concurrency_wait',
-      run_id: f.runId,
-      task_id: f.taskId,
-    });
-    const invalidReady = `${f.readyPath}-invalid`;
-    const invalid = spawnDispatcher(f, 'different-task', invalidReady);
-    const dispatcher = spawnDispatcher(f);
-    assert.ok(invalid.pid);
-    assert.ok(dispatcher.pid);
-
-    try {
-      await Promise.all([waitFor(invalidReady), waitFor(f.readyPath)]);
-      registerProcess(f, invalid.pid, 'different-task');
-      registerProcess(f, dispatcher.pid, f.taskId);
-      const result = runCancel(f, 3);
-
-      assert.equal(result.status, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
-      assert.match(result.stdout, /agent_cancelled/);
-      assert.equal(invalid.kill(0), true, 'non-matching dispatcher must not be signaled');
-    } finally {
-      await Promise.all([stopChild(invalid), stopChild(dispatcher)]);
-    }
-  });
-
-  it('rejects a stale live pidfile PID and signals the discovered dispatcher', async () => {
-    const f = fixture();
-    const unrelated = spawn('sleep', ['30'], { stdio: 'ignore' });
-    const dispatcher = spawnDispatcher(f);
-    assert.ok(unrelated.pid);
-    assert.ok(dispatcher.pid);
-
-    try {
-      await waitFor(f.readyPath);
-      registerUnrelated(f, unrelated.pid);
-      registerProcess(f, dispatcher.pid, f.taskId);
-      writePidfile(f, unrelated.pid);
-      const result = runCancel(f, 3);
-
-      assert.equal(result.status, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
-      assert.match(result.stdout, /agent_cancelled/);
-      assert.equal(unrelated.kill(0), true, 'stale pidfile target must not be signaled');
-    } finally {
-      await Promise.all([stopChild(unrelated), stopChild(dispatcher)]);
-    }
-  });
-
-  it('escalates an unresponsive dispatcher to SIGKILL and observes a terminal event', async () => {
-    const f = fixture();
-    writeDispatcher(f, 'delayed-terminal');
-    const dispatcher = spawnDispatcher(f);
-    assert.ok(dispatcher.pid);
-
-    try {
-      await waitFor(f.readyPath);
-      registerProcess(f, dispatcher.pid, f.taskId);
-      writePidfile(f, dispatcher.pid);
-      const result = runCancel(f, 1);
-
-      assert.equal(result.status, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
-      assert.match(result.stdout, /agent_cancelled/);
-      assert.match(result.stdout, /fake_dispatcher_delayed-terminal/);
-    } finally {
-      await stopChild(dispatcher);
-    }
-  });
-
-  it('reports an orphan after SIGKILL without fabricating a ledger event', async () => {
-    const f = fixture();
-    writeDispatcher(f, 'ignore-term');
-    const dispatcher = spawnDispatcher(f);
-    assert.ok(dispatcher.pid);
-
-    try {
-      await waitFor(f.readyPath);
-      registerProcess(f, dispatcher.pid, f.taskId);
-      writePidfile(f, dispatcher.pid);
-      const before = readFileSync(f.ledgerPath, 'utf8');
-      const result = runCancel(f, 0);
-
-      assert.equal(result.status, 1, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
-      assert.match(result.stderr, /ORPHAN.*manual investigation.*no ledger event was fabricated/);
-      assert.equal(readFileSync(f.ledgerPath, 'utf8'), before);
-    } finally {
-      await stopChild(dispatcher);
-    }
-  });
-
-  it('skips SIGKILL when escalation-time identity no longer matches', async () => {
-    const f = fixture();
-    writeDispatcher(f, 'change-identity');
-    const dispatcher = spawnDispatcher(f);
-    assert.ok(dispatcher.pid);
-
-    try {
-      await waitFor(f.readyPath);
-      registerProcess(f, dispatcher.pid, f.taskId, `${f.readyPath}.identity`);
-      writePidfile(f, dispatcher.pid);
-      const result = runCancel(f, 1);
-
-      assert.equal(result.status, 1, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
-      assert.match(result.stderr, /ORPHAN/);
-      assert.equal(dispatcher.kill(0), true, 'identity-mismatched PID must not receive SIGKILL');
-    } finally {
-      await stopChild(dispatcher);
-    }
+    const result = spawnSync(
+      'bash',
+      [CANCEL_TASK_SH, f.runId, f.taskId, '--wait-seconds', '3'],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          HYDRA_HARNESS: 'bin',
+          HYDRA_BIN: bin,
+          HYDRA_STATE_ROOT: f.stateRoot,
+          HYDRA_REPO_ID: `test-${f.runId}`,
+          HYDRA_FAKE_BIN_RECORD: record,
+          BUN_BE_BUN: '1',
+        },
+      },
+    );
+    assert.equal(
+      result.status,
+      0,
+      `bin route exited ${result.status}\nstdout: ${result.stdout}\nstderr: ${result.stderr}`,
+    );
+    assert.equal(existsSync(record), true, 'the pinned binary must actually be exec\'d');
+    const captured = readFileSync(record, 'utf8');
+    assert.equal(
+      captured.includes(`argv: cancel-task ${f.runId} ${f.taskId} --wait-seconds 3`),
+      true,
+      `bin argv mismatch: ${captured}`,
+    );
+    assert.equal(
+      captured.includes('BUN_BE_BUN=unset'),
+      true,
+      `BUN_BE_BUN must be stripped at the bin exec: ${captured}`,
+    );
   });
 });

@@ -21,11 +21,11 @@ nohup bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/dispatch.sh <run> <task> \
 
 ## `--background` flag behavior
 
-What `--background` does depends on which harness runtime is selected:
+What `--background` does depends on the selected runtime:
 
-- **TypeScript harness (default).** `dispatch.sh` returns an in-process completion handle without awaiting the worker, but the same CLI process retains the live child process and polling timers until the work finishes. The shell does **not** regain control merely because the exported `dispatch()` promise has resolved; the process stays resident as the supervisor. This is why the recommended caller-backgrounded blocking pattern above is preferred.
+- **TypeScript harness (`ts`, the default and only source runtime).** `dispatch.sh` returns an in-process completion handle without awaiting the worker, but the same CLI process retains the live child process and polling timers until the work finishes. The shell does **not** regain control merely because the exported `dispatch()` promise has resolved; the process stays resident as the supervisor. This is why the recommended caller-backgrounded blocking pattern above is preferred.
 
-- **Bash fallback (`HYDRA_HARNESS=bash`).** `dispatch.sh` backgrounds `run_worker` inside the script and exits immediately, returning control to the shell.
+- **Compiled binary (`bin`, the no-Node rollback).** Same supervisor behavior as `ts` — the pinned binary (`HYDRA_BIN`) stays resident until the worker finishes. The Bash lane that used to background `run_worker` inside the script and exit immediately was retired in run 0045: `HYDRA_HARNESS=bash` now fails loudly with an explicit retirement error (see [runtime-selection.md](runtime-selection.md)).
 
 When dispatching with `--background` from a short-lived tool-shell (not a persistent terminal), follow these rules regardless of runtime:
 

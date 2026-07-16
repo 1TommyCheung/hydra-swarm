@@ -31,29 +31,58 @@ the same worktree (amend the spec + re-dispatch).
 
 ## Harness runtime selection
 
-The command surface did not change during the TypeScript cutover: continue to
-invoke `bash kit/hydra/scripts/<name>.sh ...`. Every operational shell entry point
-now selects the TypeScript implementation in `kit/hydra-ts/src/` by default.
+The command surface did not change during the TypeScript cutover or the later
+Bash retirement: continue to invoke `bash kit/hydra/scripts/<name>.sh ...`.
+Every operational entry point is a small launcher that execs the TypeScript
+implementation in `kit/hydra-ts/src/` by default (`ts`), or a pinned compiled
+binary (`bin`) for the no-Node rollback.
 
 ```bash
 bash kit/hydra/scripts/run-init.sh 0042                 # TypeScript (default)
 HYDRA_HARNESS=ts bash kit/hydra/scripts/run-init.sh 0042
-HYDRA_HARNESS=bash bash kit/hydra/scripts/run-init.sh 0042  # frozen Bash fallback
+HYDRA_HARNESS=bin HYDRA_BIN=<pinned-binary> bash kit/hydra/scripts/run-init.sh 0042   # no-Node rollback
 ```
 
-`HYDRA_HARNESS` supports `ts` and `bash`; unset means `ts`. The switch covers
-the harness and, through dispatch, the vendor-adapter runtime. A lower-level
-`HYDRA_ADAPTER_RUNTIME` override takes precedence inside TypeScript dispatch;
-leave it unset for a whole-harness rollback. The Bash bodies remain in place as
-frozen reference/rollback implementations. Their retirement is a separate
-future decision, not part of the cutover.
+`HYDRA_HARNESS` accepts `ts` (default) and `bin`. `HYDRA_HARNESS=bash` is
+**retired** (run 0045, `docs/bash-lane-retirement-plan.md`): it now fails loudly
+with an explicit retirement error and does **not** silently coerce to `ts`.
+The same applies to the adapter-layer override `HYDRA_ADAPTER_RUNTIME=bash`
+(rejected by `dispatch.ts`'s `resolveAdapterRuntime`), which also rejects any
+other unrecognized non-empty value. The Bash shell adapters under
+`kit/hydra/adapters/` were deleted; vendor dispatch is the TypeScript
+`adapter-<vendor>.ts` or the compiled `adapter-<vendor>` route only.
+
+**No-Node rollback (`bin`).** `HYDRA_HARNESS=bin` execs a prebuilt
+`bun build --compile` single binary selected by `HYDRA_BIN` (it must be
+absolute, regular, and executable). A retained checksummed known-good artifact
+is installed as the recovery path:
+
+```bash
+# Current pinned rollback artifact (see the manifest alongside it for the SHA):
+HYDRA_BIN=~/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64
+
+# Recover any command with no Node.js on PATH:
+HYDRA_HARNESS=bin \
+  HYDRA_BIN=~/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64 \
+  bash kit/hydra/scripts/dispatch.sh 0042 my-task
+```
+
+The wrapper strips `BUN_BE_BUN` at the exec boundary so a leaked
+`BUN_BE_BUN=1` cannot hijack the binary. An explicitly-requested `bin` whose
+`HYDRA_BIN` is unusable is a hard error, not a silent fallthrough to `ts`.
+Rebuild from source with `cd kit/hydra-ts && npm run build:bin` (requires `bun`).
+
+A lower-level `HYDRA_ADAPTER_RUNTIME` override (`ts` or `compiled`) takes
+precedence inside TypeScript dispatch for the adapter only; leave it unset for
+normal operation.
 
 ## Environment variables (the operational surface)
 
 | Var | Purpose |
 |---|---|
-| `HYDRA_HARNESS` | Harness runtime: `ts` (default) or `bash` (frozen reference/rollback fallback). |
-| `HYDRA_ADAPTER_RUNTIME` | Advanced mixed-runtime override for TypeScript dispatch: `ts` or `bash`; takes precedence over `HYDRA_HARNESS` for the adapter only. Normally leave unset. |
+| `HYDRA_HARNESS` | Harness runtime: `ts` (default) or `bin` (pinned compiled-binary rollback via `HYDRA_BIN`). `bash` is **retired** and fails loudly. |
+| `HYDRA_BIN` | Absolute, regular, executable compiled binary for `HYDRA_HARNESS=bin`; defaults to `kit/hydra-ts/dist/hydra-cli`. Pinned rollback artifact: `~/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64`. |
+| `HYDRA_ADAPTER_RUNTIME` | Advanced adapter-only override for TypeScript dispatch: `ts` or `compiled`. `bash` is **retired** (rejected); any other unrecognized value is also rejected. Normally leave unset. |
 | `HYDRA_WAVE` | Wave level; ≥1 activates the `wave_1` bootstrap (gitnexus analyze). Or set `kit/hydra/WAVE`. |
 | `HYDRA_STATE_ROOT` | Override the external state root entirely (takes precedence over `XDG_STATE_HOME` and the default). |
 | `XDG_STATE_HOME` | Base dir for state; when set and `HYDRA_STATE_ROOT` is unset, the state root resolves to `${XDG_STATE_HOME}/<repo-id>-hydra` (default `~/.local/state/<repo-id>-hydra`). |
@@ -165,8 +194,8 @@ It's recommend-only — a human pins the role.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| TypeScript entry point reports `bad option: --experimental-strip-types`, or `npm test` exits 9 | A stale Node (observed: `/usr/local/bin/node` v17.4.0) shadows nvm's Node in a login/non-interactive shell | Current entry points use `hydra_resolve_node()`; update to current code. For npm, invoke it from an environment where `node --version` is ≥22.6, or temporarily use `HYDRA_HARNESS=bash` for Hydra commands. |
-| Worker "completed" but no new commit; head == a prior commit | **Empty objective** (block-scalar not read) — historical, now fixed | `build-worker-prompt.sh` uses `hydra_yaml_block`. If you see it again, dump the prompt: `bash kit/hydra/adapters/build-worker-prompt.sh <spec>` |
+| TypeScript entry point reports `bad option: --experimental-strip-types`, or `npm test` exits 9 | A stale Node (observed: `/usr/local/bin/node` v17.4.0) shadows nvm's Node in a login/non-interactive shell | Current entry points use `hydra_resolve_node()`; update to current code. For npm, invoke it from an environment where `node --version` is ≥22.6, or use the no-Node rollback: `HYDRA_HARNESS=bin HYDRA_BIN=~/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64`. |
+| Worker "completed" but no new commit; head == a prior commit | **Empty objective** (block-scalar not read) — historical, now fixed | `build-worker-prompt` uses `hydra_yaml_block`. If you see it again, dump the prompt: `node --experimental-strip-types kit/hydra-ts/src/build-worker-prompt.ts <spec>` |
 | **Multiple vendors fail identically** | Suspect the harness, not the vendors | Dump the actual worker prompt first; check the drop and stderr under `sessions/` |
 | opencode/GLM: `Unexpected server error` immediately | Transient Z.AI coding-endpoint 500 | Retry; if persistent, `allocate.sh` route around; GLM read-only reviews usually still work |
 | opencode worker hangs on a permission prompt | Missing `--auto` | The adapter passes `--auto`; for manual runs use `opencode run --format json --auto` |

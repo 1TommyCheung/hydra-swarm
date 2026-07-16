@@ -87,9 +87,10 @@ Dates are the day the wave's exit criteria were met in this repo.
   run initialization, worktree creation, a herdr-pane-hosted Codex worker using
   the TypeScript adapter, promotion, squash, and dependency-ordered integration
   of two candidates with the combined verification gate. After that run passed,
-  the human-authorized default flipped to TypeScript. Unset now means `ts`;
-  `HYDRA_HARNESS=bash` is the explicit rollback. The Bash bodies remain frozen
-  as reference/rollback code; retirement remains a separate decision.
+  the human-authorized default flipped to TypeScript. Unset now means `ts`.
+  (The Bash bodies were later fully retired in run 0045 — see below — so
+  `HYDRA_HARNESS=bash` is no longer a rollback; the no-Node rollback is the
+  pinned compiled binary selected by `HYDRA_HARNESS=bin` / `HYDRA_BIN`.)
 - **Post-cutover independent review (run 0038):** the three vendor reviews
   confirmed broad functional parity but exposed the stale-Node environment risk.
   Codex reproduced the critical boundary gap directly: all shell wrappers used
@@ -103,6 +104,29 @@ Dates are the day the wave's exit criteria were met in this repo.
   the fix; the full suite reported 577 tests. The cutover report and migration
   notes lived in the pre-extraction tree (`../hydra-reports/wave2-ts-cutover.md`
   and `../../hydra-ts/migration/`); they were not carried into this standalone repo.
+
+### Bash lane retirement · 2026-07-16
+
+- **Full retirement of the Bash implementation lane** (run 0045,
+  `docs/bash-lane-retirement-plan.md`). The six shell vendor adapters under
+  `kit/hydra/adapters/` were deleted; the 28 `kit/hydra/scripts/*.sh` filenames
+  remain as small `ts`/`bin` launchers with no Bash bodies. `HYDRA_HARNESS=bash`
+  and `HYDRA_ADAPTER_RUNTIME=bash` now fail loudly with an explicit retirement
+  error and do **not** silently coerce to `ts`; `dispatch.ts`'s
+  `resolveAdapterRuntime` also rejects any other unrecognized adapter-runtime
+  value.
+- **No-Node rollback** is now a pinned, checksummed `bun build --compile`
+  binary selected by `HYDRA_HARNESS=bin` / `HYDRA_BIN`, independent of an
+  installed Node or Bun. The retained known-good artifact is
+  `~/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64`
+  (manifest alongside it: `source_sha cfdb0415…`, `sha256 ad75f958…`). The
+  Bash body suite (`status.sh`/`cancel-task.sh` Bash-mode cases) was replaced
+  by launcher-routing and dispatch-runtime-selection coverage.
+- **Rationale:** the shell lane was ~4.4k mostly-untested lines with known
+  silent rot (six `mapfile` commands failed on stock macOS Bash 3.2), semantic
+  drift from the TypeScript lane, and no recorded post-cutover incident it
+  actually recovered. The compiled-binary black-box evidence (45/45 native
+  macOS arm64) was materially stronger rollback evidence than the shell lane.
 
 ### Wave 3 preflight tooling — first real artifact · 2026-07-13
 
@@ -214,7 +238,10 @@ policy) are still design-only. Scope is informed by a portability audit
   locations env-overridable (`HYDRA_STATE_ROOT`/`WORKTREE_ROOT`/`REPO_ID`).
 - The friction is the *ecosystem*: 10 external CLIs + 4 vendor logins + Graphify
   API keys + the global herdr integrations — none of which clone with the repo.
-- **bash 4+ required** (`mapfile` in 5 scripts); macOS ships 3.2.
+- **bash 4+ requirement removed.** The retired Bash lane needed `mapfile` (5
+  scripts) and so required Bash 4+ while macOS ships 3.2; the `ts`/`bin`
+  launchers have no such dependency. (`hydra doctor` still checks for a usable
+  shell for the launcher preambles.)
 - **Kimi write-role portability** was a real cross-platform gap under
   `sandbox-exec` (macOS-only); now closed by migrating to `srt`, which works on
   both macOS and Linux with the same CLI/config.

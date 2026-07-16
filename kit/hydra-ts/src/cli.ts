@@ -8,7 +8,7 @@
 // every CLI module's exported main(args) and routes process.argv to the right
 // one explicitly. See docs/bun-migration-stage1-cli.md for the full table.
 //
-// Invocation shape mirrors the existing bash wrappers 1:1:
+// Invocation shape mirrors the kit/hydra/scripts/<name>.sh entry points 1:1:
 //   cli.ts <subcommand> [args...]   ==   scripts/<subcommand>.sh [args...]
 // The five adapter-*.ts modules keep their existing standalone shape:
 //   cli.ts adapter-<vendor> <verb> [args...]
@@ -161,8 +161,10 @@ if (isMain) {
         import('../../hydra/profiles/kimi-k2.7-code.yaml', { with: { type: 'text' } }),
       ]);
     initEmbeddedAssets({
-      'schemas/result.schema.json': resultSchema.default,
-      'schemas/review.schema.json': reviewSchema.default,
+      // The Bun text loader yields strings at runtime; tsc resolves the .json
+      // specifiers to their parsed object types, hence the casts.
+      'schemas/result.schema.json': resultSchema.default as unknown as string,
+      'schemas/review.schema.json': reviewSchema.default as unknown as string,
       'profiles/claude-fable-5.yaml': profileClaude.default,
       'profiles/codex-gpt-5.6-sol.yaml': profileCodex.default,
       'profiles/opencode-glm-5.2.yaml': profileOpencode.default,

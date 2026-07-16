@@ -3,8 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Hydra-Swarm harness — TypeScript port of hydra/scripts (bash frozen as historical).",
-  "engines": { "node": ">=22.6" },
+  "description": "Hydra-Swarm harness — TypeScript implementation (the bash lane was retired in run 0045; rollback is a pinned compiled binary via HYDRA_HARNESS=bin).",
+  "engines": {
+    "node": ">=22.6"
+  },
   "scripts": {
     "test": "npm run test:concurrent && npm run test:promote",
     "test:concurrent": "node --experimental-strip-types --test $(find test -name '*.test.ts' ! -name 'promote.test.ts' -print)",
@@ -15,5 +17,8 @@
     "build:cli-check": "node --experimental-strip-types src/cli.ts",
     "test:blackbox": "node --experimental-strip-types scripts/blackbox-compiled.ts"
   },
-  "devDependencies": { "typescript": "^5.5.0" }
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.5.0"
+  }
 }

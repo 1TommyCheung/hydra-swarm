@@ -8,11 +8,17 @@
 
 **Hydra-Swarm**: a local multi-agent software development system. One lead (the *head* — Claude Code) plans and judges; a deterministic harness owns processes, state, and verification; heterogeneous coding agents (the *swarm* — Claude Code, Codex/GPT‑5.6 Sol, OpenCode/GLM 5.2, Kimi K2.7 Code) implement in isolated Git worktrees; accepted work converges through a controlled integration worktree behind evidence gates. Cut off the head and a new one grows from Git + the state store — lead replacement is a design guarantee, not a recovery hack.
 
-The harness implementation now lives in `kit/hydra-ts/src/*.ts`. Operators continue
-to call the stable `kit/hydra/scripts/<name>.sh` entry points; those wrappers execute
-the TypeScript implementation by default. Set `HYDRA_HARNESS=bash` for the
-frozen Bash reference/rollback implementation. The migration findings, plans,
-reviews, and shakedown history lived in the pre-extraction tree (`../../hydra-ts/migration/`); that directory was not carried into this standalone repo.
+The harness implementation lives in `kit/hydra-ts/src/*.ts`. Operators call the
+stable `kit/hydra/scripts/<name>.sh` entry points; those are small launchers that
+exec the TypeScript implementation by default (`ts`). The Bash implementation
+lane (the `kit/hydra/adapters/*.sh` shell adapters and the script Bash bodies)
+was retired in run 0045 (`docs/bash-lane-retirement-plan.md`): `HYDRA_HARNESS=bash`
+and `HYDRA_ADAPTER_RUNTIME=bash` now fail loudly rather than coercing to `ts`. The
+no-Node rollback is `HYDRA_HARNESS=bin` with a pinned compiled binary
+(`HYDRA_BIN=~/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64`).
+The migration findings, plans, reviews, and shakedown history lived in the
+pre-extraction tree (`../../hydra-ts/migration/`); that directory was not carried
+into this standalone repo.
 
 ## Naming conventions (canonical)
 

@@ -8,6 +8,14 @@ dispatch.
 verifies each claimed scenario against the current implementation and prescribes
 what to build next.
 
+**Runtime note (run 0045):** the Bash implementation lane referenced below
+(`dispatch.sh` Bash bodies, `HYDRA_HARNESS=bash`) was retired in run 0045
+(`docs/bash-lane-retirement-plan.md`). `ts` is the default and only source
+runtime; the no-Node rollback is `HYDRA_HARNESS=bin` with a pinned compiled
+`HYDRA_BIN` (`~/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64`).
+`HYDRA_HARNESS=bash` / `HYDRA_ADAPTER_RUNTIME=bash` now fail loudly with an
+explicit retirement error rather than silently coercing to `ts`.
+
 **Key files read for verification:**
 - `kit/hydra-ts/src/dispatch.ts`
 - `kit/hydra-ts/src/lib.ts`
@@ -249,7 +257,9 @@ Believed **solved** via `timeout_minutes` (inactivity window) plus a
 - `dispatch.ts` `runWorkerInHerdrPane` (`dispatch.ts:913-938`): identical
   semantics, using `herdrActivity()` (`.cli.jsonl` + `.stderr`).
 - `dispatch.sh` (`dispatch.sh:239-246`, `dispatch.sh:335-344`,
-  `dispatch.sh:379-388`): mirrors the same `limit`/`hard_cap` logic in Bash.
+  `dispatch.sh:379-388`): mirrored the same `limit`/`hard_cap` logic in Bash at
+  verification time; that Bash body was retired in run 0045 and `dispatch.sh`
+  is now a `ts`/`bin` launcher only.
 
 ### Verdict
 **Confirmed solved.** The inactivity window resets on capture-file growth, and
@@ -423,9 +433,11 @@ bash kit/hydra/scripts/cancel-task.sh <run-id> <task-id> [--wait-seconds N]
   terminal event.
 - If the dispatch pidfile is stale and points to an unrelated process, the
   command-line validation in step 2 rejects it.
-- If the task was started with the Bash harness (`HYDRA_HARNESS=bash`),
-  `dispatch.sh` installs an equivalent trap (`dispatch.sh:107-118`) that records
-  `agent_cancelled`; the same SIGTERM trigger works.
+- At verification time, a task started with the Bash harness
+  (`HYDRA_HARNESS=bash`) had an equivalent trap in `dispatch.sh`
+  (`dispatch.sh:107-118`) recording `agent_cancelled`. That lane was retired in
+  run 0045: `HYDRA_HARNESS=bash` now fails loudly, and the TypeScript
+  `dispatch.ts` trap is the only live cancellation path.
 
 ---
 

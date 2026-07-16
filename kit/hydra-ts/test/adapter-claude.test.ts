@@ -163,7 +163,7 @@ describe('adapter-claude', () => {
   before(() => mkdirSync(TEST_TMP, { recursive: true }));
   after(cleanTmp);
 
-  it('builds a worker prompt matching build-worker-prompt.sh', () => {
+  it('builds a worker prompt matching the retired build-worker-prompt.sh contract', () => {
     const dir = makeTempDir('prompt');
     const taskSpec = join(dir, 'task.yaml');
     writeTaskSpec(taskSpec, {

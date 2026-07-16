@@ -22,6 +22,7 @@ import {
   type ChildProcessLike,
   type Clock,
   type DispatchOptions,
+  type ExecFileSyncLike,
   type HerdrClient,
   type SpawnLike,
 } from '../src/dispatch.ts';
@@ -41,9 +42,7 @@ interface Fixture {
   sessionsDir: string;
   worktree: string;
   repoRoot: string;
-  bashAdapterDir: string;
   tsAdapterDir: string;
-  adapterPath: string;
   tsAdapterPath: string;
   taskSpecPath: string;
 }
@@ -54,7 +53,6 @@ function fixture(
     vendor?: string;
     timeoutMinutes?: number;
     specVersion?: number | string;
-    adapterContent?: string;
     tsAdapterContent?: string;
     worktree?: string;
   } = {},
@@ -64,7 +62,6 @@ function fixture(
   const sessionsDir = join(runDir, 'sessions');
   const worktree = overrides.worktree ?? join(TEST_TMP, id, 'worktree');
   const repoRoot = join(TEST_TMP, id, 'repo');
-  const bashAdapterDir = join(repoRoot, 'hydra', 'adapters');
   const tsAdapterDir = join(repoRoot, 'hydra-ts', 'src');
   const taskSpecPath = join(runDir, 'tasks', 'task-a.yaml');
   const vendor = overrides.vendor ?? 'claude';
@@ -72,7 +69,6 @@ function fixture(
   mkdirSync(join(runDir, 'tasks'), { recursive: true });
   mkdirSync(sessionsDir, { recursive: true });
   mkdirSync(worktree, { recursive: true });
-  mkdirSync(bashAdapterDir, { recursive: true });
   mkdirSync(tsAdapterDir, { recursive: true });
   writeFileSync(taskSpecPath, [
     'task_id: task-a',
@@ -85,9 +81,7 @@ function fixture(
     'base_commit: 71bcbcf9acf0aeadc5d8eb5d1c0d3868b45b6070',
     '',
   ].join('\n'));
-  const adapterPath = join(bashAdapterDir, `${vendor}.sh`);
   const tsAdapterPath = join(tsAdapterDir, `adapter-${vendor}.ts`);
-  writeFileSync(adapterPath, overrides.adapterContent ?? '#!/usr/bin/env bash\necho ok\n');
   writeFileSync(tsAdapterPath, overrides.tsAdapterContent ?? 'export function start(): void {}\n');
   return {
     runId: id,
@@ -96,9 +90,7 @@ function fixture(
     sessionsDir,
     worktree,
     repoRoot,
-    bashAdapterDir,
     tsAdapterDir,
-    adapterPath,
     tsAdapterPath,
     taskSpecPath,
   };
@@ -152,8 +144,9 @@ function fakeSpawn(options: {
     const call = { command, args, options: spawnOptions, child };
     calls.push(call);
     options.onSpawn?.(call);
+    const autoExitCode = options.autoExit === false ? 0 : (options.autoExit ?? 0);
     if (options.autoExit !== false) {
-      queueMicrotask(() => child.exit(options.signal ? null : (options.autoExit ?? 0), options.signal ?? null));
+      queueMicrotask(() => child.exit(options.signal ? null : autoExitCode, options.signal ?? null));
     }
     return child;
   };
@@ -228,7 +221,6 @@ function injectedOptions(
     stateRoot: f.stateRoot,
     repoRoot: f.repoRoot,
     tsAdapterDir: f.tsAdapterDir,
-    bashAdapterDir: f.bashAdapterDir,
     env: {},
     noSignals: true,
     spawn,
@@ -305,18 +297,18 @@ describe('dispatch Bash parity', () => {
 
   it('rejects a missing or non-file vendor adapter', async () => {
     const f = fixture(runId());
-    rmSync(f.adapterPath);
+    rmSync(f.tsAdapterPath);
     const { spawn } = fakeSpawn();
     await assert.rejects(dispatch(
       f.runId,
       'task-a',
-      injectedOptions(f, spawn, { adapterRuntime: 'bash' }),
+      injectedOptions(f, spawn),
     ), /no adapter for vendor 'claude'/);
-    mkdirSync(f.adapterPath);
+    mkdirSync(f.tsAdapterPath);
     await assert.rejects(dispatch(
       f.runId,
       'task-a',
-      injectedOptions(f, spawn, { adapterRuntime: 'bash' }),
+      injectedOptions(f, spawn),
     ), /no adapter for vendor 'claude'/);
   });
 
@@ -331,14 +323,15 @@ describe('dispatch Bash parity', () => {
   it('dispatches the selected adapter and closes task_started with agent_exited', async () => {
     const f = fixture(runId(), { specVersion: '03' });
     const mock = fakeSpawn();
-    const options = injectedOptions(f, mock.spawn, { adapterRuntime: 'bash' });
+    const options = injectedOptions(f, mock.spawn, { adapterRuntime: 'ts' });
     const { output, value } = await captureStdout(() => dispatch(f.runId, 'task-a', options));
 
     assert.equal(value.agentRunId, `${f.runId}-task-a-v03`);
     assert.equal(output.trim(), value.agentRunId);
     assert.equal(mock.calls.length, 1);
-    assert.equal(mock.calls[0].command, f.adapterPath);
+    assert.equal(mock.calls[0].command, process.execPath);
     assert.deepEqual(mock.calls[0].args, [
+      '--experimental-strip-types', f.tsAdapterPath,
       'start', f.taskSpecPath, f.worktree,
       join(f.runDir, 'inbox', value.agentRunId),
       f.sessionsDir, value.agentRunId, '',
@@ -379,49 +372,66 @@ describe('dispatch Bash parity', () => {
     }
   });
 
-  it('uses the Bash adapter when HYDRA_HARNESS explicitly requests bash', async () => {
+  it('rejects HYDRA_HARNESS=bash as a retired runtime (no silent coercion to ts)', async () => {
     const f = fixture(runId());
     const mock = fakeSpawn();
-    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+    await assert.rejects(dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
       env: { HYDRA_HARNESS: 'bash' },
-    }));
-
-    assert.equal(mock.calls.length, 1);
-    assert.equal(mock.calls[0].command, f.adapterPath);
-    assert.equal(mock.calls[0].args[0], 'start');
+    })), /HYDRA_HARNESS=bash.*was retired/);
+    assert.equal(mock.calls.length, 0, 'a retired runtime must never spawn an adapter');
   });
 
-  it('prefers HYDRA_ADAPTER_RUNTIME over HYDRA_HARNESS for either runtime', async () => {
-    const bash = fixture(runId());
-    const bashMock = fakeSpawn();
-    await dispatch(bash.runId, 'task-a', injectedOptions(bash, bashMock.spawn, {
-      env: { HYDRA_HARNESS: 'ts', HYDRA_ADAPTER_RUNTIME: 'bash' },
-    }));
-    assert.equal(bashMock.calls[0].command, bash.adapterPath);
+  it('rejects HYDRA_ADAPTER_RUNTIME=bash as a retired runtime (no silent coercion to ts)', async () => {
+    const f = fixture(runId());
+    const mock = fakeSpawn();
+    await assert.rejects(dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+      env: { HYDRA_ADAPTER_RUNTIME: 'bash' },
+    })), /HYDRA_ADAPTER_RUNTIME=bash.*was retired/);
+    assert.equal(mock.calls.length, 0, 'a retired runtime must never spawn an adapter');
+  });
 
+  it('rejects an unrecognized HYDRA_ADAPTER_RUNTIME value instead of coercing to ts', async () => {
+    const f = fixture(runId());
+    const mock = fakeSpawn();
+    await assert.rejects(dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+      env: { HYDRA_ADAPTER_RUNTIME: 'nonsense' },
+    })), /unrecognized HYDRA_ADAPTER_RUNTIME='nonsense'/);
+    assert.equal(mock.calls.length, 0);
+  });
+
+  it('prefers HYDRA_ADAPTER_RUNTIME=ts even when HYDRA_HARNESS requests bin', async () => {
     const ts = fixture(runId());
     const tsMock = fakeSpawn();
     await dispatch(ts.runId, 'task-a', injectedOptions(ts, tsMock.spawn, {
-      env: { HYDRA_HARNESS: 'bash', HYDRA_ADAPTER_RUNTIME: 'ts' },
+      env: { HYDRA_HARNESS: 'bin', HYDRA_ADAPTER_RUNTIME: 'ts' },
     }));
     assert.equal(tsMock.calls[0].command, process.execPath);
     assert.equal(tsMock.calls[0].args[1], ts.tsAdapterPath);
+
+    const def = fixture(runId());
+    const defMock = fakeSpawn();
+    await dispatch(def.runId, 'task-a', injectedOptions(def, defMock.spawn, {
+      env: { HYDRA_HARNESS: 'bin' },
+    }));
+    assert.equal(defMock.calls[0].command, process.execPath);
+    assert.equal(defMock.calls[0].args[1], def.tsAdapterPath);
   });
 
   it('prefers the adapterRuntime option over HYDRA_ADAPTER_RUNTIME', async () => {
-    const bash = fixture(runId());
-    const bashMock = fakeSpawn();
-    await dispatch(bash.runId, 'task-a', injectedOptions(bash, bashMock.spawn, {
-      adapterRuntime: 'bash',
+    const compiled = fixture(runId());
+    const compiledMock = fakeSpawn();
+    await dispatch(compiled.runId, 'task-a', injectedOptions(compiled, compiledMock.spawn, {
+      adapterRuntime: 'compiled',
       env: { HYDRA_ADAPTER_RUNTIME: 'ts' },
     }));
-    assert.equal(bashMock.calls[0].command, bash.adapterPath);
+    assert.equal(compiledMock.calls[0].command, process.execPath);
+    assert.equal(compiledMock.calls[0].args[0], 'adapter-claude');
 
     const ts = fixture(runId());
     const tsMock = fakeSpawn();
     await dispatch(ts.runId, 'task-a', injectedOptions(ts, tsMock.spawn, {
       adapterRuntime: 'ts',
-      env: { HYDRA_ADAPTER_RUNTIME: 'bash' },
+      env: { HYDRA_ADAPTER_RUNTIME: 'compiled' },
     }));
     assert.equal(tsMock.calls[0].command, process.execPath);
     assert.equal(tsMock.calls[0].args[1], ts.tsAdapterPath);
@@ -466,26 +476,32 @@ describe('dispatch Bash parity', () => {
   it('resolves the adapter runtime with compiled-binary precedence (resolveAdapterRuntime)', () => {
     // Inside a compiled binary the runtime is 'compiled' regardless of
     // HYDRA_HARNESS / HYDRA_ADAPTER_RUNTIME — 'ts' can never work there (no
-    // Node, no adapter .ts file).
+    // Node, no adapter .ts file). 'bash' is now RETIRED and fails even inside
+    // a compiled binary (it must not silently win or coerce to ts).
     assert.equal(resolveAdapterRuntime(undefined, 'bin', true), 'compiled');
-    assert.equal(resolveAdapterRuntime(undefined, 'bash', true), 'compiled');
-    assert.equal(resolveAdapterRuntime('ts', 'bash', true), 'compiled');
-    // ... UNLESS an operator explicitly forces the bash adapters.
-    assert.equal(resolveAdapterRuntime('bash', 'bin', true), 'bash');
-    assert.equal(resolveAdapterRuntime('bash', undefined, true), 'bash');
+    assert.equal(resolveAdapterRuntime(undefined, 'ts', true), 'compiled');
+    assert.equal(resolveAdapterRuntime('ts', 'bin', true), 'compiled');
+    assert.throws(() => resolveAdapterRuntime('bash', 'bin', true), /was retired/);
+    assert.throws(() => resolveAdapterRuntime(undefined, 'bash', true), /was retired/);
+    assert.throws(() => resolveAdapterRuntime('bash', undefined, true), /was retired/);
     // An explicit 'compiled' override selects the self-reexec runtime even
     // under plain Node (this is how the tests below exercise the branch
     // without a bun-built binary).
     assert.equal(resolveAdapterRuntime('compiled', undefined, false), 'compiled');
-    assert.equal(resolveAdapterRuntime('compiled', 'bash', false), 'compiled');
-    // The legacy source-lane mapping is byte-for-byte unchanged.
+    assert.equal(resolveAdapterRuntime('compiled', 'ts', false), 'compiled');
+    // The source-lane default is 'ts'; HYDRA_HARNESS=bin is resolved by the
+    // wrapper launcher before dispatch, so a non-compiled process takes 'ts'.
     assert.equal(resolveAdapterRuntime(undefined, undefined, false), 'ts');
     assert.equal(resolveAdapterRuntime(undefined, 'bin', false), 'ts');
-    assert.equal(resolveAdapterRuntime(undefined, 'bash', false), 'bash');
-    assert.equal(resolveAdapterRuntime('ts', 'bash', false), 'ts');
-    assert.equal(resolveAdapterRuntime('bash', 'ts', false), 'bash');
-    assert.equal(resolveAdapterRuntime('nonsense', undefined, false), 'ts');
-    assert.equal(resolveAdapterRuntime('', 'bash', false), 'ts');
+    assert.equal(resolveAdapterRuntime(undefined, 'ts', false), 'ts');
+    assert.equal(resolveAdapterRuntime('ts', 'ts', false), 'ts');
+    assert.equal(resolveAdapterRuntime('', 'ts', false), 'ts');
+    // 'bash' is retired under plain Node too (no coercion to 'ts') ...
+    assert.throws(() => resolveAdapterRuntime(undefined, 'bash', false), /was retired/);
+    assert.throws(() => resolveAdapterRuntime('bash', 'ts', false), /was retired/);
+    assert.throws(() => resolveAdapterRuntime('', 'bash', false), /was retired/);
+    // ... and any other unrecognized override value is rejected.
+    assert.throws(() => resolveAdapterRuntime('nonsense', undefined, false), /unrecognized/);
   });
 
   it('compiled runtime self-reexecs process.execPath through the adapter-<vendor> route', async () => {
@@ -824,7 +840,7 @@ describe('dispatch Bash parity', () => {
   });
 
   it('uses the newest non-empty session only when resume is requested and supported', async () => {
-    const f = fixture(runId(), { adapterContent: 'case "$1" in start|resume) ;; esac\n' });
+    const f = fixture(runId(), { tsAdapterContent: 'export function start(): void {}\nexport function resume(): void {}\n' });
     const oldPath = join(f.sessionsDir, `${f.runId}-task-a-v1.json`);
     const newEmptyPath = join(f.sessionsDir, `${f.runId}-task-a-v2.json`);
     writeFileSync(oldPath, JSON.stringify({ session_id: 'session-old' }));
@@ -835,25 +851,23 @@ describe('dispatch Bash parity', () => {
     utimesSync(newEmptyPath, recent, recent);
     const mock = fakeSpawn();
     const options = injectedOptions(f, mock.spawn, {
-      adapterRuntime: 'bash',
       env: { HYDRA_DELIVERY: 'resume' },
     });
     await dispatch(f.runId, 'task-a', options);
 
-    assert.equal(mock.calls[0].args[0], 'resume');
+    assert.equal(mock.calls[0].args[2], 'resume');
     assert.equal(mock.calls[0].args.at(-1), 'session-old');
     assert.equal(ledger(f)[0].delivery, 'resume');
   });
 
-  it('cold-restarts while preserving a discovered prior session when a Bash adapter lacks resume', async () => {
+  it('cold-restarts while preserving a discovered prior session when a TypeScript adapter lacks resume', async () => {
     const f = fixture(runId(), { vendor: 'codex' });
     writeFileSync(join(f.sessionsDir, `${f.runId}-task-a-v1.json`), JSON.stringify({ session_id: 'session-1' }));
     const mock = fakeSpawn();
     await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
-      adapterRuntime: 'bash',
       env: { HYDRA_DELIVERY: 'resume' },
     }));
-    assert.equal(mock.calls[0].args[0], 'start');
+    assert.equal(mock.calls[0].args[2], 'start');
     assert.equal(mock.calls[0].args.at(-1), 'session-1');
   });
 
@@ -967,7 +981,6 @@ describe('dispatch Bash parity', () => {
     };
 
     await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
-      adapterRuntime: 'bash',
       env: { HYDRA_HERDR_PANES: '1', HYDRA_OPENCODE_MODEL: 'test/glm' },
       herdr,
       buildWorkerPrompt: () => 'the rendered worker prompt',
@@ -979,7 +992,8 @@ describe('dispatch Bash parity', () => {
     }));
 
     assert.equal(mock.calls.length, 1);
-    assert.equal(mock.calls[0].command, f.adapterPath);
+    assert.equal(mock.calls[0].command, process.execPath);
+    assert.match(mock.calls[0].args.join(' '), /adapter-opencode\.ts/);
     assert.equal(herdr.starts.length, 1);
     assert.equal(herdr.starts[0].workspace, 'workspace-monitor');
     assert.match(herdr.starts[0].command, /tail -n \+1 -f/);
@@ -1133,7 +1147,6 @@ describe('dispatch Bash parity', () => {
       });
       let spawnCalled = false;
       await dispatch(f.runId, 'task-a', injectedOptions(f, () => { spawnCalled = true; throw new Error('no spawn'); }, {
-        adapterRuntime: 'bash',
         env: { HYDRA_HERDR_PANES: '1' },
         herdr,
         clock,
@@ -1151,7 +1164,7 @@ describe('dispatch Bash parity', () => {
 
       const command = herdr.starts[0].command;
       const bannerPath = join(f.sessionsDir, `${expectedId}.pane-banner.txt`);
-      assert.ok(command.indexOf(`cat '${bannerPath}'`) < command.indexOf(`'${f.adapterPath}'`), `${vendor} banner is printed before the adapter`);
+      assert.ok(command.indexOf(`cat '${bannerPath}'`) < command.indexOf(`'${f.tsAdapterPath}'`), `${vendor} banner is printed before the adapter`);
       assert.match(command, /echo \$\$ > '.*\.pid'/, `${vendor} inner writes pidfile`);
       assert.match(command, /printf '%s'.*> '.*\.exit'/, `${vendor} inner writes sentinel`);
       assert.equal(ledger(f).at(-1)?.event, 'agent_exited');
@@ -1600,17 +1613,22 @@ describe('dispatch Bash parity', () => {
     });
 
     it('removes the dispatch pidfile when a cancelling signal fires', async () => {
-      const f = fixture(runId(), { adapterContent: '#!/usr/bin/env bash\nsleep 60\n' });
+      // A long-running TS stub adapter keeps the worker alive until SIGINT so
+      // the pidfile is observably written and then removed by the signal path.
+      const tsAdapterDir = join(TEST_TMP, `signal-ts-${runId()}`, 'src');
+      mkdirSync(tsAdapterDir, { recursive: true });
+      writeFileSync(join(tsAdapterDir, 'adapter-claude.ts'), 'export function start(): void { setInterval(() => {}, 60000); }\n');
       const dispatchSrc = fileURLToPath(new URL('../src/dispatch.ts', import.meta.url));
-      const helperPath = join(TEST_TMP, `signal-helper-${f.runId}.mjs`);
+      const helperPath = join(TEST_TMP, `signal-helper-${runId()}.mjs`);
       writeFileSync(helperPath, [
         `import { dispatch } from ${JSON.stringify(pathToFileURL(dispatchSrc).href)};`,
-        'const [runId, taskId, stateRoot, repoRoot] = process.argv.slice(2);',
-        'await dispatch(runId, taskId, { stateRoot, repoRoot });',
+        'const [runId, taskId, stateRoot, repoRoot, tsAdapterDir] = process.argv.slice(2);',
+        'await dispatch(runId, taskId, { stateRoot, repoRoot, tsAdapterDir });',
         '',
       ].join('\n'), 'utf8');
 
-      const child = spawn(process.execPath, ['--experimental-strip-types', helperPath, f.runId, 'task-a', f.stateRoot, f.repoRoot], { stdio: 'ignore' });
+      const f = fixture(runId());
+      const child = spawn(process.execPath, ['--experimental-strip-types', helperPath, f.runId, 'task-a', f.stateRoot, f.repoRoot, tsAdapterDir], { stdio: 'ignore' });
       const pidfile = join(f.sessionsDir, 'supervisor', `${f.runId}-task-a-v1.dispatch.pid`);
 
       try {

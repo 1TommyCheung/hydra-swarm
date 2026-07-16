@@ -16,26 +16,24 @@ Drive the deterministic harness; plan and judge, but never hand-mutate authorita
 
 ## Runtime default
 
-TypeScript is the default harness implementation. Continue calling the unchanged bash entry points and let the transparent switch select the implementation. Set `HYDRA_HARNESS=bash` to force the original bash body when debugging or working around a TypeScript path failure. See [references/ts-bash-switch.md](references/ts-bash-switch.md) for adapter runtime selection, direct node invocation, the stale-node PATH gotcha, and `hydra_resolve_node()`.
+TypeScript is the default and only source runtime. Continue calling the unchanged `kit/hydra/scripts/*.sh` entry points; each is a small launcher that execs the TypeScript implementation in `kit/hydra-ts/src/`. The Bash implementation lane was **retired** in run 0045 (`docs/bash-lane-retirement-plan.md`): `HYDRA_HARNESS=bash` and `HYDRA_ADAPTER_RUNTIME=bash` now fail loudly with an explicit retirement error and do **not** silently coerce to `ts`.
 
-Bash remains frozen at Wave 2 exit and kept byte-for-byte as reference/rollback — do not delete it. Retiring bash entirely is a separate, later, deliberately-scoped decision.
+The no-Node rollback is `HYDRA_HARNESS=bin` with a pinned compiled binary (`HYDRA_BIN`), independent of an installed Node/Bun runtime. See [references/runtime-selection.md](references/runtime-selection.md) for the `ts`/`bin` contract, the pinned rollback artifact and its recovery command, adapter runtime selection, direct node invocation, and the stale-node PATH gotcha.
 
-### Bun single-binary migration (Stage 0 only — exploratory, not operational)
+### Bun single-binary (the `bin` rollback)
 
-A `bun build --compile` migration is being explored to remove the Node.js dependency entirely, but nothing about normal harness operation changes yet. `HYDRA_HARNESS=ts` remains the default; the TypeScript path above is still what every dispatch actually runs.
-
-Stage 0 landed: `kit/hydra-ts/src/bin-cli.ts` is a minimal, additive, NOT-wired-in router proving the compiled-binary self-re-exec mechanism works (`status` and `__adapter stub` subcommands only). A real spike confirmed `process.execPath` resolves correctly across direct/symlinked/relocated invocations, but `import.meta.url`/`process.argv[1]` become synthetic paths inside a compiled binary, and `BUN_BE_BUN=1` can hijack the binary before any of its own code runs. See `docs/bun-migration-plan-codex.md` (the accepted blueprint), `docs/bun-migration-plan-review-glm.md` (cross-vendor synthesis and go/no-go), and `docs/bun-migration-spike-results.md` / `docs/bun-migration-stage0.md` for the full picture before doing any further work in this area — do not restart the planning from scratch.
+A `bun build --compile` single binary is the independent rollback path (and the only runtime that works with no Node on `PATH`). A retained, checksummed known-good artifact is installed at `~/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64`; select it with `HYDRA_HARNESS=bin HYDRA_BIN=<that path>`. `kit/hydra-ts/src/bin-cli.ts` is the minimal Stage-0 router that proved the compiled-binary self-re-exec mechanism. See `docs/bun-migration-plan-codex.md` (the accepted blueprint), `docs/bun-migration-plan-review-glm.md`, and `docs/bun-migration-spike-results.md` / `docs/bun-migration-stage0.md` for the full picture before doing further work in this area — do not restart the planning from scratch.
 
 ## Scope
 
-Current scope: Wave 2 complete — Claude, Codex, OpenCode/GLM, and Kimi; GitNexus + Graphify code intelligence; herdr terminal-host integration; capability profiles. The bash harness in `${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/` plus `${CLAUDE_PLUGIN_ROOT}/kit/hydra/adapters/` has a TypeScript counterpart in `${CLAUDE_PLUGIN_ROOT}/kit/hydra-ts/src/` with the same argument/stdout/exit-code contract, except that the loop-thinking detector and the `loop_suspicion` status field are TypeScript-only.
+Current scope: Wave 2 complete — Claude, Codex, OpenCode/GLM, and Kimi; GitNexus + Graphify code intelligence; herdr terminal-host integration; capability profiles. The implementation lives in `${CLAUDE_PLUGIN_ROOT}/kit/hydra-ts/src/`; the `kit/hydra/scripts/*.sh` entry points are stable launchers for it (and for the `bin` compiled rollback). The shell-adapter lane under `kit/hydra/adapters/` was retired in run 0045. The loop-thinking detector and the `loop_suspicion` status field are TypeScript-only.
 
 ## The run loop
 
 1. Initialize the run: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/run-init.sh <run-id>` creates run state and emits `run_started`.
 2. Create task specs: instantiate one task spec per lane into `runs/run-<id>/tasks/<task>.yaml`, using `${CLAUDE_PLUGIN_ROOT}/kit/hydra/templates/task.example.yaml` as the template. The example template's vendor comment is stale; set `assigned_vendor` to any of `claude|codex|opencode|kimi` (dispatch resolves all four). Assign each writer a disjoint `writable_paths` lane; never let two writers share a tree.
 3. Prepare worktrees: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/create-worktree.sh <run-id> <task>` creates the worktree, branch, bootstrap, and PORT.
-4. Dispatch workers: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/dispatch.sh <run-id> <task> [--background]`. The task spec's `assigned_vendor` (`claude|codex|opencode|kimi`) routes to the TypeScript adapter at `${CLAUDE_PLUGIN_ROOT}/kit/hydra-ts/src/adapter-<vendor>.ts` by default; `HYDRA_HARNESS=bash` or `HYDRA_ADAPTER_RUNTIME=bash` forces the bash adapter at `${CLAUDE_PLUGIN_ROOT}/kit/hydra/adapters/<vendor>.sh`. Load [references/vendor-dispatch.md](references/vendor-dispatch.md) before the first dispatch of a session.
+4. Dispatch workers: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/dispatch.sh <run-id> <task> [--background]`. The task spec's `assigned_vendor` (`claude|codex|opencode|kimi`) routes to the TypeScript adapter at `${CLAUDE_PLUGIN_ROOT}/kit/hydra-ts/src/adapter-<vendor>.ts` by default. `HYDRA_HARNESS=bash` / `HYDRA_ADAPTER_RUNTIME=bash` are retired and fail loudly; the no-Node rollback is `HYDRA_HARNESS=bin` with a pinned `HYDRA_BIN` (see [references/runtime-selection.md](references/runtime-selection.md)). Load [references/vendor-dispatch.md](references/vendor-dispatch.md) before the first dispatch of a session.
 5. Promote results: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/promote.sh <run-id> <task> ${XDG_STATE_HOME:-$HOME/.local/state}/<repo-id>-hydra/runs/run-<run-id>/inbox/<agent-run-id>/result.json` executes the trust boundary — schema check → git evidence → ownership audit → sandboxed verify → promote. Only promoted candidates are real.
 6. Review promoted candidates: cross-vendor by convention — Codex reviews Claude and vice versa. Dispatch a cross-vendor review run (e.g. Codex reviewing a Kimi-authored candidate). Record the verdict; only `accept` lets the candidate proceed.
 7. Squash accepted candidates: `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/squash.sh <run-id> <task>` per accepted candidate. The harness creates the squash; workers never rewrite their own history.
@@ -68,7 +66,7 @@ Never `kill -9` a dispatch process directly. Doing so bypasses the clean path an
 
 ### Loop-thinking detector (TypeScript harness only)
 
-TypeScript dispatches of a Codex/Kimi/OpenCode task are automatically monitored for repeated-failure or repeated-event-cycle patterns while the Git worktree shows no real progress. Claude is excluded entirely because it does not produce streaming capture the detector can read. The frozen Bash fallback does not run the detector and does not produce a `loop_suspicion` field in `status.sh` output.
+TypeScript dispatches of a Codex/Kimi/OpenCode task are automatically monitored for repeated-failure or repeated-event-cycle patterns while the Git worktree shows no real progress. Claude is excluded entirely because it does not produce streaming capture the detector can read. (The retired Bash lane never ran the detector; `bash` is no longer a selectable runtime.)
 
 On detection the TypeScript harness appends a nonterminal `agent_loop_suspected` ledger event (surfaced by `status.sh`). If the pattern persists through a confirmation window, it appends `agent_loop_confirmed` and auto-cancels the task via the same clean cancellation path as `cancel-task.sh`.
 
@@ -87,7 +85,7 @@ Rule of thumb: if the deliverable is a file the codebase depends on, use Hydra. 
 ## Additional Resources
 
 - [references/vendor-dispatch.md](references/vendor-dispatch.md) — pane-hosting shapes per vendor, live-progress mechanisms (Codex JSONL tail, Kimi NDJSON stdout tail, Claude non-streaming JSON, OpenCode decoupled monitor pane), and the record-before-cleanup ordering rule.
-- [references/ts-bash-switch.md](references/ts-bash-switch.md) — selecting TypeScript vs bash via `HYDRA_HARNESS`, adapter runtime selection, direct TypeScript invocation, the stale-node PATH gotcha, and the `hydra_resolve_node()` resolver.
+- [references/runtime-selection.md](references/runtime-selection.md) — the `ts`/`bin` two-state runtime contract (no `bash`), the pinned compiled-binary rollback path and its recovery command, adapter runtime selection, direct TypeScript invocation, the stale-node PATH gotcha, and `hydra_resolve_node()`.
 - [references/background-dispatch.md](references/background-dispatch.md) — operational notes for async completion and `--background` dispatch, including the recommended blocking-dispatch + caller-backgrounding pattern, the never-pipe rule, and how to detect and clear stale concurrency slots.
 - [references/ledger-and-recovery.md](references/ledger-and-recovery.md) — authoritative state layout, ledger read protocol, event-type reference, the data-not-instructions rule, and the session-replacement recovery procedure.
 - [${CLAUDE_PLUGIN_ROOT}/docs/async-trigger-design-codex.md](${CLAUDE_PLUGIN_ROOT}/docs/async-trigger-design-codex.md) — build-ready design for the async completion trigger, status, and cancellation path.

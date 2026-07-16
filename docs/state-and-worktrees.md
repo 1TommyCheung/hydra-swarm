@@ -16,9 +16,8 @@
 │   │   ├── WAVE                     # wave-level marker
 │   │   ├── schemas/                 # run, task, result, review JSON schemas
 │   │   ├── templates/               # run.example.yaml, task.example.yaml
-│   │   ├── scripts/                 # create-worktree.sh, dispatch.sh, verify.sh,
-│   │   │                            #   audit-ownership.sh, promote.sh, integrate.sh
-│   │   ├── adapters/                # claude.sh, codex.sh, opencode.sh, kimi.sh
+│   │   ├── scripts/                 # ts/bin launchers: create-worktree.sh, dispatch.sh,
+│   │   │                            #   verify.sh, audit-ownership.sh, promote.sh, integrate.sh
 │   │   ├── policies/                # ownership.yaml, permissions.yaml, verification.yaml
 │   │   ├── profiles/                # per-vendor capability profiles (Wave 2)
 │   │   ├── runs-config/             # run-level configuration
@@ -31,10 +30,12 @@
 └── docs/                # operations, architecture, vendor-adapters, etc.
 ```
 
-`kit/hydra/scripts/<name>.sh` remains the stable operator command surface, but its
-default execution path is now the corresponding module in `kit/hydra-ts/src/`.
-`HYDRA_HARNESS=bash` selects the frozen Bash body for reference or rollback.
-This runtime cutover did not change the external state root, run-directory
+`kit/hydra/scripts/<name>.sh` remains the stable operator command surface; each
+is a small launcher that execs the corresponding module in `kit/hydra-ts/src/`
+(`ts`, the default) or a pinned compiled binary (`bin`). The Bash body lane was
+retired in run 0045 (`docs/bash-lane-retirement-plan.md`): `HYDRA_HARNESS=bash`
+fails loudly and the `kit/hydra/adapters/*.sh` shell adapters were deleted.
+This runtime change did not change the external state root, run-directory
 schema, worktree paths, branch naming, or custody boundaries described below.
 
 ### Domain 2 — External runtime state (never in any worktree, never tracked)

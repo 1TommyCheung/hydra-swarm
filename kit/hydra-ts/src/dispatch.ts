@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { constants, cpus } from 'node:os';
-import { dirname, extname, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildWorkerPrompt } from './build-worker-prompt.ts';
 import { type LedgerEntry } from './current-attempt.ts';
@@ -76,15 +76,19 @@ export interface Clock {
 }
 
 /**
- * Adapter runtime: 'bash' runs `hydra/adapters/<vendor>.sh` directly, 'ts'
- * runs `adapter-<vendor>.ts` through a Node interpreter, and 'compiled'
- * self-reexecs this process's own executable through cli.ts's
- * `adapter-<vendor>` route. 'compiled' is the ONLY runtime available inside
- * a `bun build --compile` binary: there is no Node interpreter to spawn and
- * no adapter .ts file to point one at (Stage 4 review bug #1,
- * docs/bun-migration-stage4-fixes-runtime.md).
+ * Adapter runtime. The shell-adapter lane ('bash') was retired in run 0045
+ * (docs/bash-lane-retirement-plan.md): requesting it now fails loudly rather
+ * than coercing to 'ts'. The two live runtimes are:
+ *   - 'ts'        — runs `adapter-<vendor>.ts` through a Node interpreter;
+ *   - 'compiled'  — self-reexecs this process's own executable through
+ *     cli.ts's `adapter-<vendor>` route. 'compiled' is the ONLY runtime
+ *     available inside a `bun build --compile` binary: there is no Node
+ *     interpreter to spawn and no adapter .ts file to point one at (Stage 4
+ *     review bug #1, docs/bun-migration-stage4-fixes-runtime.md). The
+ *     no-Node rollback is a pinned compiled binary selected by the wrapper
+ *     launcher via HYDRA_HARNESS=bin / HYDRA_BIN, not an adapter runtime.
  */
-export type AdapterRuntime = 'bash' | 'ts' | 'compiled';
+export type AdapterRuntime = 'ts' | 'compiled';
 
 /**
  * Static adapter capability registry for the 'compiled' runtime. A compiled
@@ -106,24 +110,40 @@ export const COMPILED_ADAPTERS: Readonly<Record<string, { resume: boolean }>> = 
 /**
  * Resolve the adapter runtime from the option/env overrides and the current
  * process shape. Precedence:
- *   1. an explicit 'bash' override always wins — an operator may force the
- *      bash adapters even from a compiled binary, matching the override-
- *      precedence conventions used elsewhere in this migration;
+ *   1. 'bash' is a RETIRED value (run 0045): whether it arrives via the
+ *      adapter-runtime override or HYDRA_HARNESS, it fails loudly with a
+ *      retirement error and does NOT coerce to 'ts' — including inside a
+ *      compiled binary, where it previously won over the compiled runtime.
+ *      Any other unrecognized non-empty override value is likewise rejected
+ *      (accepted override values are exactly 'ts' and 'compiled'); an empty
+ *      override string is treated as unset.
  *   2. a real compiled binary (`compiled`) or an explicit 'compiled'
  *      override selects the self-reexec runtime — inside a compiled binary
  *      'ts' can never work, regardless of HYDRA_HARNESS/HYDRA_ADAPTER_RUNTIME;
- *   3. otherwise the legacy mapping applies: explicit override, else
- *      HYDRA_HARNESS=bash selects 'bash', and every other value coerces to
- *      'ts' (unchanged pre-migration semantics).
+ *   3. otherwise the runtime is 'ts' (the source default; HYDRA_HARNESS=bin
+ *      is resolved by the wrapper launcher before dispatch runs, so a non-
+ *      compiled process always takes the 'ts' adapter path).
  */
 export function resolveAdapterRuntime(
   override: string | undefined,
   harness: string | undefined,
   compiled: boolean,
 ): AdapterRuntime {
-  if (override === 'bash') return 'bash';
+  if (override === 'bash' || harness === 'bash') {
+    die(
+      "HYDRA_ADAPTER_RUNTIME=bash / HYDRA_HARNESS=bash was retired (run 0045); the shell adapter lane has been removed. "
+        + "Use 'ts' (the default); for a no-Node rollback use HYDRA_HARNESS=bin with a pinned HYDRA_BIN "
+        + "(~/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64). It does not silently coerce to 'ts'.",
+    );
+  }
+  if (override !== undefined && override !== '' && override !== 'ts' && override !== 'compiled') {
+    die(
+      `unrecognized HYDRA_ADAPTER_RUNTIME='${override}': accepted values are 'ts' (default) and 'compiled'; 'bash' was retired (run 0045). `
+        + "For the no-Node rollback use HYDRA_HARNESS=bin with a pinned HYDRA_BIN.",
+    );
+  }
   if (override === 'compiled' || compiled) return 'compiled';
-  return (override ?? (harness === 'bash' ? 'bash' : 'ts')) === 'bash' ? 'bash' : 'ts';
+  return 'ts';
 }
 
 export interface DispatchOptions {
@@ -134,8 +154,6 @@ export interface DispatchOptions {
   adapterRuntime?: AdapterRuntime;
   /** Override directory for TypeScript adapters (used by tests). */
   tsAdapterDir?: string;
-  /** Override directory for Bash adapters (used by tests). */
-  bashAdapterDir?: string;
   nodeExecutable?: string;
   execFileSync?: ExecFileSyncLike;
   spawn?: SpawnLike;
@@ -552,12 +570,11 @@ function determineDelivery(
   } else {
     try {
       const source = readFileSync(adapter.path, 'utf8');
-      if (extname(adapter.path) === '.ts') {
-        supportsResume = /^\s*export\s+(?:(?:async\s+)?function|(?:const|let|var))\s+resume\b/m.test(source)
-          || /^\s*export\s*\{[^}]*\bresume\b[^}]*\}/m.test(source);
-      } else {
-        supportsResume = source.includes('start|resume');
-      }
+      // The shell-adapter lane was retired (run 0045); the only non-compiled
+      // runtime is 'ts', whose adapter source is always a .ts file. Resume
+      // support is detected from its exported start|resume surface.
+      supportsResume = /^\s*export\s+(?:(?:async\s+)?function|(?:const|let|var))\s+resume\b/m.test(source)
+        || /^\s*export\s*\{[^}]*\bresume\b[^}]*\}/m.test(source);
     } catch {
       // The adapter existence gate already ran; treat a later read failure as no resume support.
     }
@@ -815,17 +832,15 @@ async function runWorkerPlain(
   // across runtimes; only the command and its leading args differ. The spawn
   // passes `env: ctx.env` for every runtime, so the in-place BUN_BE_BUN
   // strip above covers the self-reexec too — leaking BUN_BE_BUN=1 to a
-  // re-exec'd self would hijack the child into Bun's own CLI.
-  const command = ctx.adapterRuntime === 'ts'
-    ? ctx.nodeExecutable
-    : ctx.adapterRuntime === 'compiled'
-      ? process.execPath
-      : ctx.adapterPath;
-  const args = ctx.adapterRuntime === 'ts'
-    ? ['--experimental-strip-types', ctx.adapterPath, ...adapterArgs]
-    : ctx.adapterRuntime === 'compiled'
-      ? [`adapter-${ctx.vendor}`, ...adapterArgs]
-      : adapterArgs;
+  // re-exec'd self would hijack the child into Bun's own CLI. The shell-
+  // adapter lane was retired (run 0045), so the only non-compiled runtime
+  // is 'ts' (node --experimental-strip-types adapter-<vendor>.ts).
+  const command = ctx.adapterRuntime === 'compiled'
+    ? process.execPath
+    : ctx.nodeExecutable;
+  const args = ctx.adapterRuntime === 'compiled'
+    ? [`adapter-${ctx.vendor}`, ...adapterArgs]
+    : ['--experimental-strip-types', ctx.adapterPath, ...adapterArgs];
   const child = ctx.spawn(command, args, {
     detached: false,
     stdio: 'ignore',
@@ -936,12 +951,11 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
   // 'compiled' substitutes the self-reexec form `<self> adapter-<vendor>` for
   // the adapter file path; the verb/task-spec/... sequence after it and the
   // surrounding pidfile/banner/sentinel protocol are unchanged (plan-codex:
-  // "Only the adapter command changes").
-  const adapterCommand = ctx.adapterRuntime === 'ts'
-    ? [ctx.nodeExecutable, '--experimental-strip-types', ctx.adapterPath]
-    : ctx.adapterRuntime === 'compiled'
-      ? [process.execPath, `adapter-${ctx.vendor}`]
-      : [ctx.adapterPath];
+  // "Only the adapter command changes"). The shell-adapter lane was retired
+  // (run 0045), so the only non-compiled runtime is 'ts'.
+  const adapterCommand = ctx.adapterRuntime === 'compiled'
+    ? [process.execPath, `adapter-${ctx.vendor}`]
+    : [ctx.nodeExecutable, '--experimental-strip-types', ctx.adapterPath];
   const adapterArgs = [
     ...adapterCommand,
     ctx.verb,
@@ -1130,10 +1144,10 @@ export async function dispatch(
   // the env object is passed explicitly.
   delete env.BUN_BE_BUN;
   // A real compiled binary resolves to the self-reexec runtime no matter what
-  // HYDRA_HARNESS/HYDRA_ADAPTER_RUNTIME say (except an explicit bash force):
-  // the old mapping sent HYDRA_HARNESS=bin to the 'ts' runtime, which then
-  // probed the synthetic /$bunfs/root for adapter-<vendor>.ts and would have
-  // spawned the binary itself as if it were Node (Stage 4 review bug #1).
+  // HYDRA_HARNESS/HYDRA_ADAPTER_RUNTIME say: 'bash' is now rejected upstream
+  // (resolveAdapterRuntime) rather than selected. The 'compiled' runtime
+  // self-reexecs this executable through cli.ts's `adapter-<vendor>` route
+  // (inside a compiled binary process.execPath IS the hydra-cli binary).
   const adapterRuntime = resolveAdapterRuntime(
     options.adapterRuntime ?? env.HYDRA_ADAPTER_RUNTIME,
     env.HYDRA_HARNESS,
@@ -1142,12 +1156,9 @@ export async function dispatch(
   // Adapters are kit-owned assets: resolve self-relative to this file's own
   // location, not via the target repo root (repo is for git/worktree/state
   // operations on the TARGET project, which is a different concern).
-  // Tests may override the adapter directories with fixture locations.
+  // Tests may override the TypeScript adapter directory with a fixture location.
   const selfDir = dirname(fileURLToPath(import.meta.url));
-  const defaultTsAdapterDir = selfDir;
-  const defaultBashAdapterDir = join(selfDir, '..', '..', 'hydra', 'adapters');
-  const tsAdapterDir = options.tsAdapterDir ? resolve(cwd, options.tsAdapterDir) : defaultTsAdapterDir;
-  const bashAdapterDir = options.bashAdapterDir ? resolve(cwd, options.bashAdapterDir) : defaultBashAdapterDir;
+  const tsAdapterDir = options.tsAdapterDir ? resolve(cwd, options.tsAdapterDir) : selfDir;
   let adapterPath: string;
   if (adapterRuntime === 'compiled') {
     // No adapter file exists to check inside a compiled binary — vendor
@@ -1159,9 +1170,7 @@ export async function dispatch(
     }
     adapterPath = `adapter-${spec.vendor}`;
   } else {
-    adapterPath = adapterRuntime === 'ts'
-      ? join(tsAdapterDir, `adapter-${spec.vendor}.ts`)
-      : join(bashAdapterDir, `${spec.vendor}.sh`);
+    adapterPath = join(tsAdapterDir, `adapter-${spec.vendor}.ts`);
     if (!isFile(adapterPath)) die(`no adapter for vendor '${spec.vendor}': ${adapterPath}`);
   }
 

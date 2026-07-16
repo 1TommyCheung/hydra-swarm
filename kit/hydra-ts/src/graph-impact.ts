@@ -13,11 +13,10 @@ import { isCompiledBinary } from './kit-assets.ts';
 
 export interface GraphImpactDeps {
   /**
-   * Optional out-of-process freshness-gate script (test hook; also the shape
-   * the frozen HYDRA_HARNESS=bash lane uses). When omitted, the gate runs
-   * IN-PROCESS via freshness-gate.ts — the only mode that works inside a
-   * compiled binary, where a child `bash` cannot see `/$bunfs/` paths (spike
-   * §4 Test B5, exit 127; §9 verdict #3).
+   * Optional out-of-process freshness-gate script (test hook). When omitted,
+   * the gate runs IN-PROCESS via freshness-gate.ts — the only mode that works
+   * inside a compiled binary, where a child `bash` cannot see `/$bunfs/`
+   * paths (spike §4 Test B5, exit 127; §9 verdict #3).
    */
   freshnessGatePath?: string;
   /** Path or name of the gitnexus CLI. Defaults to "gitnexus". */
@@ -96,7 +95,7 @@ export function graphImpact(
   // Freshness gate — a stale graph result must not participate in review.
   // Default: in-process call (compiled-binary safe — a spawned bash cannot see
   // `/$bunfs/` embedded paths, spike §4 Test B5). deps.freshnessGatePath keeps
-  // the out-of-process script path for tests and the bash lane.
+  // an out-of-process script path for tests.
   let gateFresh: boolean;
   if (deps.freshnessGatePath !== undefined) {
     const freshResult = spawnSync('bash', [deps.freshnessGatePath, runId, taskId], {

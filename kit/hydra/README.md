@@ -1,9 +1,19 @@
 # hydra/ — Hydra-Swarm harness (Wave 0)
 
-Deterministic scripts, schemas, policies, templates, and vendor adapters that
+Deterministic command launchers, schemas, policies, and templates that
 implement the Hydra-Swarm integration loop. Design docs live in
-`../docs/hydra-swarm/`. This directory is the **harness**: trusted, human-
-reviewed, tracked in Git. The lead *calls* these scripts; it is not a component.
+`../docs/hydra-swarm/`. This directory is the **harness surface**: trusted,
+human-reviewed, tracked in Git. The lead *calls* these scripts; it is not a
+component.
+
+**Runtime (run 0045):** every `scripts/<name>.sh` is a small launcher that
+execs the TypeScript implementation in `../hydra-ts/src/` (`ts`, the default)
+or a pinned compiled binary (`HYDRA_HARNESS=bin` + `HYDRA_BIN`, the no-Node
+rollback). The Bash implementation lane — the script Bash bodies and the
+`adapters/*.sh` shell vendor adapters — was retired in run 0045
+(`../../docs/bash-lane-retirement-plan.md`): `HYDRA_HARNESS=bash` fails loudly
+rather than coercing to `ts`, and this directory no longer contains an
+`adapters/` folder.
 
 **Reserved-prefix rule:** no human or agent creates branches under `hydra/` or
 `hydra-integration/` outside these scripts.
@@ -15,9 +25,8 @@ hydra/
 ├── schemas/       run|task|result|review JSON schemas
 ├── templates/     run.example.yaml, task.example.yaml
 ├── policies/      ownership.yaml, permissions.yaml, verification.yaml
-├── adapters/      claude.sh, codex.sh, build-worker-prompt.sh
-└── scripts/
-    ├── lib.sh              shared helpers (state paths, ledger, timeout, globs)
+└── scripts/       ts/bin launchers (no Bash bodies since run 0045)
+    ├── lib.sh              shared launcher API (node/bin resolution, logging)
     ├── run-init.sh         create external run state (Domain 2)
     ├── create-worktree.sh  worktree + branch + bootstrap + PORT (Domain 3)
     ├── dispatch.sh         adapter selection + timeout + session capture
