@@ -66,21 +66,17 @@ print_json() {
   printf ']\n'
 }
 
-# --- 1. Shell: bash >= 4 ------------------------------------------------
+# --- 1. Shell: informational only, no minimum version required ---------
+# The Bash implementation lane (and its bash>=4-only mapfile usage) was
+# retired in run 0045 (docs/bash-lane-retirement-plan.md): the 28
+# kit/hydra/scripts/*.sh entry points are now thin ts/bin launchers, verified
+# to run correctly on stock macOS bash 3.2. There is deliberately no version
+# gate here — see docs/bash-lane-retirement-plan.md §1 "No runtime
+# Bash-version guard" for why one is not added even as defense-in-depth.
 bash_major="${BASH_VERSINFO[0]:-0}"
 bash_minor="${BASH_VERSINFO[1]:-0}"
-if [ "$bash_major" -ge 4 ]; then
-  pass "shell (bash ${bash_major}.${bash_minor})"
-  json_emit "shell" "pass" "bash ${bash_major}.${bash_minor}" "none"
-else
-  detail="bash ${bash_major:-0}.${bash_minor:-0} found, need >=4 (macOS ships 3.2 by default — install via Homebrew: brew install bash)"
-  fail "shell" "$detail"
-  if [ "$(uname -s)" = "Darwin" ]; then
-    json_emit "shell" "fail" "$detail" "auto" '{"brew":"brew install bash"}'
-  else
-    json_emit "shell" "fail" "$detail" "manual" "" "" "Linux system bash is unexpectedly old; upgrade manually"
-  fi
-fi
+pass "shell (bash ${bash_major}.${bash_minor})"
+json_emit "shell" "pass" "bash ${bash_major}.${bash_minor}" "none"
 
 # --- 2. Core: jq, node >=22.6, git --------------------------------------
 if command -v jq >/dev/null 2>&1; then
