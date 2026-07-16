@@ -158,17 +158,33 @@ hydra_resolve_bin() {
 }
 
 # The ONE call every wrapper makes: hydra_launch <subcommand> [args...].
-# Selects the implementation strictly by HYDRA_HARNESS:
-#   unset | ts  resolve Node >=22.6 and exec src/cli.ts <subcommand> "$@"
-#               (default; argv byte-identical to the historical preamble)
+# Selects the implementation by HYDRA_HARNESS:
+#   unset       prefer the compiled binary (bin); if none is resolvable yet
+#               (fresh checkout, no HYDRA_BIN, no `npm run build:bin` output)
+#               fall back to ts SILENTLY — an implicit default must still
+#               work out of the box on a machine with no binary provisioned.
+#               This is the only place a bin failure ever falls back; an
+#               EXPLICIT HYDRA_HARNESS=bin below never does (see hydra_resolve_bin).
+#   ts          resolve Node >=22.6 and exec src/cli.ts <subcommand> "$@"
+#               (argv byte-identical to the historical preamble)
 #   bin         resolve a usable compiled binary and exec it via
-#               `env -u BUN_BE_BUN` <subcommand> "$@"
+#               `env -u BUN_BE_BUN` <subcommand> "$@"; HARD ERROR if unusable,
+#               never a silent fallback — an operator who explicitly asked
+#               for bin and got quietly downgraded to ts would not notice a
+#               broken rollback path until they needed it.
 # `bash` is retired and any other value is invalid: both exit 2 BEFORE any
 # runtime is resolved, so a retired or mistyped selection can never silently
 # launch the wrong implementation.
 hydra_launch() {
   local subcommand="$1"; shift
-  local harness="${HYDRA_HARNESS:-ts}"
+  local harness="${HYDRA_HARNESS:-}"
+  if [ -z "$harness" ]; then
+    local implicit_bin
+    if implicit_bin="$(hydra_resolve_bin 2>/dev/null)"; then
+      exec env -u BUN_BE_BUN "$implicit_bin" "$subcommand" "$@"
+    fi
+    harness="ts"
+  fi
   case "$harness" in
     ts)
       local node lib_dir
