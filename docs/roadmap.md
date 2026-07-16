@@ -183,6 +183,14 @@ Dates are the day the wave's exit criteria were met in this repo.
   concurrent, 27/27 promote, 45/45 black-box, the compiled-dispatch fixture
   running for real) and all four `HYDRA_HARNESS` resolution paths were
   spot-checked through real wrapper invocations before this landed.
+- **Reproducing the test counts above:** `cd kit/hydra-ts && npm test` runs
+  the concurrent + promote suites (`npm run test:concurrent` /
+  `npm run test:promote` individually); `node --experimental-strip-types
+  scripts/blackbox-compiled.ts <binary-path>` runs the 45-check black-box
+  suite against any compiled artifact (`npm run build:bin` produces one).
+  These are unit/integration/black-box launcher tests living in
+  `kit/hydra-ts/test/` and `kit/hydra-ts/scripts/blackbox-compiled.ts`
+  respectively — not evidence that requires the pre-extraction tree.
 
 ### Post-cutover cleanup · 2026-07-16 (v0.6.1)
 
@@ -337,7 +345,10 @@ policy) are still design-only. Scope is informed by a portability audit
 2. **`hydra-setup` skill** — install / upgrade / doctor modes; supersedes
    `wave0-implementation.md` for new installs.
 3. **`hydra doctor` preflight** — **built and tested** as a Claude Code plugin
-   command at the repo root. Checks bash ≥ 4; `jq`, `git`, and Node ≥ 22.6;
+   command at the repo root. Originally checked bash ≥ 4 (that gate was
+   removed 2026-07-16, see "Post-cutover cleanup" below — it now reports the
+   detected shell informationally with no minimum enforced); `jq`, `git`, and
+   Node ≥ 22.6;
    each vendor CLI present (headless smoke per CLI, non-fatal individually);
    Graphify/`gitnexus` present (non-fatal); `herdr` present (non-fatal); `srt`
    sandbox available and enforcing (Seatbelt on macOS, bubblewrap on Linux, else
