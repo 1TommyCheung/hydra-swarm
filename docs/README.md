@@ -1,6 +1,6 @@
 # Hydra-Swarm — Documentation Set
 
-**Date:** 2026-07-13 · **Status:** **Wave 2 operational** (all four heads). Waves 0–2 delivered; the TypeScript harness is the operational default; front of the roadmap is packaging + the hardening daemon.
+**Date:** 2026-07-16 · **Status:** **Wave 2 operational** (all four heads). Waves 0–2 delivered; the compiled Bun binary is the operational default (Node/`ts` is the automatic fallback when no binary is provisioned yet); front of the roadmap is packaging + the hardening daemon.
 **Supersedes:** the single-document specs v1–v3. This document set is self-contained; no prior version is a normative dependency.
 **Evidence:** per-wave completion reports and the Wave 2 exit snapshot lived in the pre-extraction tree (`../hydra-reports/`); they were not carried into this standalone repo. Day-to-day operation is documented in `operations.md`.
 
@@ -9,16 +9,22 @@
 **Hydra-Swarm**: a local multi-agent software development system. One lead (the *head* — Claude Code) plans and judges; a deterministic harness owns processes, state, and verification; heterogeneous coding agents (the *swarm* — Claude Code, Codex/GPT‑5.6 Sol, OpenCode/GLM 5.2, Kimi K2.7 Code) implement in isolated Git worktrees; accepted work converges through a controlled integration worktree behind evidence gates. Cut off the head and a new one grows from Git + the state store — lead replacement is a design guarantee, not a recovery hack.
 
 The harness implementation lives in `kit/hydra-ts/src/*.ts`. Operators call the
-stable `kit/hydra/scripts/<name>.sh` entry points; those are small launchers that
-exec the TypeScript implementation by default (`ts`). The Bash implementation
-lane (the `kit/hydra/adapters/*.sh` shell adapters and the script Bash bodies)
-was retired in run 0045 (`docs/bash-lane-retirement-plan.md`): `HYDRA_HARNESS=bash`
-and `HYDRA_ADAPTER_RUNTIME=bash` now fail loudly rather than coercing to `ts`. The
-no-Node rollback is `HYDRA_HARNESS=bin` with a pinned compiled binary
-(`HYDRA_BIN=~/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64`).
-The migration findings, plans, reviews, and shakedown history lived in the
-pre-extraction tree (`../../hydra-ts/migration/`); that directory was not carried
-into this standalone repo.
+stable `kit/hydra/scripts/<name>.sh` entry points; those are small launchers.
+By default (unset `HYDRA_HARNESS`) they prefer the compiled Bun binary
+(`bin`), falling back to the TypeScript/Node lane (`ts`) automatically when no
+binary is provisioned yet — a fresh checkout with nothing pre-built still
+works out of the box. The Bash implementation lane (the `kit/hydra/adapters/*.sh`
+shell adapters and the script Bash bodies) was retired in run 0045
+(`docs/bash-lane-retirement-plan.md`): `HYDRA_HARNESS=bash` and
+`HYDRA_ADAPTER_RUNTIME=bash` now fail loudly rather than coercing to `ts`. An
+explicit `HYDRA_HARNESS=bin` with an unusable `HYDRA_BIN` is a hard error, not
+a silent fallback — that only applies to the implicit default. Point
+`HYDRA_BIN` at a pinned compiled binary
+(currently `~/.local/share/hydra-pinned-binaries/v2/hydra-cli-v2-darwin-arm64`)
+to force a specific rollback artifact. The Bun single-binary migration
+(Stage 1–4: router, asset embedding, cross-platform proof, two rounds of
+adversarial review) is summarized in `roadmap.md`; the stage-by-stage
+findings live in `docs/bun-migration-*.md`.
 
 ## Naming conventions (canonical)
 

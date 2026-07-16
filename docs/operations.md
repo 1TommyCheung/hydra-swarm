@@ -33,17 +33,20 @@ the same worktree (amend the spec + re-dispatch).
 
 The command surface did not change during the TypeScript cutover or the later
 Bash retirement: continue to invoke `bash kit/hydra/scripts/<name>.sh ...`.
-Every operational entry point is a small launcher that execs the TypeScript
-implementation in `kit/hydra-ts/src/` by default (`ts`), or a pinned compiled
-binary (`bin`) for the no-Node rollback.
+Every operational entry point is a small launcher. By default (unset
+`HYDRA_HARNESS`) it prefers a pinned compiled binary (`bin`), falling back
+SILENTLY to the TypeScript implementation in `kit/hydra-ts/src/` (`ts`) only
+when no binary is resolvable yet (no `HYDRA_BIN`, no `npm run build:bin`
+output) — a fresh checkout with nothing pre-built still works out of the box.
 
 ```bash
-bash kit/hydra/scripts/run-init.sh 0042                 # TypeScript (default)
-HYDRA_HARNESS=ts bash kit/hydra/scripts/run-init.sh 0042
-HYDRA_HARNESS=bin HYDRA_BIN=<pinned-binary> bash kit/hydra/scripts/run-init.sh 0042   # no-Node rollback
+bash kit/hydra/scripts/run-init.sh 0042                 # bin if resolvable, else ts (default)
+HYDRA_HARNESS=ts bash kit/hydra/scripts/run-init.sh 0042   # force the TypeScript/Node lane
+HYDRA_HARNESS=bin HYDRA_BIN=<pinned-binary> bash kit/hydra/scripts/run-init.sh 0042   # force bin, hard error if unusable
 ```
 
-`HYDRA_HARNESS` accepts `ts` (default) and `bin`. `HYDRA_HARNESS=bash` is
+`HYDRA_HARNESS` accepts `ts` and `bin` (default: prefer `bin`, silent fallback
+to `ts` only for the *implicit* unset case). `HYDRA_HARNESS=bash` is
 **retired** (run 0045, `docs/bash-lane-retirement-plan.md`): it now fails loudly
 with an explicit retirement error and does **not** silently coerce to `ts`.
 The same applies to the adapter-layer override `HYDRA_ADAPTER_RUNTIME=bash`
@@ -52,25 +55,29 @@ other unrecognized non-empty value. The Bash shell adapters under
 `kit/hydra/adapters/` were deleted; vendor dispatch is the TypeScript
 `adapter-<vendor>.ts` or the compiled `adapter-<vendor>` route only.
 
-**No-Node rollback (`bin`).** `HYDRA_HARNESS=bin` execs a prebuilt
+**No-Node rollback / explicit `bin`.** `HYDRA_HARNESS=bin` execs a prebuilt
 `bun build --compile` single binary selected by `HYDRA_BIN` (it must be
-absolute, regular, and executable). A retained checksummed known-good artifact
-is installed as the recovery path:
+absolute, regular, and executable). Unlike the implicit default, an
+EXPLICITLY requested `bin` never falls back to `ts` — an unusable `HYDRA_BIN`
+is a hard error, so a broken rollback path is never masked. A retained
+checksummed known-good artifact is installed as the recovery path:
 
 ```bash
 # Current pinned rollback artifact (see the manifest alongside it for the SHA):
-HYDRA_BIN=~/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64
+HYDRA_BIN=~/.local/share/hydra-pinned-binaries/v2/hydra-cli-v2-darwin-arm64
 
 # Recover any command with no Node.js on PATH:
 HYDRA_HARNESS=bin \
-  HYDRA_BIN=~/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64 \
+  HYDRA_BIN=~/.local/share/hydra-pinned-binaries/v2/hydra-cli-v2-darwin-arm64 \
   bash kit/hydra/scripts/dispatch.sh 0042 my-task
 ```
 
 The wrapper strips `BUN_BE_BUN` at the exec boundary so a leaked
-`BUN_BE_BUN=1` cannot hijack the binary. An explicitly-requested `bin` whose
-`HYDRA_BIN` is unusable is a hard error, not a silent fallthrough to `ts`.
-Rebuild from source with `cd kit/hydra-ts && npm run build:bin` (requires `bun`).
+`BUN_BE_BUN=1` cannot hijack the binary, in both the implicit-default and
+explicit-`bin` paths. Rebuild from source with
+`cd kit/hydra-ts && npm run build:bin` (requires `bun`) — that output
+(`kit/hydra-ts/dist/hydra-cli`) is also the implicit default's fallback
+lookup location when `HYDRA_BIN` is unset.
 
 A lower-level `HYDRA_ADAPTER_RUNTIME` override (`ts` or `compiled`) takes
 precedence inside TypeScript dispatch for the adapter only; leave it unset for
@@ -80,8 +87,8 @@ normal operation.
 
 | Var | Purpose |
 |---|---|
-| `HYDRA_HARNESS` | Harness runtime: `ts` (default) or `bin` (pinned compiled-binary rollback via `HYDRA_BIN`). `bash` is **retired** and fails loudly. |
-| `HYDRA_BIN` | Absolute, regular, executable compiled binary for `HYDRA_HARNESS=bin`; defaults to `kit/hydra-ts/dist/hydra-cli`. Pinned rollback artifact: `~/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64`. |
+| `HYDRA_HARNESS` | Harness runtime. Unset: prefer `bin`, silently fall back to `ts` if no binary is resolvable. `ts`: force the Node lane. `bin`: force the pinned compiled-binary rollback (`HYDRA_BIN`), hard error if unusable. `bash` is **retired** and fails loudly. |
+| `HYDRA_BIN` | Absolute, regular, executable compiled binary for the `bin` lane (implicit or explicit); defaults to `kit/hydra-ts/dist/hydra-cli`. Pinned rollback artifact: `~/.local/share/hydra-pinned-binaries/v2/hydra-cli-v2-darwin-arm64`. |
 | `HYDRA_ADAPTER_RUNTIME` | Advanced adapter-only override for TypeScript dispatch: `ts` or `compiled`. `bash` is **retired** (rejected); any other unrecognized value is also rejected. Normally leave unset. |
 | `HYDRA_WAVE` | Wave level; ≥1 activates the `wave_1` bootstrap (gitnexus analyze). Or set `kit/hydra/WAVE`. |
 | `HYDRA_STATE_ROOT` | Override the external state root entirely (takes precedence over `XDG_STATE_HOME` and the default). |
@@ -194,7 +201,7 @@ It's recommend-only — a human pins the role.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| TypeScript entry point reports `bad option: --experimental-strip-types`, or `npm test` exits 9 | A stale Node (observed: `/usr/local/bin/node` v17.4.0) shadows nvm's Node in a login/non-interactive shell | Current entry points use `hydra_resolve_node()`; update to current code. For npm, invoke it from an environment where `node --version` is ≥22.6, or use the no-Node rollback: `HYDRA_HARNESS=bin HYDRA_BIN=~/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64`. |
+| TypeScript entry point reports `bad option: --experimental-strip-types`, or `npm test` exits 9 | A stale Node (observed: `/usr/local/bin/node` v17.4.0) shadows nvm's Node in a login/non-interactive shell | Current entry points use `hydra_resolve_node()`; update to current code. For npm, invoke it from an environment where `node --version` is ≥22.6, or use the no-Node rollback: `HYDRA_HARNESS=bin HYDRA_BIN=~/.local/share/hydra-pinned-binaries/v2/hydra-cli-v2-darwin-arm64`. |
 | Worker "completed" but no new commit; head == a prior commit | **Empty objective** (block-scalar not read) — historical, now fixed | `build-worker-prompt` uses `hydra_yaml_block`. If you see it again, dump the prompt: `node --experimental-strip-types kit/hydra-ts/src/build-worker-prompt.ts <spec>` |
 | **Multiple vendors fail identically** | Suspect the harness, not the vendors | Dump the actual worker prompt first; check the drop and stderr under `sessions/` |
 | opencode/GLM: `Unexpected server error` immediately | Transient Z.AI coding-endpoint 500 | Retry; if persistent, `allocate.sh` route around; GLM read-only reviews usually still work |

@@ -146,7 +146,7 @@ hydra_resolve_bin() {
       printf '%s\n' "$HYDRA_BIN"
       return 0
     fi
-    hydra_die "HYDRA_HARNESS=bin requested but HYDRA_BIN=$HYDRA_BIN is missing, not a regular file, or not executable; an explicit HYDRA_BIN never falls back to ts — point it at a usable pinned binary (e.g. \$HOME/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64)"
+    hydra_die "HYDRA_HARNESS=bin requested but HYDRA_BIN=$HYDRA_BIN is missing, not a regular file, or not executable; an explicit HYDRA_BIN never falls back to ts — point it at a usable pinned binary (e.g. \$HOME/.local/share/hydra-pinned-binaries/v2/hydra-cli-v2-darwin-arm64)"
   fi
   lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   candidate="$lib_dir/../../hydra-ts/dist/hydra-cli"
@@ -154,7 +154,7 @@ hydra_resolve_bin() {
     printf '%s\n' "$candidate"
     return 0
   fi
-  hydra_die "HYDRA_HARNESS=bin requested but no compiled binary at $candidate; run 'npm run build:bin' in kit/hydra-ts or set HYDRA_BIN to a pinned known-good binary (e.g. \$HOME/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64)"
+  hydra_die "HYDRA_HARNESS=bin requested but no compiled binary at $candidate; run 'npm run build:bin' in kit/hydra-ts or set HYDRA_BIN to a pinned known-good binary (e.g. \$HOME/.local/share/hydra-pinned-binaries/v2/hydra-cli-v2-darwin-arm64)"
 }
 
 # The ONE call every wrapper makes: hydra_launch <subcommand> [args...].

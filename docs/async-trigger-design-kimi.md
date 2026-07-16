@@ -8,13 +8,15 @@ dispatch.
 verifies each claimed scenario against the current implementation and prescribes
 what to build next.
 
-**Runtime note (run 0045):** the Bash implementation lane referenced below
-(`dispatch.sh` Bash bodies, `HYDRA_HARNESS=bash`) was retired in run 0045
-(`docs/bash-lane-retirement-plan.md`). `ts` is the default and only source
-runtime; the no-Node rollback is `HYDRA_HARNESS=bin` with a pinned compiled
-`HYDRA_BIN` (`~/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64`).
-`HYDRA_HARNESS=bash` / `HYDRA_ADAPTER_RUNTIME=bash` now fail loudly with an
-explicit retirement error rather than silently coercing to `ts`.
+**Runtime note (runs 0045–0046):** the Bash implementation lane referenced
+below (`dispatch.sh` Bash bodies, `HYDRA_HARNESS=bash`) was retired in run 0045
+(`docs/bash-lane-retirement-plan.md`). The unset default now prefers the
+compiled binary (`bin`), falling back silently to the TypeScript/Node source
+runtime (`ts`) only when no binary is resolvable yet; explicit `HYDRA_HARNESS=bin`
+with a pinned `HYDRA_BIN` (`~/.local/share/hydra-pinned-binaries/v2/hydra-cli-v2-darwin-arm64`)
+hard-errors instead of falling back if unusable. `HYDRA_HARNESS=bash` /
+`HYDRA_ADAPTER_RUNTIME=bash` fail loudly with an explicit retirement error
+rather than silently coercing to `ts`.
 
 **Key files read for verification:**
 - `kit/hydra-ts/src/dispatch.ts`

@@ -87,10 +87,9 @@ Dates are the day the wave's exit criteria were met in this repo.
   run initialization, worktree creation, a herdr-pane-hosted Codex worker using
   the TypeScript adapter, promotion, squash, and dependency-ordered integration
   of two candidates with the combined verification gate. After that run passed,
-  the human-authorized default flipped to TypeScript. Unset now means `ts`.
-  (The Bash bodies were later fully retired in run 0045 — see below — so
-  `HYDRA_HARNESS=bash` is no longer a rollback; the no-Node rollback is the
-  pinned compiled binary selected by `HYDRA_HARNESS=bin` / `HYDRA_BIN`.)
+  the human-authorized default flipped to TypeScript. Unset meant `ts` from
+  this point through the Bash lane retirement below — see "Bun-as-default
+  cutover" for the later change to what unset means today.
 - **Post-cutover independent review (run 0038):** the three vendor reviews
   confirmed broad functional parity but exposed the stale-Node environment risk.
   Codex reproduced the critical boundary gap directly: all shell wrappers used
@@ -115,18 +114,75 @@ Dates are the day the wave's exit criteria were met in this repo.
   error and do **not** silently coerce to `ts`; `dispatch.ts`'s
   `resolveAdapterRuntime` also rejects any other unrecognized adapter-runtime
   value.
-- **No-Node rollback** is now a pinned, checksummed `bun build --compile`
-  binary selected by `HYDRA_HARNESS=bin` / `HYDRA_BIN`, independent of an
-  installed Node or Bun. The retained known-good artifact is
-  `~/.local/share/hydra-pinned-binaries/v1/hydra-cli-v1-darwin-arm64`
-  (manifest alongside it: `source_sha cfdb0415…`, `sha256 ad75f958…`). The
-  Bash body suite (`status.sh`/`cancel-task.sh` Bash-mode cases) was replaced
-  by launcher-routing and dispatch-runtime-selection coverage.
+- **No-Node rollback** is a pinned, checksummed `bun build --compile` binary
+  selected by `HYDRA_HARNESS=bin` / `HYDRA_BIN`, independent of an installed
+  Node or Bun. The retained artifact is refreshed each time the pinned source
+  commit changes (currently `v2`, `~/.local/share/hydra-pinned-binaries/v2/`,
+  manifest alongside it); `v1` is kept as historical, not deleted. The Bash
+  body suite (`status.sh`/`cancel-task.sh` Bash-mode cases) was replaced by
+  launcher-routing and dispatch-runtime-selection coverage.
 - **Rationale:** the shell lane was ~4.4k mostly-untested lines with known
   silent rot (six `mapfile` commands failed on stock macOS Bash 3.2), semantic
   drift from the TypeScript lane, and no recorded post-cutover incident it
   actually recovered. The compiled-binary black-box evidence (45/45 native
   macOS arm64) was materially stronger rollback evidence than the shell lane.
+
+### Bun single-binary migration (Stage 1–4) + Bun-as-default cutover · 2026-07-16
+
+- **Stage 1 — router + compiled entry point:** every one of the 33
+  `isMain`-guarded modules was normalized to export `main(args)`, and
+  `kit/hydra-ts/src/cli.ts` became the single real entry point for a compiled
+  binary — a `bun build --compile` bundle collapses every module's
+  `import.meta.url` to the same synthetic path, so per-file guards cannot
+  distinguish the entry from an import; `cli.ts` routes 34 subcommands
+  (including the 5 `adapter-<vendor>` compiled self-reexec targets) via a
+  single table, and a later fix (`!isCompiledBinary()`) neutralized the
+  redundant per-module guards a real compiled binary was found to still
+  trigger.
+- **Stage 2 — asset embedding + spawn/env hardening:** trust-boundary schemas
+  and seeded vendor profiles are embedded at compile time
+  (`kit-assets.ts`); operator-editable policy/WAVE files resolve
+  checkout-relative so they never require a rebuild to edit. `BUN_BE_BUN`
+  (a documented Bun CLI-hijack escape hatch) is stripped at every vendor and
+  Herdr child spawn; `audit-ownership.ts`'s `GIT_CEILING_DIRECTORIES` fix
+  covers a real Bun-vs-Node divergence where in-process `process.env`
+  mutations are not inherited by spawned children under Bun.
+- **Stage 3 — cross-platform proof:** a 4-target build matrix
+  (darwin-arm64/x64, linux-x64/arm64) plus a target-agnostic black-box test
+  harness. Real execution (not just cross-compile) was proven via Docker on
+  both Linux architectures — 44/44 checks each, including the asset-embedding
+  and spawn fixes holding under a genuinely different OS/libc. darwin-x64 was
+  smoke-tested under Rosetta 2 (one known, understood, non-product AVX-warning
+  discrepancy); real Intel hardware remains unverified.
+- **Stage 4 — two rounds of independent adversarial review:** round 1 (Codex)
+  rejected both the runtime and bash/build-tooling halves of the diff and
+  found 8 real bugs — the most severe being that compiled `dispatch` could not
+  actually launch any adapter at all (no self-reexec runtime existed) and every
+  `bin`-mode wrapper was hijackable via a leaked `BUN_BE_BUN=1` (a reproduced
+  exploit, not theoretical). All 8 were fixed in three parallel lanes. Round 2
+  (OpenCode/GLM, substituted after Codex exhausted its usage quota mid-review)
+  independently re-verified every fix against a real compiled binary and
+  issued an unqualified accept — 847 test executions, 0 failures, including the
+  previously-deferred compiled-dispatch end-to-end fixture actually running.
+- **Bash lane retirement** (run 0045, see above) followed directly from this
+  evidence: the compiled binary's rollback story was materially stronger than
+  the untested shell lane it replaced.
+- **`npm run typecheck` gate provisioned for the first time:** `tsc`/
+  `@types/node` had never been installed in any sandbox that touched this
+  repo during the migration, so the gate silently didn't run. Once installed,
+  it surfaced 61 pre-existing errors (unrelated to the migration itself — a
+  drift gap, not a regression); all 61 were fixed directly (three parallel
+  Sonnet subagents, no Hydra dispatch needed for a same-day type-only cleanup)
+  and the gate is now clean.
+- **Bun-as-default cutover:** `hydra_launch()`'s unset-`HYDRA_HARNESS` case now
+  prefers the compiled binary, falling back to `ts` silently only when no
+  binary is resolvable yet (a fresh checkout with nothing pre-built must still
+  work out of the box). An explicit `HYDRA_HARNESS=bin` keeps its hard-error
+  contract — no silent downgrade for a deliberate operator choice. Explicit
+  `ts` and the retired `bash` value are unchanged. Full suite (812/812
+  concurrent, 27/27 promote, 45/45 black-box, the compiled-dispatch fixture
+  running for real) and all four `HYDRA_HARNESS` resolution paths were
+  spot-checked through real wrapper invocations before this landed.
 
 ### Wave 3 preflight tooling — first real artifact · 2026-07-13
 
