@@ -85,6 +85,24 @@ function writeTaskSpec(
   writeFileSync(path, `${lines.join('\n')}\n`, 'utf8');
 }
 
+/**
+ * Deterministic stand-in for the real prepareWorkerEnv, used by every
+ * kimiStart() test that reaches the preflight: real prepareWorkerEnv
+ * resolves tools against the actual host PATH, which would make these
+ * tests depend on the machine (e.g. whether 'kimi' happens to be
+ * installed). worker-devenv.test.ts exercises the real preflight logic
+ * in isolation; this file only needs kimiStart's wiring to it.
+ */
+function stubPrepareWorkerEnv(): ReturnType<typeof import('../src/worker-devenv.ts')['prepareWorkerEnv']> {
+  return Promise.resolve({
+    allowedDomains: [],
+    envOverrides: { npm_config_store_dir: '/tmp/hydra-test-pnpm-store' },
+    toolsVerified: { git: '/usr/bin/git', node: '/usr/bin/node', npm: '/usr/bin/npm', kimi: '/usr/bin/kimi' },
+    domainSource: 'inline-fallback',
+    logLine: 'worker-devenv: stub',
+  });
+}
+
 function writeBaselineDomains(dir: string): string {
   const path = join(dir, 'kimi-sandbox-domains.json');
   writeFileSync(path, JSON.stringify({
@@ -411,6 +429,7 @@ describe('kimiStart', () => {
         spawn,
         exec,
         commandExists: commandLookup(),
+        prepareWorkerEnv: stubPrepareWorkerEnv,
         sandboxDomainsPath: writeBaselineDomains(dir),
       });
       assert.equal(result, agentRunId);
@@ -446,13 +465,12 @@ describe('kimiStart', () => {
     assert.ok(!commandString.includes("'-y'"));
     assert.ok(stderr.includes('live progress'));
 
-    // The per-task pnpm store lives under the canonicalized TMPDIR (so it is
-    // beneath an srt allowWrite root that actually matches) and is removed once
-    // the run ends — a per-attempt store has no consumers after kimiStart.
-    const expectedStoreDir = join(realpathSync(process.env.TMPDIR ?? '/tmp'), `hydra-pnpm-store-${agentRunId}`);
+    // Store/cache env vars come from prepareWorkerEnv (stubbed here) — the
+    // former inline pnpm-store computation was superseded by worker-devenv.ts.
+    // The dirs are per-attempt and removed once the run ends.
+    const expectedStoreDir = '/tmp/hydra-test-pnpm-store';
     assert.equal(recording.options?.env?.npm_config_store_dir, expectedStoreDir);
     assert.equal(existsSync(expectedStoreDir), false);
-    assert.ok(stderr.includes(expectedStoreDir));
 
     const sessionJson = JSON.parse(readFileSync(join(sessions, `${agentRunId}.json`), 'utf8'));
     assert.equal(sessionJson.agent_run_id, agentRunId);
@@ -596,6 +614,7 @@ describe('kimiStart', () => {
         spawn,
         exec,
         commandExists: commandLookup(),
+        prepareWorkerEnv: stubPrepareWorkerEnv,
         sandboxDomainsPath: join(dir, 'does-not-exist.json'),
       });
       assert.equal(result, agentRunId);
@@ -680,6 +699,7 @@ describe('kimiStart', () => {
         spawn,
         exec,
         commandExists: commandLookup(),
+        prepareWorkerEnv: stubPrepareWorkerEnv,
         sandboxDomainsPath: baselinePath,
       });
       assert.equal(result, agentRunId);
@@ -763,6 +783,7 @@ describe('kimiStart', () => {
         spawn,
         exec,
         commandExists: commandLookup(),
+        prepareWorkerEnv: stubPrepareWorkerEnv,
         sandboxDomainsPath: baselinePath,
       });
       assert.equal(result, agentRunId);
@@ -811,6 +832,7 @@ describe('kimiStart', () => {
       spawn,
       exec,
       commandExists: commandLookup(),
+        prepareWorkerEnv: stubPrepareWorkerEnv,
       sandboxDomainsPath: writeBaselineDomains(dir),
     });
 
@@ -846,6 +868,7 @@ describe('kimiStart', () => {
       spawn,
       exec,
       commandExists: commandLookup(),
+        prepareWorkerEnv: stubPrepareWorkerEnv,
       sandboxDomainsPath: writeBaselineDomains(dir),
     });
 
@@ -872,6 +895,7 @@ describe('kimiStart', () => {
 
     await kimiStart(taskSpec, worktree, inbox, join(dir, 'sessions'), 'agent-bad-result', {
       commandExists: commandLookup(),
+        prepareWorkerEnv: stubPrepareWorkerEnv,
       exec: adapterExec([]),
       sandboxDomainsPath: writeBaselineDomains(dir),
       spawn: fakeSpawn({}, {
@@ -919,6 +943,7 @@ describe('kimiStart', () => {
     await assert.rejects(
       () => kimiStart(taskSpec, worktree, join(dir, 'inbox'), join(dir, 'sessions'), 'agent', {
         commandExists: commandLookup(),
+        prepareWorkerEnv: stubPrepareWorkerEnv,
         exec: adapterExec([]),
         sandboxDomainsPath: writeBaselineDomains(dir),
         makeSrtSettings: () => '',
@@ -946,6 +971,7 @@ describe('kimiStart', () => {
     await assert.rejects(
       () => kimiStart(taskSpec, worktree, join(dir, 'inbox'), join(dir, 'sessions'), 'agent', {
         commandExists: commandLookup(),
+        prepareWorkerEnv: stubPrepareWorkerEnv,
         exec: adapterExec([]),
         sandboxDomainsPath: writeBaselineDomains(dir),
         makeSrtSettings: (settingsPath) => {
