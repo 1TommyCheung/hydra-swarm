@@ -121,6 +121,36 @@ describe('yamlScalar', () => {
     const file = writeFixture('scalar', 'key: value   \n');
     assert.equal(yamlScalar(file, 'key'), 'value');
   });
+
+  it('unescapes \\" and \\\\ inside a double-quoted scalar', () => {
+    const file = writeFixture('scalar', 'key: "say \\"hi\\" with a \\\\ backslash"\n');
+    assert.equal(yamlScalar(file, 'key'), 'say "hi" with a \\ backslash');
+  });
+
+  it('leaves backslashes in an unquoted scalar untouched', () => {
+    const file = writeFixture('scalar', 'key: a\\b\n');
+    assert.equal(yamlScalar(file, 'key'), 'a\\b');
+  });
+});
+
+describe('yamlList quoting', () => {
+  before(() => mkdirSync(TEST_TMP, { recursive: true }));
+  after(cleanTmp);
+
+  it('unescapes \\" inside a double-quoted list item (verification commands)', () => {
+    const file = writeFixture(
+      'list-quoted',
+      'commands:\n  - "for f in x/*.md; do [ -s \\"$f\\" ] || exit 1; done"\n',
+    );
+    assert.deepEqual(yamlList(file, 'commands'), [
+      'for f in x/*.md; do [ -s "$f" ] || exit 1; done',
+    ]);
+  });
+
+  it('leaves unquoted list items untouched', () => {
+    const file = writeFixture('list-plain', 'commands:\n  - echo a\\b\n');
+    assert.deepEqual(yamlList(file, 'commands'), ['echo a\\b']);
+  });
 });
 
 describe('key matching', () => {

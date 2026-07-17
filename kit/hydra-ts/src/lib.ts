@@ -308,6 +308,14 @@ function readLines(file: string): string[] {
   return lines;
 }
 
+// Minimal unescape for the double-quoted YAML scalars these hand-rolled
+// readers accept: only `\"` and `\\` are produced by the quoting the harness
+// templates use, and both must collapse before the value is executed or
+// compared.
+export function unescapeYamlDoubleQuoted(value: string): string {
+  return value.replace(/\\(["\\])/g, '$1');
+}
+
 export function yamlList(file: string, key: string): string[] {
   const lines = readLines(file);
   const items: string[] = [];
@@ -322,7 +330,12 @@ export function yamlList(file: string, key: string): string[] {
       const match = line.match(/^\s*-\s*(.*)$/);
       if (match) {
         let value = match[1];
+        const wasQuoted = /^".*"$/.test(value.trim());
         value = value.replace(/^"|"$/g, '');
+        // A double-quoted YAML scalar escapes inner quotes/backslashes; leave
+        // them escaped and a verification command like `[ -s \"$f\" ]` reaches
+        // bash with literal backslash-quotes and always fails.
+        if (wasQuoted) value = unescapeYamlDoubleQuoted(value);
         items.push(value);
         continue;
       }
@@ -353,7 +366,10 @@ export function yamlBlock(file: string, key: string): string {
         // Inline scalar on the header line -- strip a trailing comment and
         // surrounding quotes the same way yamlScalar does, so a single-line
         // value behaves identically regardless of which reader is used.
-        return rest.replace(/\s+#.*$/, '').replace(/^"|"$/g, '').trim();
+        const stripped = rest.replace(/\s+#.*$/, '');
+        const inlineQuoted = /^".*"$/.test(stripped.trim());
+        const unquoted = stripped.replace(/^"|"$/g, '').trim();
+        return inlineQuoted ? unescapeYamlDoubleQuoted(unquoted) : unquoted;
       }
       grab = true;
       // An explicit indentation digit (`|2`, `>1-`, etc.) fixes the base
@@ -397,6 +413,7 @@ export function yamlScalar(file: string, key: string): string {
       value = value.replace(/\s+#.*$/, '');
       const wasQuoted = /^".*"$/.test(value.trim());
       value = value.replace(/^"|"$/g, '');
+      if (wasQuoted) value = unescapeYamlDoubleQuoted(value);
       value = value.replace(/\s+$/, '');
       // A bare, UNQUOTED block-scalar header (e.g. from an empty/whitespace-
       // only block body, or a caller that mistakenly used the scalar reader
