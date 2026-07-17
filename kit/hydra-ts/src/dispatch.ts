@@ -38,6 +38,7 @@ import {
   type LoopDetectorState,
 } from './loop-detector.ts';
 import { isCompiledBinary } from './kit-assets.ts';
+import { resolveWorkerNodeBinDir } from './resolve-node.ts';
 
 export type ExecFileSyncLike = (
   file: string,
@@ -169,6 +170,8 @@ export interface DispatchOptions {
   pollIntervalMs?: number;
   clock?: Clock;
   noSignals?: boolean;
+  /** Injectable HYDRA_NODE_BIN resolver (used by tests). */
+  resolveNodeBinDir?: () => string;
 }
 
 export interface DispatchHandle {
@@ -1143,6 +1146,17 @@ export async function dispatch(
   // bin-cli.ts's startup delete; safe under Node, effective under Bun because
   // the env object is passed explicitly.
   delete env.BUN_BE_BUN;
+  // Vendor-CLI tool shells rebuild PATH via login-shell init (macOS
+  // path_helper puts /usr/local/bin ahead of version managers), so a stale
+  // system node can shadow the harness-resolved one for WORKERS even though
+  // this env's PATH is correct. Export the known-good bin dir so the worker
+  // prompt can direct workers to it. An operator-set value always wins; a
+  // failed resolution leaves the env untouched (the target project may not
+  // need node at all).
+  if (!env.HYDRA_NODE_BIN) {
+    const nodeBinDir = (options.resolveNodeBinDir ?? resolveWorkerNodeBinDir)();
+    if (nodeBinDir) env.HYDRA_NODE_BIN = nodeBinDir;
+  }
   // A real compiled binary resolves to the self-reexec runtime no matter what
   // HYDRA_HARNESS/HYDRA_ADAPTER_RUNTIME say: 'bash' is now rejected upstream
   // (resolveAdapterRuntime) rather than selected. The 'compiled' runtime

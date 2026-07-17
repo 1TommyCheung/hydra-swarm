@@ -473,6 +473,35 @@ describe('dispatch Bash parity', () => {
     assert.equal(herdr.starts[0].command.includes("'node' '--experimental-strip-types'"), false);
   });
 
+  it('exports HYDRA_NODE_BIN into the worker env, without clobbering an operator preset', async () => {
+    const f = fixture(runId());
+    const mock = fakeSpawn();
+    const options = injectedOptions(f, mock.spawn, {
+      resolveNodeBinDir: () => '/resolved/node22/bin',
+    });
+    await dispatch(f.runId, 'task-a', options);
+    assert.equal(mock.calls[0].options?.env?.HYDRA_NODE_BIN, '/resolved/node22/bin');
+
+    const f2 = fixture(runId());
+    const mock2 = fakeSpawn();
+    const options2 = injectedOptions(f2, mock2.spawn, {
+      env: { HYDRA_NODE_BIN: '/operator/pinned/bin' },
+      resolveNodeBinDir: () => '/resolved/node22/bin',
+    });
+    await dispatch(f2.runId, 'task-a', options2);
+    assert.equal(mock2.calls[0].options?.env?.HYDRA_NODE_BIN, '/operator/pinned/bin');
+
+    // Resolution failure leaves the env untouched — a target project may not
+    // need node at all.
+    const f3 = fixture(runId());
+    const mock3 = fakeSpawn();
+    const options3 = injectedOptions(f3, mock3.spawn, {
+      resolveNodeBinDir: () => '',
+    });
+    await dispatch(f3.runId, 'task-a', options3);
+    assert.equal('HYDRA_NODE_BIN' in (mock3.calls[0].options?.env ?? {}), false);
+  });
+
   it('resolves the adapter runtime with compiled-binary precedence (resolveAdapterRuntime)', () => {
     // Inside a compiled binary the runtime is 'compiled' regardless of
     // HYDRA_HARNESS / HYDRA_ADAPTER_RUNTIME — 'ts' can never work there (no
