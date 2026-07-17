@@ -561,7 +561,16 @@ export async function kimiStart(
   const allowedDomains = [...new Set([...baseline, ...derivedDomains, ...taskDomains])];
 
   if (derivedDomains.length > 0) {
-    persistDerivedDomains(baselinePath, derivedDomains);
+    // Persist `baseline` too, not just `derivedDomains`: when the baseline
+    // file was missing/invalid, `baseline` is the KIMI_PROVIDER_DOMAINS
+    // fallback (in-memory only, per the branch above). Persisting only the
+    // derived domains would write a *first* baseline file containing e.g.
+    // registry.npmjs.org but omitting api.kimi.com/api.moonshot.*  — the
+    // next dispatch would then read that file as "valid" (non-empty),
+    // skip the fallback entirely, and silently drop Kimi's own provider
+    // domains from the allowlist, reintroducing the exact
+    // provider.connection_error regression this fallback exists to fix.
+    persistDerivedDomains(baselinePath, [...baseline, ...derivedDomains]);
   }
 
   const settingsPath = join(sessionsAbs, `${agentRunId}.srt-settings.json`);

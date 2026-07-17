@@ -626,6 +626,81 @@ describe('kimiStart', () => {
     assert.ok(persisted.allowedDomains.includes('api.moonshot.ai'));
   });
 
+  it('persists the provider-domain fallback alongside derived domains when the baseline file is missing (regression: a bare-derived first write must not silently drop api.kimi.com/api.moonshot.* for every dispatch after it)', async () => {
+    const dir = makeTempDir('start-derived-no-baseline');
+    const repoRoot = join(dir, 'repo');
+    initGitRepo(repoRoot);
+    commitFile(repoRoot, 'README.md', '# hi\n');
+    commitFile(repoRoot, 'package.json', JSON.stringify({ name: 'repo', dependencies: { foo: '^1.0.0' } }));
+    const baseCommit = commitFile(repoRoot, 'pnpm-lock.yaml', '');
+
+    const worktree = join(dir, 'worktree');
+    execFileSync('git', ['-C', repoRoot, 'worktree', 'add', '--quiet', worktree, baseCommit], {
+      encoding: 'utf8',
+      stdio: 'ignore',
+    });
+
+    const taskSpec = join(dir, 'task.yaml');
+    writeTaskSpec(taskSpec, { base_commit: baseCommit });
+    const inbox = join(dir, 'inbox');
+    const sessions = join(dir, 'sessions');
+    const agentRunId = 'agent-0019-derived-no-baseline';
+    // No writeBaselineDomains() call — the baseline path must not exist yet.
+    const baselinePath = join(dir, 'kimi-sandbox-domains.json');
+    assert.ok(!existsSync(baselinePath));
+
+    const workerResult = {
+      task_id: 'adapter-kimi',
+      run_id: '0019',
+      spec_version: 1,
+      vendor: 'kimi',
+      status: 'completed',
+      branch: 'hydra/0019/adapter-kimi',
+      base_commit: baseCommit,
+      head_commit: baseCommit,
+      summary: 'done',
+      files_changed: ['hydra-ts/src/adapter-kimi.ts'],
+      verification_claims: [],
+      risks: [],
+      unresolved_questions: [],
+      suggested_additional_checks: [],
+    };
+    const stdoutLines = [
+      JSON.stringify({ role: 'assistant', content: 'working' }),
+      JSON.stringify({ session_id: 'sess-derived-no-baseline' }),
+    ];
+    const recording: SpawnRecording = {};
+    const spawn = fakeSpawn(recording, {
+      stdout: stdoutLines.join('\n') + '\n',
+      stderr: '',
+      onSpawn: (_command, _args) => {
+        writeFileSync(join(worktree, '.hydra-result.json'), JSON.stringify(workerResult), 'utf8');
+      },
+    });
+    const execCalls: ExecCall[] = [];
+    const exec = adapterExec(execCalls);
+
+    await captureStderr(async () => {
+      const result = await kimiStart(taskSpec, worktree, inbox, sessions, agentRunId, {
+        spawn,
+        exec,
+        commandExists: commandLookup(),
+        sandboxDomainsPath: baselinePath,
+      });
+      assert.equal(result, agentRunId);
+    });
+
+    // The FIRST-EVER write to this baseline path (triggered by derivation)
+    // must already include the Kimi provider domains, not just the derived
+    // registry domain -- otherwise the very next dispatch reads this file
+    // as "valid" and never falls back to KIMI_PROVIDER_DOMAINS again.
+    const persisted = JSON.parse(readFileSync(baselinePath, 'utf8'));
+    assert.ok(persisted.allowedDomains.includes('registry.npmjs.org'));
+    assert.ok(persisted.allowedDomains.includes('api.kimi.com'));
+    assert.ok(persisted.allowedDomains.includes('api.moonshot.ai'));
+    assert.ok(persisted.allowedDomains.includes('api.moonshot.cn'));
+  });
+
   it('derives a result drop from git evidence when the worker omits one', async () => {
     const dir = makeTempDir('start-git');
     const repoRoot = join(dir, 'repo');
