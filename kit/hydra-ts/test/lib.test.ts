@@ -131,6 +131,11 @@ describe('yamlScalar', () => {
     const file = writeFixture('scalar', 'key: a\\b\n');
     assert.equal(yamlScalar(file, 'key'), 'a\\b');
   });
+
+  it('keeps a literal "#" inside a quoted scalar instead of treating it as a comment', () => {
+    const file = writeFixture('scalar', 'key: "release notes (see issue #42)"\n');
+    assert.equal(yamlScalar(file, 'key'), 'release notes (see issue #42)');
+  });
 });
 
 describe('yamlList quoting', () => {
@@ -300,6 +305,11 @@ next: value
     const file = writeFixture('block', 'reason: Fix this # literal hash\n');
     assert.equal(yamlBlock(file, 'reason'), 'Fix this');
     assert.equal(yamlScalar(file, 'reason'), 'Fix this');
+  });
+
+  it('keeps a literal "#" inside a quoted inline value instead of treating it as a comment', () => {
+    const file = writeFixture('block', 'reason: "see issue #42"\n');
+    assert.equal(yamlBlock(file, 'reason'), 'see issue #42');
   });
 
   it('recognizes chomping/indentation block-header variants in either indicator order', () => {

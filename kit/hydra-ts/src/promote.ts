@@ -463,7 +463,7 @@ export async function promote(
     // commands) without writing observedJson; a reject that says "see
     // <file>" would then point at a file that does not exist and swallow
     // the real cause. Persist a diagnostic record and surface the error.
-    const detail = String(error instanceof Error ? error.message : error).replace(/\n/g, '; ');
+    const detail = String(error instanceof Error ? error.message : error).replace(/\n/g, ';');
     try {
       writeFileSync(
         observedJson,

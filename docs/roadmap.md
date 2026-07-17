@@ -250,6 +250,35 @@ Dates are the day the wave's exit criteria were met in this repo.
   verified to fail on the un-fixed code before being merged. Landed as an
   additional commit on the PR branch before merging, not a follow-up patch.
 
+### YAML unescape + verify() diagnostics (PR #4) · 2026-07-17 (v0.6.3)
+
+- **Double-quoted YAML scalars kept their escape sequences.** `yamlList`/
+  `yamlScalar`/`yamlBlock` stripped surrounding double quotes but never
+  unescaped `\"`/`\\`. A tracked verification-policy command quoted as
+  `"ok=1; for f in proposals/*.md; do [ -s \"$f\" ] && ok=0; done; exit $ok"`
+  reached bash with literal backslash-quotes and always failed, with no
+  signal why (the JSON-echoed command looked correct at a glance). Fixed
+  with `unescapeYamlDoubleQuoted()`, applied only to values that were
+  actually double-quoted.
+- **`promote` swallowed the real error when `verify()` threw.** When
+  `verify()` died before writing its output (missing/unparseable policy,
+  zero commands), promote rejected with a message pointing at an
+  `observedJson` file that was never written, discarding the underlying
+  error. Now a diagnostic record is written and the reject detail carries
+  the real cause.
+- **Found in review before merge: comment-stripping ran before quote
+  detection.** `yamlScalar` and `yamlBlock`'s inline branch stripped a
+  trailing `# comment` *before* checking whether the value was
+  double-quoted, so a quoted value containing a literal `#` (e.g.
+  `"release notes (see issue #42)"`) was truncated at the inner `#` before
+  the closing quote was ever reached — undermining the PR's own fix for
+  exactly this class of bug. Fixed by extracting the quoted body first
+  (respecting escaped quotes) via a shared `parseInlineScalar()` helper,
+  which also collapsed three near-identical copies of the
+  detect/strip/unescape logic into one; comment-stripping now only ever
+  runs on unquoted material. Covered by new regression tests in
+  `lib.test.ts`.
+
 ### Wave 3 preflight tooling — first real artifact · 2026-07-13
 
 - **`srt` replaces `sandbox-exec` for Kimi sandboxing** (run 0041, commit
