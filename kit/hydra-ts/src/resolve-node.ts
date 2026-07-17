@@ -75,7 +75,10 @@ export function resolveWorkerNodeBinDir(options: ResolveNodeBinOptions = {}): st
   } catch {
     pathCandidate = '';
   }
-  if (pathCandidate && nodeMeetsRequirement(versionOf(pathCandidate, exec))) {
+  // `command -v` prints a full path for external commands; a bare name (shell
+  // function/alias/builtin) would make dirname() return '.', so require a
+  // path separator before trusting it.
+  if (pathCandidate.includes('/') && nodeMeetsRequirement(versionOf(pathCandidate, exec))) {
     return dirname(pathCandidate);
   }
 

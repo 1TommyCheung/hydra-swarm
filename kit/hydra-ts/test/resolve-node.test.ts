@@ -72,6 +72,17 @@ describe('resolveWorkerNodeBinDir', () => {
     assert.equal(dir, join(home, '.nvm/versions/node/v24.1.0/bin'));
   });
 
+  it('compiled: ignores a pathless command -v result (shell function/alias)', () => {
+    const exec = (file: string): string => {
+      if (file === 'sh') return 'node\n';
+      // A bare name must never reach a --version probe; every other candidate
+      // (homebrew fallbacks) is absent on this fixture machine.
+      throw new Error(`unexpected exec: ${file}`);
+    };
+    const dir = resolveWorkerNodeBinDir({ compiled: true, exec, homeDir: join(TEST_TMP, 'no-home-2') });
+    assert.equal(dir, '');
+  });
+
   it('compiled: returns empty string when nothing qualifies', () => {
     const exec = (): string => {
       throw new Error('command not found');

@@ -140,6 +140,14 @@ acceptance_criteria:
 
     const withoutEnv = buildWorkerPrompt(spec, { cwd: TEST_TMP, env: {} });
     assert.doesNotMatch(withoutEnv, /HYDRA_NODE_BIN|export PATH=/);
+
+    // The value lands inside a shell line the worker is told to run — drop it
+    // entirely when it carries quoting/expansion metacharacters.
+    const withHostile = buildWorkerPrompt(spec, {
+      cwd: TEST_TMP,
+      env: { HYDRA_NODE_BIN: '/tmp/x"; $(rm -rf ~)/bin' },
+    });
+    assert.doesNotMatch(withHostile, /export PATH=|rm -rf/);
   });
 
   it('falls back to an inline objective when no block scalar is present', () => {

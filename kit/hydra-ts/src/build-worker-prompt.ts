@@ -69,7 +69,11 @@ export function buildWorkerPrompt(
   // Login-shell PATH rebuilds inside vendor-CLI tool shells can demote the
   // harness-resolved node behind a stale /usr/local/bin one; point workers at
   // the known-good toolchain so they don't burn turns rediscovering it.
-  const nodeBin = (options.env ?? process.env).HYDRA_NODE_BIN;
+  // The value is interpolated into a shell line the worker is told to run, so
+  // an operator-set value with quoting/expansion metacharacters is dropped
+  // rather than emitted (resolver-produced paths always pass this).
+  const nodeBinRaw = (options.env ?? process.env).HYDRA_NODE_BIN;
+  const nodeBin = nodeBinRaw && /^[A-Za-z0-9_/.+@ -]+$/.test(nodeBinRaw) ? nodeBinRaw : '';
   const nodeNote = nodeBin
     ? `\n- A Node.js >=22 toolchain is at ${nodeBin}. If plain \`node\` resolves to an
   older version in your shell, run: export PATH="${nodeBin}:$PATH"`
