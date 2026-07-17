@@ -308,6 +308,29 @@ function readLines(file: string): string[] {
   return lines;
 }
 
+// Minimal unescape for the double-quoted YAML scalars these hand-rolled
+// readers accept: only `\"` and `\\` are produced by the quoting the harness
+// templates use, and both must collapse before the value is executed or
+// compared.
+export function unescapeYamlDoubleQuoted(value: string): string {
+  return value.replace(/\\(["\\])/g, '$1');
+}
+
+// Parse an inline scalar that may be double-quoted and/or followed by a
+// trailing `# comment`. A quoted scalar can itself contain a literal `#`
+// (e.g. a shell command's own comment marker); stripping `\s+#.*$` before
+// checking for quotes truncates the value at that inner `#` and never
+// reaches the closing quote. Detect and extract the quoted body FIRST, so
+// comment-stripping only ever applies to unquoted material.
+function parseInlineScalar(raw: string): { value: string; wasQuoted: boolean } {
+  const quoted = raw.trim().match(/^"((?:\\.|[^"\\])*)"/);
+  if (quoted) {
+    return { value: unescapeYamlDoubleQuoted(quoted[1]), wasQuoted: true };
+  }
+  const stripped = raw.replace(/\s+#.*$/, '');
+  return { value: stripped.replace(/^"|"$/g, ''), wasQuoted: false };
+}
+
 export function yamlList(file: string, key: string): string[] {
   const lines = readLines(file);
   const items: string[] = [];
@@ -321,9 +344,14 @@ export function yamlList(file: string, key: string): string[] {
     if (grab) {
       const match = line.match(/^\s*-\s*(.*)$/);
       if (match) {
-        let value = match[1];
-        value = value.replace(/^"|"$/g, '');
-        items.push(value);
+        // Quoted-body extraction, unescaping, and comment-stripping all live
+        // in parseInlineScalar so a list item behaves exactly like an inline
+        // scalar. A hand-rolled /^".*"$/ test here mismatched the quote strip
+        // on the untrimmed value: a quoted item followed by a trailing
+        // comment or whitespace ("- \"cmd\" # note", "- \"cmd\"  ") kept its
+        // closing quote and the comment, reaching bash as an unterminated
+        // quote.
+        items.push(parseInlineScalar(match[1]).value);
         continue;
       }
       if (/^\S/.test(line)) {
@@ -353,7 +381,7 @@ export function yamlBlock(file: string, key: string): string {
         // Inline scalar on the header line -- strip a trailing comment and
         // surrounding quotes the same way yamlScalar does, so a single-line
         // value behaves identically regardless of which reader is used.
-        return rest.replace(/\s+#.*$/, '').replace(/^"|"$/g, '').trim();
+        return parseInlineScalar(rest).value.trim();
       }
       grab = true;
       // An explicit indentation digit (`|2`, `>1-`, etc.) fixes the base
@@ -393,11 +421,9 @@ export function yamlScalar(file: string, key: string): string {
     const line = rawLine.replace(/\r$/, '');
     const match = line.match(new RegExp(`^${key}:[\\s]*`));
     if (match) {
-      let value = line.slice(match[0].length);
-      value = value.replace(/\s+#.*$/, '');
-      const wasQuoted = /^".*"$/.test(value.trim());
-      value = value.replace(/^"|"$/g, '');
-      value = value.replace(/\s+$/, '');
+      const raw = line.slice(match[0].length);
+      const { value: parsed, wasQuoted } = parseInlineScalar(raw);
+      const value = parsed.replace(/\s+$/, '');
       // A bare, UNQUOTED block-scalar header (e.g. from an empty/whitespace-
       // only block body, or a caller that mistakenly used the scalar reader
       // on a block field) is never legitimate plain-scalar content -- treat

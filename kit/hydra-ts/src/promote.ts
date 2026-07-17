@@ -292,7 +292,11 @@ export async function promote(
     try {
       schemaText = defaultSchemaText();
     } catch {
-      internal(`result schema not found: ${kitAssetPath('schemas/result.schema.json')}`);
+      internal(
+        `result schema not found: ${kitAssetPath('schemas/result.schema.json')} `
+        + '(a repo without the installed kit layout needs hydra/{schemas,policies} '
+        + 'copied from the plugin kit — see docs/state-and-worktrees.md)',
+      );
     }
   }
 
@@ -454,9 +458,23 @@ export async function promote(
         LANG: process.env.LANG ?? 'C',
       },
     });
-  } catch {
+  } catch (error) {
+    // verify() can die before running (missing/unparseable policy, no
+    // commands) without writing observedJson; a reject that says "see
+    // <file>" would then point at a file that does not exist and swallow
+    // the real cause. Persist a diagnostic record and surface the error.
+    const detail = String(error instanceof Error ? error.message : error).replace(/\n/g, ';');
+    try {
+      writeFileSync(
+        observedJson,
+        `${JSON.stringify([{ command: '(verification harness)', status: 'failed', error: detail }])}\n`,
+        'utf8',
+      );
+    } catch {
+      // best-effort: the reject detail below still carries the cause
+    }
     appendLedger(stateRoot, runId, 'verification_executed', 'task_id', taskId, 'status', 'failed');
-    reject(stateRoot, runId, taskId, 'verification_failed', `harness re-run did not pass; see ${observedJson}`);
+    reject(stateRoot, runId, taskId, 'verification_failed', `verification harness error: ${detail}`);
   }
 
   const allPassed = observed.every((r) => r.status === 'passed');

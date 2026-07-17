@@ -723,6 +723,35 @@ writable_paths:
     assert.ok(events.some((ev) => ev.event === 'verification_executed' && ev.status === 'failed'));
   });
 
+  it('surfaces the cause and writes a diagnostic when verify itself throws', async () => {
+    const f = makeFixture();
+    const options: PromoteOptions = {
+      ...baseOptions(f),
+      verify: async () => {
+        throw new Error('no verification commands in policy: /missing/verification.yaml');
+      },
+    };
+
+    try {
+      await promote(f.runId, f.taskId, f.drop, options);
+      assert.fail('expected rejection');
+    } catch (e) {
+      assertRejected(e, 'verification_failed');
+      // The rejection must carry the real cause, not a pointer to a file
+      // verify never wrote.
+      assert.match((e as Error).message, /no verification commands in policy/);
+    }
+
+    // A diagnostic record exists where the reject detail used to point.
+    const observedJson = join(
+      f.stateRoot, 'runs', `run-${f.runId}`, 'authoritative', 'verification', `${f.taskId}.json`,
+    );
+    assert.ok(existsSync(observedJson), 'diagnostic verification JSON must be written');
+    const observed = JSON.parse(readFileSync(observedJson, 'utf8')) as Array<Record<string, string>>;
+    assert.equal(observed[0].status, 'failed');
+    assert.match(observed[0].error, /no verification commands in policy/);
+  });
+
   it('promotes a valid drop and records result_promoted', async () => {
     const f = makeFixture();
     const options = baseOptions(f);

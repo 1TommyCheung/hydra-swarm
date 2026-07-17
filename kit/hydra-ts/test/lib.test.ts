@@ -121,6 +121,93 @@ describe('yamlScalar', () => {
     const file = writeFixture('scalar', 'key: value   \n');
     assert.equal(yamlScalar(file, 'key'), 'value');
   });
+
+  it('unescapes \\" and \\\\ inside a double-quoted scalar', () => {
+    const file = writeFixture('scalar', 'key: "say \\"hi\\" with a \\\\ backslash"\n');
+    assert.equal(yamlScalar(file, 'key'), 'say "hi" with a \\ backslash');
+  });
+
+  it('leaves backslashes in an unquoted scalar untouched', () => {
+    const file = writeFixture('scalar', 'key: a\\b\n');
+    assert.equal(yamlScalar(file, 'key'), 'a\\b');
+  });
+
+  it('keeps a literal "#" inside a quoted scalar instead of treating it as a comment', () => {
+    const file = writeFixture('scalar', 'key: "release notes (see issue #42)"\n');
+    assert.equal(yamlScalar(file, 'key'), 'release notes (see issue #42)');
+  });
+});
+
+describe('yamlList quoting', () => {
+  before(() => mkdirSync(TEST_TMP, { recursive: true }));
+  after(cleanTmp);
+
+  it('unescapes \\" inside a double-quoted list item (verification commands)', () => {
+    const file = writeFixture(
+      'list-quoted',
+      'commands:\n  - "for f in x/*.md; do [ -s \\"$f\\" ] || exit 1; done"\n',
+    );
+    assert.deepEqual(yamlList(file, 'commands'), [
+      'for f in x/*.md; do [ -s "$f" ] || exit 1; done',
+    ]);
+  });
+
+  it('leaves unquoted list items untouched', () => {
+    const file = writeFixture('list-plain', 'commands:\n  - echo a\\b\n');
+    assert.deepEqual(yamlList(file, 'commands'), ['echo a\\b']);
+  });
+
+  it('strips a trailing comment after a quoted list item instead of corrupting the value', () => {
+    // The quote test must run against the extracted quoted body, not the
+    // whole remainder of the line: with a trailing comment present the old
+    // whole-line /^".*"$/ test failed, leaving the closing quote and the
+    // comment inside the value -- a command like this reaches bash with an
+    // unterminated quote and always fails.
+    const file = writeFixture(
+      'list-quoted-comment',
+      'commands:\n  - "npm test" # run the suite\n',
+    );
+    assert.deepEqual(yamlList(file, 'commands'), ['npm test']);
+  });
+
+  it('does not leave the closing quote behind when a quoted list item has trailing whitespace', () => {
+    // The old code tested value.trim() for quotes but stripped them from the
+    // UNtrimmed value, so the closing quote before the trailing spaces
+    // survived into the item.
+    const file = writeFixture('list-quoted-ws', 'commands:\n  - "npm test"  \n');
+    assert.deepEqual(yamlList(file, 'commands'), ['npm test']);
+  });
+
+  it('keeps a literal "#" inside a quoted list item even when a comment follows', () => {
+    const file = writeFixture('list-quoted-hash', 'commands:\n  - "echo #hi" # c\n');
+    assert.deepEqual(yamlList(file, 'commands'), ['echo #hi']);
+  });
+
+  it('strips a trailing comment from an unquoted list item, matching yamlScalar', () => {
+    const file = writeFixture('list-plain-comment', 'commands:\n  - echo hi # comment\n');
+    assert.deepEqual(yamlList(file, 'commands'), ['echo hi']);
+    const scalar = writeFixture('list-plain-comment-scalar', 'key: echo hi # comment\n');
+    assert.equal(yamlScalar(scalar, 'key'), 'echo hi');
+  });
+
+  it('parses an empty double-quoted list item as an empty string', () => {
+    const file = writeFixture('list-empty-quoted', 'commands:\n  - ""\n');
+    assert.deepEqual(yamlList(file, 'commands'), ['']);
+  });
+
+  it('unescapes an odd backslash run before the closing quote of a list item', () => {
+    // File text "ends in a backslash\\" is YAML for: ends in a backslash\
+    const file = writeFixture(
+      'list-backslash-run',
+      'commands:\n  - "ends in a backslash\\\\"\n',
+    );
+    assert.deepEqual(yamlList(file, 'commands'), ['ends in a backslash\\']);
+  });
+
+  it('unescapes quoted list items under CRLF line endings', () => {
+    const file = writeFixture('list-crlf-quoted', 'commands:\r\n  - "echo \\"hi\\""\r\n');
+    assert.deepEqual(yamlList(file, 'commands'), ['echo "hi"']);
+  });
 });
 
 describe('key matching', () => {
@@ -270,6 +357,11 @@ next: value
     const file = writeFixture('block', 'reason: Fix this # literal hash\n');
     assert.equal(yamlBlock(file, 'reason'), 'Fix this');
     assert.equal(yamlScalar(file, 'reason'), 'Fix this');
+  });
+
+  it('keeps a literal "#" inside a quoted inline value instead of treating it as a comment', () => {
+    const file = writeFixture('block', 'reason: "see issue #42"\n');
+    assert.equal(yamlBlock(file, 'reason'), 'see issue #42');
   });
 
   it('recognizes chomping/indentation block-header variants in either indicator order', () => {
