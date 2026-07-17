@@ -5,6 +5,28 @@ All notable changes to Hydra-Swarm. The format follows
 `.claude-plugin/plugin.json`. Deeper narrative history (design rationale,
 run-by-run evidence) lives in `docs/roadmap.md`.
 
+## [0.7.2] — 2026-07-17
+
+### Added
+- **Binary distribution via GitHub Releases.** A `v*` tag triggers
+  `.github/workflows/release.yml`: build-matrix compiles all four targets
+  (darwin-arm64/x64, linux-x64/arm64 — glibc; Windows via WSL) with pinned
+  Bun 1.3.14, blackbox-verifies the runner-native artifact, asserts
+  tag == plugin.json version == binary self-report, and uploads binaries +
+  provenance manifests + SHA256SUMS. Binaries are never committed to git.
+- **`fetch-bin.sh`** downloads the release binary matching THIS plugin's
+  version into a version-keyed cache
+  (`~/.local/share/hydra-bin/v<version>/hydra-cli-<target>`), gated on:
+  manifest sha256 match, binary self-reported version == plugin version, and
+  target-triple match. Any gate fails → nothing installed, ts lane unaffected.
+- **`hydra_resolve_bin` cache candidate**: `HYDRA_BIN` → checkout `dist/` →
+  version-keyed cache → ts fallback. Keyed by the checkout's own plugin
+  version, so a stale binary is structurally invisible rather than merely
+  checked for.
+- **Doctor: compiled-binary check** — reports the resolved binary and warns
+  on version drift or a pre-0.7.1 build (no `version` subcommand), with
+  `fetch`/`rebuild` auto-fix commands.
+
 ## [0.7.1] — 2026-07-17
 
 ### Added

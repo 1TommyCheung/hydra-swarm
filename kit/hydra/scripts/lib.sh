@@ -139,8 +139,42 @@ _hydra_bin_is_usable() {
 # an operator who explicitly asked for `bin` and got quietly downgraded to `ts`
 # would not notice the rollback path was broken until they needed it
 # (docs/bash-lane-retirement-plan.md §3, Lane 1 runtime contract).
+# Plugin manifest version — the version authority for the version-keyed
+# binary cache. Reads .claude-plugin/plugin.json relative to this lib
+# (identical relative layout in the dev checkout and the installed plugin
+# cache). jq preferred; sed fallback so resolution works before doctor has
+# verified jq. Empty output = undetermined (callers skip the cache candidate).
+_hydra_plugin_version() {
+  local lib_dir manifest
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  manifest="$lib_dir/../../../.claude-plugin/plugin.json"
+  [ -f "$manifest" ] || return 0
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '.version // empty' "$manifest" 2>/dev/null
+  else
+    sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1
+  fi
+}
+
+# Release-artifact target triple for this machine (matches build-matrix.ts
+# targets with the "bun-" prefix stripped). Empty on unsupported platforms.
+_hydra_bin_target() {
+  local os arch
+  case "$(uname -s)" in
+    Darwin) os="darwin" ;;
+    Linux)  os="linux" ;;
+    *) return 0 ;;
+  esac
+  case "$(uname -m)" in
+    arm64|aarch64) arch="arm64" ;;
+    x86_64)        arch="x64" ;;
+    *) return 0 ;;
+  esac
+  printf '%s-%s' "$os" "$arch"
+}
+
 hydra_resolve_bin() {
-  local lib_dir candidate
+  local lib_dir candidate version target
   if [ -n "${HYDRA_BIN:-}" ]; then
     if _hydra_bin_is_usable "$HYDRA_BIN"; then
       printf '%s\n' "$HYDRA_BIN"
@@ -154,7 +188,20 @@ hydra_resolve_bin() {
     printf '%s\n' "$candidate"
     return 0
   fi
-  hydra_die "HYDRA_HARNESS=bin requested but no compiled binary at $candidate; run 'npm run build:bin' in kit/hydra-ts or set HYDRA_BIN to a pinned known-good binary (e.g. \$HOME/.local/share/hydra-pinned-binaries/v2/hydra-cli-v2-darwin-arm64)"
+  # Version-keyed download cache (fetch-bin.sh installs here after checksum +
+  # self-reported-version verification). Keyed by THIS checkout's plugin
+  # version, so a binary from any other release is structurally invisible —
+  # stale-binary pickup is impossible rather than merely checked for.
+  version="$(_hydra_plugin_version)"
+  target="$(_hydra_bin_target)"
+  if [ -n "$version" ] && [ -n "$target" ]; then
+    candidate="${XDG_DATA_HOME:-$HOME/.local/share}/hydra-bin/v${version}/hydra-cli-${target}"
+    if _hydra_bin_is_usable "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
+  hydra_die "HYDRA_HARNESS=bin requested but no compiled binary found; run 'npm run build:bin' in kit/hydra-ts, download a release binary with kit/hydra/scripts/fetch-bin.sh, or set HYDRA_BIN to a pinned known-good binary (e.g. \$HOME/.local/share/hydra-pinned-binaries/v2/hydra-cli-v2-darwin-arm64)"
 }
 
 # The ONE call every wrapper makes: hydra_launch <subcommand> [args...].
