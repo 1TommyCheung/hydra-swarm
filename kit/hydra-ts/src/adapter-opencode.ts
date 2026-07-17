@@ -35,7 +35,7 @@ import { isCompiledBinary } from './kit-assets.ts';
 // real vendor tooling.
 // ---------------------------------------------------------------------------
 
-const DEFAULT_MODEL = 'zai-coding-plan/glm-5.2';
+export const DEFAULT_MODEL = 'zai-coding-plan/glm-5.2';
 
 /** Injectable replacement for spawning the streaming opencode CLI. */
 export type OpencodeSpawn = (
@@ -56,6 +56,8 @@ export type DeriveDropFromGit = (
 export interface OpencodeRunOptions {
   /** Explicit model override for injected callers and tests. */
   model?: string;
+  /** Task-spec opencode_model pin; start() fills this from the spec file. */
+  taskSpecModel?: string;
   /** Injected streaming opencode runner for tests. */
   spawn?: OpencodeSpawn;
   /** Injected git-derived drop helper for tests. */
@@ -66,8 +68,12 @@ export interface OpencodeRunOptions {
   stateRoot?: string;
 }
 
+// Model precedence: options.model (explicit injection) > task-spec
+// opencode_model pin > HYDRA_OPENCODE_MODEL > opencode-model.json > default.
 function resolveModel(options?: OpencodeRunOptions): string {
   if (options?.model !== undefined) return options.model;
+
+  if (options?.taskSpecModel) return options.taskSpecModel;
 
   const envModel = process.env.HYDRA_OPENCODE_MODEL;
   if (envModel) return envModel;
@@ -494,7 +500,11 @@ export async function start(
   if (!sessions) die('usage: opencode.ts start <task_spec> <worktree> <inbox> <sessions> <agent_run_id>');
   if (!agentRunId) die('usage: opencode.ts start <task_spec> <worktree> <inbox> <sessions> <agent_run_id>');
 
-  const model = resolveModel(options);
+  // The task-spec opencode_model pin travels with the spec file itself: dispatch
+  // hands this adapter the spec path, and the pin outranks HYDRA_OPENCODE_MODEL
+  // here in resolveModel. An explicit options.model (tests/callers) still wins.
+  const specPin = options?.taskSpecModel || yamlScalar(taskSpec, 'opencode_model');
+  const model = resolveModel(specPin ? { ...options, taskSpecModel: specPin } : options);
   const spawnFn = options?.spawn ?? spawn;
   const derive = options?.deriveDropFromGit ?? libDeriveDropFromGit;
 

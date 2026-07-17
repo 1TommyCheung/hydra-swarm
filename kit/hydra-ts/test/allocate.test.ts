@@ -1,12 +1,56 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { allocate, type AllocateResult } from '../src/allocate.ts';
+import type { HeadsSnapshot } from '../src/detect-heads.ts';
 
 const TEST_TMP = join(import.meta.dirname, 'tmp-allocate');
+
+const ORIGINAL_HYDRA_HEADS_FILE = process.env.HYDRA_HEADS_FILE;
+
+// Existing ranking tests must not depend on which vendor CLIs happen to be on
+// this machine's PATH: pin availability to an all-available heads.json fixture
+// via HYDRA_HEADS_FILE (inherited by the CLI subprocess tests too).
+const ALL_AVAILABLE_HEADS = join(TEST_TMP, 'heads-all-available.json');
+
+function setupHeadsEnv(): void {
+  writeHeadsSnapshot(ALL_AVAILABLE_HEADS, {});
+  process.env.HYDRA_HEADS_FILE = ALL_AVAILABLE_HEADS;
+}
+
+function restoreHeadsEnv(): void {
+  if (ORIGINAL_HYDRA_HEADS_FILE === undefined) delete process.env.HYDRA_HEADS_FILE;
+  else process.env.HYDRA_HEADS_FILE = ORIGINAL_HYDRA_HEADS_FILE;
+}
+
+function writeHeadsSnapshot(path: string, availability: Partial<Record<string, boolean>>): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const heads: Record<string, unknown> = {};
+  for (const name of ['claude', 'codex', 'opencode', 'kimi']) {
+    const available = availability[name] ?? true;
+    heads[name] = { available, path: available ? `/usr/bin/${name}` : null };
+  }
+  writeFileSync(path, JSON.stringify({ detected_at: '2026-01-01T00:00:00Z', heads }), 'utf8');
+}
+
+function liveSnapshot(availability: Partial<Record<string, boolean>>): HeadsSnapshot {
+  const head = (name: string) => ({
+    available: availability[name] ?? true,
+    path: (availability[name] ?? true) ? `/usr/bin/${name}` : null,
+  });
+  return {
+    detected_at: '2026-01-01T00:00:00Z',
+    heads: {
+      claude: head('claude'),
+      codex: head('codex'),
+      opencode: { ...head('opencode'), models: [], active_model: 'zai-coding-plan/glm-5.2' },
+      kimi: { ...head('kimi'), srt_available: true, write_capable: true },
+    },
+  };
+}
 
 function cleanTmp(): void {
   if (existsSync(TEST_TMP)) {
@@ -67,8 +111,14 @@ function vendors(result: AllocateResult): string[] {
 }
 
 describe('allocate', () => {
-  before(() => mkdirSync(TEST_TMP, { recursive: true }));
-  after(cleanTmp);
+  before(() => {
+    mkdirSync(TEST_TMP, { recursive: true });
+    setupHeadsEnv();
+  });
+  after(() => {
+    cleanTmp();
+    restoreHeadsEnv();
+  });
 
   it('throws when role is empty', () => {
     assert.throws(() => allocate('', 'implement'), /usage: allocate/);
@@ -260,8 +310,14 @@ describe('allocate', () => {
 });
 
 describe('allocate CLI', () => {
-  before(() => mkdirSync(TEST_TMP, { recursive: true }));
-  after(cleanTmp);
+  before(() => {
+    mkdirSync(TEST_TMP, { recursive: true });
+    setupHeadsEnv();
+  });
+  after(() => {
+    cleanTmp();
+    restoreHeadsEnv();
+  });
 
   it('prints a JSON recommendation to stdout', () => {
     const { profilesDir, stateRoot } = setupFixture();
@@ -356,5 +412,151 @@ describe('allocate CLI', () => {
     assert.equal(result.status, 0, result.stderr);
     const parsed = JSON.parse(result.stdout) as AllocateResult;
     assert.equal(parsed.recommendation, 'claude');
+  });
+});
+
+describe('allocate availability filter', () => {
+  before(() => {
+    mkdirSync(TEST_TMP, { recursive: true });
+    setupHeadsEnv();
+  });
+  after(() => {
+    cleanTmp();
+    restoreHeadsEnv();
+  });
+
+  it('drops vendors whose CLI is unavailable per heads.json before ranking', () => {
+    const { profilesDir, stateRoot } = setupFixture();
+    writeSeed(profilesDir, 'claude', 'cost_hint: subscription\n');
+    writeSeed(profilesDir, 'codex', 'cost_hint: "5.0/30.0"\n');
+    writeSeed(profilesDir, 'opencode', 'cost_hint: free_tier\n');
+    const headsFile = join(stateRoot, 'heads.json');
+    writeHeadsSnapshot(headsFile, { codex: false });
+
+    const result = allocate('reviewer', 'audit', 'medium', '', { profilesDir, stateRoot, headsFile });
+
+    assert.deepEqual(vendors(result), ['opencode', 'claude']);
+    assert.deepEqual(result.unavailable, ['codex']);
+    assert.equal(result.recommendation, 'opencode');
+  });
+
+  it('recommends the best available vendor', () => {
+    const { profilesDir, stateRoot } = setupFixture();
+    writeSeed(profilesDir, 'claude', 'seeded_strengths:\n  - claim: implementation\ncost_hint: subscription\n');
+    writeSeed(profilesDir, 'codex', 'seeded_strengths:\n  - claim: review\ncost_hint: "5.0/30.0"\n');
+    writeSeed(profilesDir, 'kimi', 'cost_hint: "0.95/4.00"\n');
+    const headsFile = join(stateRoot, 'heads.json');
+    writeHeadsSnapshot(headsFile, { claude: false });
+
+    const result = allocate('implementer', 'feature', 'medium', '', { profilesDir, stateRoot, headsFile });
+
+    assert.deepEqual(vendors(result), ['codex', 'kimi']);
+    assert.equal(result.recommendation, 'codex');
+    assert.deepEqual(result.unavailable, ['claude']);
+  });
+
+  it('dies naming the unavailable vendors when every eligible vendor is unavailable', () => {
+    const { profilesDir, stateRoot } = setupFixture();
+    writeSeed(profilesDir, 'claude', 'cost_hint: subscription\n');
+    const headsFile = join(stateRoot, 'heads.json');
+    writeHeadsSnapshot(headsFile, { claude: false, codex: false, opencode: false, kimi: false });
+
+    assert.throws(
+      () => allocate('implementer', 'feature', 'medium', '', { profilesDir, stateRoot, headsFile }),
+      /no eligible vendor for role=implementer .*unavailable on PATH: claude, codex, kimi/,
+    );
+  });
+
+  it('probes live with the injectable when heads.json is missing', () => {
+    const { profilesDir, stateRoot } = setupFixture();
+    writeSeed(profilesDir, 'kimi', 'cost_hint: "0.95/4.00"\n');
+    const headsFile = join(stateRoot, 'absent-heads.json');
+    let probed = 0;
+    const probeHeads = (): HeadsSnapshot => {
+      probed += 1;
+      return liveSnapshot({ kimi: false });
+    };
+
+    assert.throws(
+      () => allocate('visual_debugging', 'screenshot', 'medium', '', { profilesDir, stateRoot, headsFile, probeHeads }),
+      /no eligible vendor for role=visual_debugging/,
+    );
+    assert.equal(probed, 1);
+  });
+
+  it('does not probe live when heads.json is present', () => {
+    const { profilesDir, stateRoot } = setupFixture();
+    writeSeed(profilesDir, 'kimi', 'cost_hint: "0.95/4.00"\n');
+    const headsFile = join(stateRoot, 'heads.json');
+    writeHeadsSnapshot(headsFile, {});
+    let probed = 0;
+    const probeHeads = (): HeadsSnapshot => {
+      probed += 1;
+      return liveSnapshot({ kimi: false });
+    };
+
+    const result = allocate('visual_debugging', 'screenshot', 'medium', '', { profilesDir, stateRoot, headsFile, probeHeads });
+
+    assert.deepEqual(vendors(result), ['kimi']);
+    assert.equal(probed, 0);
+  });
+
+  it('falls back to a live probe when heads.json is malformed', () => {
+    const { profilesDir, stateRoot } = setupFixture();
+    writeSeed(profilesDir, 'claude', 'cost_hint: subscription\n');
+    writeSeed(profilesDir, 'codex', 'cost_hint: "5.0/30.0"\n');
+    writeSeed(profilesDir, 'opencode', 'cost_hint: free_tier\n');
+    const headsFile = join(stateRoot, 'heads.json');
+    writeFileSync(headsFile, 'not json', 'utf8');
+
+    const result = allocate('reviewer', 'audit', 'medium', '', {
+      profilesDir,
+      stateRoot,
+      headsFile,
+      probeHeads: () => liveSnapshot({ opencode: false }),
+    });
+
+    assert.deepEqual(vendors(result), ['codex', 'claude']);
+    assert.deepEqual(result.unavailable, ['opencode']);
+  });
+
+  it('routes the live probe through the injectable exec', () => {
+    const { profilesDir, stateRoot } = setupFixture();
+    writeSeed(profilesDir, 'claude', 'cost_hint: subscription\n');
+    writeSeed(profilesDir, 'codex', 'cost_hint: "5.0/30.0"\n');
+    const headsFile = join(stateRoot, 'absent-heads.json');
+    const exec = (file: string, args: string[]): string => {
+      const command = args.join(' ');
+      if (file === 'sh' && command.includes('command -v claude')) return '/usr/bin/claude\n';
+      const error = new Error(`not found: ${command}`) as Error & { status?: number };
+      error.status = 1;
+      throw error;
+    };
+
+    const result = allocate('integrator', 'merge', 'medium', '', {
+      profilesDir,
+      stateRoot,
+      headsFile,
+      exec: exec as unknown as typeof execFileSync,
+    });
+
+    assert.deepEqual(vendors(result), ['claude']);
+    assert.deepEqual(result.unavailable, ['codex']);
+  });
+
+  it('never fails allocation because heads.json is absent', () => {
+    const { profilesDir, stateRoot } = setupFixture();
+    writeSeed(profilesDir, 'kimi', 'cost_hint: "0.95/4.00"\n');
+    const headsFile = join(stateRoot, 'absent-heads.json');
+
+    const result = allocate('visual_debugging', 'screenshot', 'medium', '', {
+      profilesDir,
+      stateRoot,
+      headsFile,
+      probeHeads: () => liveSnapshot({}),
+    });
+
+    assert.equal(result.recommendation, 'kimi');
+    assert.deepEqual(result.unavailable, []);
   });
 });
