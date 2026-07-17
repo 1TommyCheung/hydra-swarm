@@ -43,8 +43,8 @@ const GITHUB_DOMAINS = ['github.com', 'codeload.github.com', 'objects.githubuser
 
 const COMMON_INSTALL_ROOTS = ['.opencode/bin', '.kimi-code/bin', '.npm-global/bin', '.bun/bin'];
 
-/** Package managers whose literal binary corepack can shim at invoke time. */
-const COREPACK_SHIMMABLE = new Set(['pnpm', 'yarn', 'npm', 'bun']);
+/** Package managers whose literal binary corepack can shim at invoke time. Bun is NOT one: corepack only shims npm/yarn/pnpm, so a missing bun must fail the preflight, not pass as 'corepack-shim' and die mid-task at the first `bun install`. */
+const COREPACK_SHIMMABLE = new Set(['pnpm', 'yarn', 'npm']);
 
 export interface PrepareWorkerEnvOptions {
   /** Namespaces per-task cache/store directories; typically the dispatch agent_run_id. */
@@ -237,7 +237,10 @@ function verifyToolchain(
 
   const verified: Record<string, string> = {};
   for (const tool of required) {
-    if (verified[tool]) continue; // dedupe (e.g. vendorBin === packageManager never happens, but git/node could repeat if misconfigured)
+    // Own-property check, not truthiness: on a plain object a tool named like
+    // an Object.prototype key ('constructor', 'toString', ...) would read as
+    // already-verified and skip the probe entirely.
+    if (Object.hasOwn(verified, tool)) continue; // dedupe (e.g. vendorBin === packageManager never happens, but git/node could repeat if misconfigured)
 
     const resolved = resolveOnPath(tool, pathEnv, exists);
     if (resolved) {

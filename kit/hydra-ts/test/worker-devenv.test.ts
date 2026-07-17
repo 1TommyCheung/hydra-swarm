@@ -254,6 +254,62 @@ describe('prepareWorkerEnv — toolchain preflight', () => {
     assert.equal(result.toolsVerified.pnpm, 'corepack-shim');
   });
 
+  it('does NOT accept a corepack shim for bun — corepack cannot shim bun (regression: bun repo without bun must fail at dispatch, not mid-task)', async () => {
+    const dir = makeTempDir('tools-bun-no-corepack-shim');
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'x', packageManager: 'bun@1.2.4' }), 'utf8');
+    const tasksDir = makeTempDir('tools-bun-no-corepack-shim-task');
+    const spec = writeTaskSpec(tasksDir);
+    const fakeBin = makeFakePath(dir, ['git', 'node', 'corepack']); // corepack present, no literal bun binary
+    const fakeHome = join(dir, 'home-empty');
+    mkdirSync(fakeHome, { recursive: true });
+
+    // Corepack only shims npm/yarn/pnpm; `corepack bun` fails at invoke time.
+    // Marking bun 'corepack-shim' here would pass a broken environment and the
+    // worker would die mid-task at its first `bun install` — the exact failure
+    // class this preflight exists to catch at dispatch.
+    await assert.rejects(
+      prepareWorkerEnv(dir, spec, {
+        agentRunId: 'run-bun-shim',
+        pathEnv: fakeBin,
+        homeEnv: fakeHome,
+        tmpDir: join(dir, 'tmp'),
+        deriveEnvironmentDomains: () => [],
+      }),
+      (err: Error) => {
+        assert.match(err.message, /'bun' not found on PATH/);
+        return true;
+      },
+    );
+  });
+
+  it('still probes a package manager whose name collides with an Object.prototype key (regression: dedupe must not skip verification)', async () => {
+    const dir = makeTempDir('tools-proto-collision');
+    // 'constructor' is a bogus package manager, but the preflight contract is
+    // "verify the declared tool resolves" — a truthiness dedupe on a plain
+    // object would see Object.prototype.constructor and skip the probe
+    // entirely, silently passing a broken environment.
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'x', packageManager: 'constructor@1.0.0' }), 'utf8');
+    const tasksDir = makeTempDir('tools-proto-collision-task');
+    const spec = writeTaskSpec(tasksDir);
+    const fakeBin = makeFakePath(dir, ['git', 'node']); // no 'constructor' binary anywhere
+    const fakeHome = join(dir, 'home-empty');
+    mkdirSync(fakeHome, { recursive: true });
+
+    await assert.rejects(
+      prepareWorkerEnv(dir, spec, {
+        agentRunId: 'run-proto',
+        pathEnv: fakeBin,
+        homeEnv: fakeHome,
+        tmpDir: join(dir, 'tmp'),
+        deriveEnvironmentDomains: () => [],
+      }),
+      (err: Error) => {
+        assert.match(err.message, /'constructor' not found on PATH/);
+        return true;
+      },
+    );
+  });
+
   it('dies with a symlink remedy when a missing tool is discoverable in a common install root', async () => {
     const dir = makeTempDir('tools-missing-discoverable');
     const tasksDir = makeTempDir('tools-missing-discoverable-task');
@@ -320,6 +376,11 @@ describe('prepareWorkerEnv — toolchain preflight', () => {
       tmpDir,
       deriveEnvironmentDomains: () => [],
     }));
+
+    // The toolchain check runs before any store/cache mkdir: a rejected
+    // preflight must leave no per-task directories behind.
+    assert.equal(existsSync(join(tmpDir, 'hydra-pnpm-store-run-noleak')), false);
+    assert.equal(existsSync(join(tmpDir, 'hydra-npm-cache-run-noleak')), false);
   });
 });
 
