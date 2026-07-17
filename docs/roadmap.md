@@ -212,6 +212,44 @@ Dates are the day the wave's exit criteria were met in this repo.
   references remained anywhere in `kit/hydra/scripts/` or the current
   (non-historical) docs.
 
+### Kimi sandbox network-domain fixes · 2026-07-17 (v0.6.2)
+
+- **PR #2 — empty allowlist on a fresh machine (merged).** On a machine
+  without `~/.local/state/hydra/kimi-sandbox-domains.json` (or with an
+  invalid one), the kimi adapter built an srt settings file with an
+  **empty** `network.allowedDomains`, blocking the Kimi CLI's own provider
+  endpoints — every dispatch died with `provider.connection_error` after
+  Kimi's retry budget (~30s, zero tokens, no captured stderr). Found in
+  the field on a different machine (DonFlow advisory run
+  `lhf-standalone-advice`). Fixed: fall back to a fixed
+  `KIMI_PROVIDER_DOMAINS` set (`api.kimi.com`, `api.moonshot.ai`,
+  `api.moonshot.cn`) instead of `[]` when the baseline is missing/invalid;
+  operator baselines keep full precedence when present.
+- **PR #3 — derive sandbox domains from the worktree's own manifests
+  (merged).** A second field incident (DonFlow `ws9-import-plan`,
+  2026-07-17): a worktree needing `pnpm install` / `npx tsc` got 403'd
+  against `registry.npmjs.org`, forcing a worker to hand-assemble
+  `node_modules` via symlinks (which then tripped `promote.sh`'s ownership
+  audit) rather than the operator hand-editing the baseline again. Added
+  `kit/hydra-ts/src/env-domains.ts`: derives well-known registry/git-hosting
+  domains from `package.json`/lockfiles/`.npmrc`/Python project files
+  (fixed allowlist of hosts only — never trusts arbitrary URLs out of file
+  contents verbatim), merges them into the allowlist (`baseline ∪ derived ∪
+  task-spec`), and unions them into the persisted baseline so repeat
+  dispatches to similar worktrees stop needing a manual edit.
+- **Regression caught and fixed before merge, not after:** the lead's
+  review of PR #3 found that its baseline-persistence call wrote only the
+  *derived* domains, not the in-memory `KIMI_PROVIDER_DOMAINS` fallback
+  from PR #2 — so a fresh machine's very first dispatch to a worktree with
+  dependency manifests would write a baseline file missing
+  `api.kimi.com`/`api.moonshot.*` entirely, and every dispatch after that
+  first one would read the now-"valid" file and skip the fallback,
+  silently reintroducing PR #2's exact bug. Reproduced directly (a real
+  written-file check, not just code reading), fixed by persisting
+  `[...baseline, ...derivedDomains]`, and covered by a new regression test
+  verified to fail on the un-fixed code before being merged. Landed as an
+  additional commit on the PR branch before merging, not a follow-up patch.
+
 ### Wave 3 preflight tooling — first real artifact · 2026-07-13
 
 - **`srt` replaces `sandbox-exec` for Kimi sandboxing** (run 0041, commit
