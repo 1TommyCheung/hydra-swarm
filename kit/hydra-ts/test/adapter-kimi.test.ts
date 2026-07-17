@@ -532,6 +532,100 @@ describe('kimiStart', () => {
     assert.ok(stderr.includes('sandbox baseline missing or invalid'));
   });
 
+  it('merges derived worktree-manifest domains ahead of task-spec domains, logs the trigger, and persists them to the baseline', async () => {
+    const dir = makeTempDir('start-derived');
+    const repoRoot = join(dir, 'repo');
+    initGitRepo(repoRoot);
+    commitFile(repoRoot, 'README.md', '# hi\n');
+    commitFile(repoRoot, 'package.json', JSON.stringify({
+      name: 'repo',
+      dependencies: {
+        'live-hmr-feedback': 'git+https://github.com/1TommyCheung/live-hmr-feedback.git#v1.3.0',
+      },
+    }));
+    const baseCommit = commitFile(repoRoot, 'pnpm-lock.yaml', '');
+
+    const worktree = join(dir, 'worktree');
+    execFileSync('git', ['-C', repoRoot, 'worktree', 'add', '--quiet', worktree, baseCommit], {
+      encoding: 'utf8',
+      stdio: 'ignore',
+    });
+
+    const taskSpec = join(dir, 'task.yaml');
+    writeTaskSpec(taskSpec, {
+      base_commit: baseCommit,
+      network_domains: ['some-task-domain.example.com'],
+    });
+    const inbox = join(dir, 'inbox');
+    const sessions = join(dir, 'sessions');
+    const agentRunId = 'agent-0019-derived';
+    const baselinePath = writeBaselineDomains(dir);
+
+    const workerResult = {
+      task_id: 'adapter-kimi',
+      run_id: '0019',
+      spec_version: 1,
+      vendor: 'kimi',
+      status: 'completed',
+      branch: 'hydra/0019/adapter-kimi',
+      base_commit: baseCommit,
+      head_commit: baseCommit,
+      summary: 'done',
+      files_changed: ['hydra-ts/src/adapter-kimi.ts'],
+      verification_claims: [],
+      risks: [],
+      unresolved_questions: [],
+      suggested_additional_checks: [],
+    };
+    const stdoutLines = [
+      JSON.stringify({ role: 'assistant', content: 'working' }),
+      JSON.stringify({ session_id: 'sess-derived' }),
+    ];
+    const recording: SpawnRecording = {};
+    let settingsAtSpawn: {
+      network: { allowedDomains: string[]; deniedDomains: string[] };
+    } | undefined;
+    const spawn = fakeSpawn(recording, {
+      stdout: stdoutLines.join('\n') + '\n',
+      stderr: '',
+      onSpawn: (_command, args) => {
+        const settingsPath = args[args.indexOf('-s') + 1];
+        settingsAtSpawn = JSON.parse(readFileSync(settingsPath, 'utf8'));
+        writeFileSync(join(worktree, '.hydra-result.json'), JSON.stringify(workerResult), 'utf8');
+      },
+    });
+    const execCalls: ExecCall[] = [];
+    const exec = adapterExec(execCalls);
+
+    const { stderr } = await captureStderr(async () => {
+      const result = await kimiStart(taskSpec, worktree, inbox, sessions, agentRunId, {
+        spawn,
+        exec,
+        commandExists: commandLookup(),
+        sandboxDomainsPath: baselinePath,
+      });
+      assert.equal(result, agentRunId);
+    });
+
+    const allowed = settingsAtSpawn?.network.allowedDomains ?? [];
+    assert.ok(allowed.includes('registry.npmjs.org'));
+    assert.ok(allowed.includes('github.com'));
+    assert.ok(allowed.includes('codeload.github.com'));
+    assert.ok(allowed.includes('some-task-domain.example.com'));
+    assert.ok(allowed.includes('api.kimi.com'));
+
+    assert.ok(stderr.includes('env-domains:'));
+    assert.ok(stderr.includes('+registry.npmjs.org (pnpm-lock.yaml)'));
+    assert.ok(stderr.includes('+github.com'));
+
+    const persisted = JSON.parse(readFileSync(baselinePath, 'utf8'));
+    assert.ok(persisted.allowedDomains.includes('registry.npmjs.org'));
+    assert.ok(persisted.allowedDomains.includes('github.com'));
+    // Original baseline entries are still present — union, not replace.
+    assert.ok(persisted.allowedDomains.includes('api.kimi.com'));
+    assert.ok(persisted.allowedDomains.includes('api.moonshot.ai'));
+  });
+
   it('derives a result drop from git evidence when the worker omits one', async () => {
     const dir = makeTempDir('start-git');
     const repoRoot = join(dir, 'repo');

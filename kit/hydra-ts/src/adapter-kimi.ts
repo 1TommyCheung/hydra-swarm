@@ -16,6 +16,7 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { die, deriveDropFromGit, log, yamlBlock, yamlList, yamlScalar } from './lib.ts';
 import { isCompiledBinary } from './kit-assets.ts';
+import { deriveEnvironmentDomainsDetailed, formatDerivedDomainsLog, persistDerivedDomains } from './env-domains.ts';
 
 // ---------------------------------------------------------------------------
 // Kimi CLI adapter (TypeScript port of hydra/adapters/kimi.sh).
@@ -545,7 +546,23 @@ export async function kimiStart(
     log(`kimi: sandbox baseline missing or invalid at ${baselinePath}; falling back to provider domains (${KIMI_PROVIDER_DOMAINS.join(', ')})`);
     baseline = KIMI_PROVIDER_DOMAINS;
   }
-  const allowedDomains = [...new Set([...baseline, ...taskDomains])];
+
+  // Dispatch-time derivation: the worktree's own manifests (package.json,
+  // lockfiles, .npmrc, Python project files) tell us which package-registry
+  // / git-hosting hosts its dev environment needs, so the operator doesn't
+  // have to hand-edit the baseline file for every new dependency shape.
+  // Merge order: baseline (operator-curated) ∪ derived (this worktree) ∪
+  // task-spec (this task's explicit asks) — derived domains only ever ADD
+  // well-known registry hosts, never arbitrary URLs from file contents.
+  const derived = deriveEnvironmentDomainsDetailed(wtAbs);
+  const derivedLog = formatDerivedDomainsLog(derived);
+  if (derivedLog) log(derivedLog);
+  const derivedDomains = derived.map((d) => d.domain);
+  const allowedDomains = [...new Set([...baseline, ...derivedDomains, ...taskDomains])];
+
+  if (derivedDomains.length > 0) {
+    persistDerivedDomains(baselinePath, derivedDomains);
+  }
 
   const settingsPath = join(sessionsAbs, `${agentRunId}.srt-settings.json`);
   const settingsFactory = options.makeSrtSettings ?? makeSrtSettings;
