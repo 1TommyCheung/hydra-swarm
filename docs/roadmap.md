@@ -279,6 +279,33 @@ Dates are the day the wave's exit criteria were met in this repo.
   runs on unquoted material. Covered by new regression tests in
   `lib.test.ts`.
 
+### Head auto-detection + worker node toolchain (PR #7, run 0047) · 2026-07-17 (v0.7.0)
+
+- **HYDRA_NODE_BIN worker PATH fix.** Field incident (Jon_test_redcat run
+  0002): macOS `path_helper` rebuilds PATH inside vendor-CLI tool shells with
+  `/usr/local/bin` ahead of version managers, so a stale node v17 shadowed the
+  harness-resolved v22 and the Kimi worker burned turns prepending the nvm bin
+  dir to every command. New `resolve-node.ts` mirrors the shell launcher's
+  resolution ladder; dispatch exports `HYDRA_NODE_BIN` into every worker env;
+  the worker prompt names the toolchain and the one-line PATH fix. Hardened
+  after Sonnet cross-review (pathless `command -v` output; hostile env values
+  dropped before shell interpolation).
+- **Head auto-detection (Kimi-implemented, run 0047).** `detect-heads.ts`
+  probes all four vendor CLIs, enumerates opencode's configured models plus
+  the active one, probes srt for kimi write-capability, and writes a
+  machine-global `~/.local/state/hydra/heads.json` snapshot (same dir
+  convention as `kimi-sandbox-domains.json`). CLI `detect-heads [--json]` +
+  stable launcher; run-init appends a `heads_detected` ledger event;
+  allocate's availability filter is now real (drops uninstalled vendors,
+  live-probe fallback); dispatch fail-with-suggestions when a task's
+  `assigned_vendor` CLI is missing (names available heads and the best
+  eligible substitute — never auto-substitutes); optional task-spec
+  `opencode_model:` pin with documented precedence and a stale-list warning.
+- **Trust boundary catch:** the worker's first promote attempt was REJECTED —
+  it had symlinked `node_modules` to a sibling task's worktree to get tsc,
+  and the ownership audit flagged the symlink escaping the worktree. Debris
+  removed, re-promoted clean; committed content was always in-scope.
+
 ### Wave 3 preflight tooling — first real artifact · 2026-07-13
 
 - **`srt` replaces `sandbox-exec` for Kimi sandboxing** (run 0041, commit
