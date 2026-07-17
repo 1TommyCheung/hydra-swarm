@@ -17,6 +17,7 @@ import { pathToFileURL } from 'node:url';
 import { die, deriveDropFromGit, log, yamlBlock, yamlList, yamlScalar } from './lib.ts';
 import { isCompiledBinary } from './kit-assets.ts';
 import { deriveEnvironmentDomainsDetailed, formatDerivedDomainsLog, persistDerivedDomains } from './env-domains.ts';
+import { prepareWorkerEnv } from './worker-devenv.ts';
 
 // ---------------------------------------------------------------------------
 // Kimi CLI adapter (TypeScript port of hydra/adapters/kimi.sh).
@@ -58,6 +59,8 @@ export interface KimiAdapterOptions {
   sandboxDomainsPath?: string;
   /** Injected settings factory for exercising the hard refusal gate. */
   makeSrtSettings?: SrtSettingsFactory;
+  /** Injected worker dev-environment preflight (tests). */
+  prepareWorkerEnv?: typeof prepareWorkerEnv;
 }
 
 function defaultCommandExists(command: string): boolean {
@@ -345,8 +348,8 @@ function runStreaming(
     stderrPath: string;
     teeStderr: boolean;
     spawn: SpawnLike;
-    /** Extra env vars merged over process.env (e.g. per-task pnpm store dir). */
-    envOverrides?: Record<string, string | undefined>;
+    /** Extra env vars merged over process.env for the spawned child (e.g. per-task package-manager store/cache dirs from worker-devenv.ts). Values are always concrete strings — permitting undefined here would ambiguously set-or-drop the var depending on spawn's env stringification. */
+    envOverrides?: Record<string, string>;
   },
 ): Promise<RunResult> {
   return new Promise((resolvePromise) => {
@@ -541,6 +544,14 @@ export async function kimiStart(
   }).trim();
   const gitCommon = realpathSync(gitCommonRaw);
 
+  // Worker dev-environment preflight: verify git/node/the repo's declared
+  // package manager (+ 'kimi' itself) resolve on the same PATH the pane
+  // shell gets, and compute per-task package-manager store/cache dirs under
+  // TMPDIR — fails fast here, at dispatch, rather than mid-task. See
+  // worker-devenv.ts for the field evidence this preflight is built from.
+  const prepareEnv = options.prepareWorkerEnv ?? prepareWorkerEnv;
+  const devenv = await prepareEnv(wtAbs, taskSpec, { agentRunId, vendorBin: 'kimi' });
+
   const baselinePath = options.sandboxDomainsPath
     ?? join(process.env.HOME ?? '', '.local/state/hydra/kimi-sandbox-domains.json');
   let baselineDomains: unknown;
@@ -637,20 +648,10 @@ export async function kimiStart(
   // README §"Mandatory Deny Paths"), so `pnpm install` on a task with any
   // git-hosted dependency fails with EPERM inside the worktree, and the
   // global pnpm store is correctly outside allowWrite so there is no
-  // sandbox-side fallback either.
-  //
-  // Guaranteed fix: point pnpm's store at a per-task directory under the
-  // canonicalized tmp base, which is allowWritten above (raw TMPDIR would NOT
-  // be an effective root whenever it contains a symlink component — srt
-  // matches physical paths). pnpm reads `npm_config_store_dir` from the
-  // environment, so its store (and every ephemeral git clone underneath it)
-  // never touches worktree `.git` dirs and never lands inside the worktree at
-  // all — sidestepping both the srt mandatory-deny block and the promote.sh
-  // ownership-audit false positives that a worktree-local `.pnpm-store` used
-  // to trigger.
-  const pnpmStoreDir = join(tmpBase, `hydra-pnpm-store-${agentRunId}`);
-  mkdirSync(pnpmStoreDir, { recursive: true });
-  log(`kimi: pnpm store confined to ${pnpmStoreDir} (npm_config_store_dir, outside worktree/.git)`);
+  // sandbox-side fallback either. The per-task store/cache dirs that fix
+  // this now come from prepareWorkerEnv() (worker-devenv.ts, computed under
+  // the same canonicalized tmp base and passed via devenv.envOverrides
+  // below) — this used to be an inline pnpm-only computation here.
 
   // `kimi -p` (print mode) ALREADY auto-approves tools — that is exactly why the
   // OS sandbox is mandatory. stdout receives the NDJSON event stream and is
@@ -674,7 +675,7 @@ export async function kimiStart(
     stderrPath,
     teeStderr: true,
     spawn: spawnFn,
-    envOverrides: { npm_config_store_dir: pnpmStoreDir },
+    envOverrides: devenv.envOverrides,
   });
 
   // The sessions directory is ephemeral, but remove settings after consumption
@@ -685,14 +686,16 @@ export async function kimiStart(
     // Best-effort cleanup.
   }
 
-  // The pnpm store is per-attempt: nothing references it once the run ends
-  // (pnpm hardlinks keep any worktree node_modules it populated alive), so
-  // remove it rather than letting per-task stores pile up in TMPDIR until the
-  // OS tmp janitor runs.
-  try {
-    rmSync(pnpmStoreDir, { recursive: true, force: true });
-  } catch {
-    // Best-effort cleanup.
+  // The store/cache dirs are per-attempt: nothing references them once the
+  // run ends (pnpm hardlinks keep any worktree node_modules they populated
+  // alive), so remove them rather than letting per-task dirs pile up in
+  // TMPDIR until the OS tmp janitor runs.
+  for (const dir of Object.values(devenv.envOverrides)) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup.
+    }
   }
 
   const sessionId = parseLastSessionId(cliJsonl);
