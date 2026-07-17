@@ -344,14 +344,14 @@ export function yamlList(file: string, key: string): string[] {
     if (grab) {
       const match = line.match(/^\s*-\s*(.*)$/);
       if (match) {
-        let value = match[1];
-        const wasQuoted = /^".*"$/.test(value.trim());
-        value = value.replace(/^"|"$/g, '');
-        // A double-quoted YAML scalar escapes inner quotes/backslashes; leave
-        // them escaped and a verification command like `[ -s \"$f\" ]` reaches
-        // bash with literal backslash-quotes and always fails.
-        if (wasQuoted) value = unescapeYamlDoubleQuoted(value);
-        items.push(value);
+        // Quoted-body extraction, unescaping, and comment-stripping all live
+        // in parseInlineScalar so a list item behaves exactly like an inline
+        // scalar. A hand-rolled /^".*"$/ test here mismatched the quote strip
+        // on the untrimmed value: a quoted item followed by a trailing
+        // comment or whitespace ("- \"cmd\" # note", "- \"cmd\"  ") kept its
+        // closing quote and the comment, reaching bash as an unterminated
+        // quote.
+        items.push(parseInlineScalar(match[1]).value);
         continue;
       }
       if (/^\S/.test(line)) {

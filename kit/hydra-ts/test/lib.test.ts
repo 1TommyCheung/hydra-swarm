@@ -156,6 +156,58 @@ describe('yamlList quoting', () => {
     const file = writeFixture('list-plain', 'commands:\n  - echo a\\b\n');
     assert.deepEqual(yamlList(file, 'commands'), ['echo a\\b']);
   });
+
+  it('strips a trailing comment after a quoted list item instead of corrupting the value', () => {
+    // The quote test must run against the extracted quoted body, not the
+    // whole remainder of the line: with a trailing comment present the old
+    // whole-line /^".*"$/ test failed, leaving the closing quote and the
+    // comment inside the value -- a command like this reaches bash with an
+    // unterminated quote and always fails.
+    const file = writeFixture(
+      'list-quoted-comment',
+      'commands:\n  - "npm test" # run the suite\n',
+    );
+    assert.deepEqual(yamlList(file, 'commands'), ['npm test']);
+  });
+
+  it('does not leave the closing quote behind when a quoted list item has trailing whitespace', () => {
+    // The old code tested value.trim() for quotes but stripped them from the
+    // UNtrimmed value, so the closing quote before the trailing spaces
+    // survived into the item.
+    const file = writeFixture('list-quoted-ws', 'commands:\n  - "npm test"  \n');
+    assert.deepEqual(yamlList(file, 'commands'), ['npm test']);
+  });
+
+  it('keeps a literal "#" inside a quoted list item even when a comment follows', () => {
+    const file = writeFixture('list-quoted-hash', 'commands:\n  - "echo #hi" # c\n');
+    assert.deepEqual(yamlList(file, 'commands'), ['echo #hi']);
+  });
+
+  it('strips a trailing comment from an unquoted list item, matching yamlScalar', () => {
+    const file = writeFixture('list-plain-comment', 'commands:\n  - echo hi # comment\n');
+    assert.deepEqual(yamlList(file, 'commands'), ['echo hi']);
+    const scalar = writeFixture('list-plain-comment-scalar', 'key: echo hi # comment\n');
+    assert.equal(yamlScalar(scalar, 'key'), 'echo hi');
+  });
+
+  it('parses an empty double-quoted list item as an empty string', () => {
+    const file = writeFixture('list-empty-quoted', 'commands:\n  - ""\n');
+    assert.deepEqual(yamlList(file, 'commands'), ['']);
+  });
+
+  it('unescapes an odd backslash run before the closing quote of a list item', () => {
+    // File text "ends in a backslash\\" is YAML for: ends in a backslash\
+    const file = writeFixture(
+      'list-backslash-run',
+      'commands:\n  - "ends in a backslash\\\\"\n',
+    );
+    assert.deepEqual(yamlList(file, 'commands'), ['ends in a backslash\\']);
+  });
+
+  it('unescapes quoted list items under CRLF line endings', () => {
+    const file = writeFixture('list-crlf-quoted', 'commands:\r\n  - "echo \\"hi\\""\r\n');
+    assert.deepEqual(yamlList(file, 'commands'), ['echo "hi"']);
+  });
 });
 
 describe('key matching', () => {
