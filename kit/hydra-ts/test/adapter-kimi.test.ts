@@ -442,6 +442,11 @@ describe('kimiStart', () => {
     assert.ok(!commandString.includes("'-y'"));
     assert.ok(stderr.includes('live progress'));
 
+    const expectedStoreDir = join(process.env.TMPDIR ?? '/tmp', `hydra-pnpm-store-${agentRunId}`);
+    assert.equal(recording.options?.env?.npm_config_store_dir, expectedStoreDir);
+    assert.equal(existsSync(expectedStoreDir), true);
+    assert.ok(stderr.includes(expectedStoreDir));
+
     const sessionJson = JSON.parse(readFileSync(join(sessions, `${agentRunId}.json`), 'utf8'));
     assert.equal(sessionJson.agent_run_id, agentRunId);
     assert.equal(sessionJson.vendor, 'kimi');

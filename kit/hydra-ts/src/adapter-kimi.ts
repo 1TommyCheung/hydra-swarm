@@ -186,6 +186,19 @@ export const KIMI_PROVIDER_DOMAINS = ['api.kimi.com', 'api.moonshot.ai', 'api.mo
 /**
  * Write an srt settings file that permits network access only to the merged
  * domain allowlist and writes only beneath the supplied roots.
+ *
+ * NOTE on git-metadata protection: srt (@anthropic-ai/sandbox-runtime)
+ * unconditionally blocks writes to `.git/config` and `.git/hooks/*` under
+ * ANY `.git` directory nested inside an allowed write root ("Mandatory Deny
+ * Paths" in srt's README) — sound in intent (a writable git hook/config is a
+ * code-execution escape once the host later runs git), but there is no
+ * settings-file knob to scope it to only the worktree's real `.git` dir; it
+ * is filename-scoped, not path-scoped, so it also fires on ephemeral `.git`
+ * dirs a package manager creates while cloning a git-hosted dependency
+ * (e.g. pnpm's `.pnpm-store/v11/tmp/<x>/.git/`). We do not attempt to work
+ * around it here — see kimiStart's `npm_config_store_dir` override, which
+ * keeps pnpm's store (and its ephemeral clones) out of any `.git`-adjacent
+ * path entirely.
  */
 export function makeSrtSettings(
   settingsPath: string,
@@ -332,6 +345,8 @@ function runStreaming(
     stderrPath: string;
     teeStderr: boolean;
     spawn: SpawnLike;
+    /** Extra env vars merged over process.env (e.g. per-task pnpm store dir). */
+    envOverrides?: Record<string, string | undefined>;
   },
 ): Promise<RunResult> {
   return new Promise((resolvePromise) => {
@@ -360,7 +375,7 @@ function runStreaming(
         // Strip BUN_BE_BUN so a leaked BUN_BE_BUN=1 cannot hijack a Bun-compiled
         // child (spike: docs/bun-migration-spike-results.md); Bun omits env keys
         // whose value is undefined.
-        env: { ...process.env, BUN_BE_BUN: undefined },
+        env: { ...process.env, BUN_BE_BUN: undefined, ...options.envOverrides },
         // `SpawnOptionsWithoutStdio['stdio']` (the injected SpawnLike's option
         // type) is typed as StdioPipeNamed | StdioPipe[], which excludes
         // "ignore" even though it's a valid StdioOptions value at runtime.
@@ -604,6 +619,27 @@ export async function kimiStart(
 
   log('kimi write role under srt (writes confined to worktree + git-common-dir)');
 
+  // srt's mandatory-deny protection blocks writes to `.git/config` and
+  // `.git/hooks/*` under ANY `.git` directory found inside an allowed write
+  // root — including pnpm's ephemeral tmp clones of git-hosted dependencies
+  // (e.g. `.pnpm-store/v11/tmp/<x>/.git/`). That protection is not
+  // configurable (no opt-out/scoping knob in srt's settings schema — see
+  // README §"Mandatory Deny Paths"), so `pnpm install` on a task with any
+  // git-hosted dependency fails with EPERM inside the worktree, and the
+  // global pnpm store is correctly outside allowWrite so there is no
+  // sandbox-side fallback either.
+  //
+  // Guaranteed fix: point pnpm's store at a per-task directory under TMPDIR,
+  // which makeSrtSettings already allowWrites unconditionally. pnpm reads
+  // `npm_config_store_dir` from the environment, so its store (and every
+  // ephemeral git clone underneath it) never touches worktree `.git` dirs and
+  // never lands inside the worktree at all — sidestepping both the srt
+  // mandatory-deny block and the promote.sh ownership-audit false positives
+  // that a worktree-local `.pnpm-store` used to trigger.
+  const pnpmStoreDir = join(process.env.TMPDIR ?? '/tmp', `hydra-pnpm-store-${agentRunId}`);
+  mkdirSync(pnpmStoreDir, { recursive: true });
+  log(`kimi: pnpm store confined to ${pnpmStoreDir} (npm_config_store_dir, outside worktree/.git)`);
+
   // `kimi -p` (print mode) ALREADY auto-approves tools — that is exactly why the
   // OS sandbox is mandatory. stdout receives the NDJSON event stream and is
   // captured to cliJsonl; dispatch.ts polls that file and writes a human-readable
@@ -626,6 +662,7 @@ export async function kimiStart(
     stderrPath,
     teeStderr: true,
     spawn: spawnFn,
+    envOverrides: { npm_config_store_dir: pnpmStoreDir },
   });
 
   // The sessions directory is ephemeral, but remove settings after consumption
