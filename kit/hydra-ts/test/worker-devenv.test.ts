@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   inlineDeriveDomains,
@@ -180,6 +180,36 @@ describe('prepareWorkerEnv — store/cache env vars', () => {
     // None of the store/cache dirs land inside the worktree.
     for (const p of Object.values(result.envOverrides)) {
       assert.ok(!p.startsWith(dir), `${p} should be outside the worktree ${dir}`);
+    }
+  });
+
+  it('canonicalizes a symlinked default TMPDIR so store dirs are physical paths (srt matching)', async () => {
+    const dir = makeTempDir('store-symlink');
+    const tasksDir = makeTempDir('store-symlink-task');
+    const spec = writeTaskSpec(tasksDir);
+    const fakeBin = makeFakePath(dir, ['git', 'node', 'npm']);
+    const realTmp = makeTempDir('store-symlink-real');
+    const linkTmp = join(TEST_TMP, `store-symlink-link-${Date.now()}`);
+    symlinkSync(realTmp, linkTmp);
+
+    const savedTmpdir = process.env.TMPDIR;
+    process.env.TMPDIR = linkTmp;
+    try {
+      const result = await prepareWorkerEnv(dir, spec, {
+        agentRunId: 'agent-sym',
+        pathEnv: fakeBin,
+        deriveEnvironmentDomains: () => [],
+      });
+      // The env override must be under the PHYSICAL path, never the symlink:
+      // srt allowWrite matches physical paths, so a raw symlinked TMPDIR base
+      // would sit outside every effective write root.
+      assert.equal(
+        result.envOverrides.npm_config_store_dir,
+        join(realpathSync(realTmp), 'hydra-pnpm-store-agent-sym'),
+      );
+    } finally {
+      if (savedTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = savedTmpdir;
     }
   });
 

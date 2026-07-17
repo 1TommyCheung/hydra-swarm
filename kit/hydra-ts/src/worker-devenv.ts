@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { die, log, yamlList, yamlScalar } from './lib.ts';
 
@@ -323,7 +323,18 @@ export async function prepareWorkerEnv(
     die('usage: prepareWorkerEnv(worktreeRoot, taskSpec, { agentRunId, ... })');
   }
 
-  const tmpDir = options.tmpDir ?? process.env.TMPDIR ?? '/tmp';
+  // TMPDIR routinely contains a symlink component (/var -> /private/var on
+  // macOS) and srt allowWrite matching works on PHYSICAL paths — store/cache
+  // dirs built from the raw value would sit outside every effective write
+  // root and the sandboxed install would EPERM anyway (the exact bug fixed in
+  // PR #6's adapter-kimi inline computation). Canonicalize the default here;
+  // an explicitly injected options.tmpDir (tests) is taken as-is.
+  let tmpDir = options.tmpDir;
+  if (!tmpDir) {
+    const tmpRaw = process.env.TMPDIR ?? '/tmp';
+    mkdirSync(tmpRaw, { recursive: true });
+    tmpDir = realpathSync(tmpRaw);
+  }
 
   // 1. Toolchain preflight — fail fast, before anything else runs.
   const toolsVerified = verifyToolchain(worktreeRoot, options.vendorBin, options);
