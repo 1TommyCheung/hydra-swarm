@@ -54,6 +54,7 @@ import { main as runInitMain } from './run-init.ts';
 import { main as squashMain } from './squash.ts';
 import { main as statusMain } from './status.ts';
 import { main as verifyMain } from './verify.ts';
+import { main as versionMain } from './version.ts';
 import { initEmbeddedAssets, isCompiledBinary } from './kit-assets.ts';
 
 /** Every routed module exposes the normalized router-callable shape. */
@@ -109,6 +110,59 @@ export const routes: Readonly<Record<string, MainFn>> = {
 // both. (run 0047: detect-heads.)
 const extensionRoutes: Readonly<Record<string, MainFn>> = {
   'detect-heads': detectHeadsMain,
+  'help': (args) => {
+    void args;
+    process.stdout.write(usage());
+    return 0;
+  },
+  'version': versionMain,
+};
+
+/**
+ * Argument signature per subcommand, rendered by usage() on a continuation
+ * line under each name (the Stage-1 cli tests pin the exact `  <name>\n`
+ * name-line shape, so signatures must not share the name's line). Keep in
+ * sync with each module's own `usage:` die() string — that string remains
+ * the authority the module enforces.
+ */
+const SIGNATURES: Readonly<Record<string, string>> = {
+  'adapter-claude': 'start|resume <task_spec> <worktree> <inbox> <sessions> <agent_run_id> [prior_session]',
+  'adapter-codex': 'start <task_spec> <worktree> <inbox> <sessions> <agent_run_id>',
+  'adapter-kimi': 'start <task_spec> <worktree> <inbox> <sessions> <agent_run_id> | visual <cwd> <prompt> <out_prefix> <agent_run_id> [image]',
+  'adapter-opencode': 'start <task_spec> <worktree> <inbox> <sessions> <agent_run_id> | explore|review <cwd> <prompt> <out_prefix> <agent_run_id>',
+  'adapter-stub': 'start|resume <task_spec> <worktree> <inbox> <sessions> <agent_run_id> [prior_session]',
+  'aggregate-usage': '(no args — prints per-vendor measured profiles as JSONL)',
+  'allocate': '<role> <task_type> [risk] [--exclude-vendor <v>]',
+  'amend-task': '<run_id> <task_id> <reason> [resume|restart]',
+  'audit-ownership': '<worktree> <base> <head> <writable_glob>...',
+  'build-worker-prompt': '<task_spec>',
+  'cancel-task': '<run_id> <task_id> [--wait-seconds N]',
+  'code-intel': 'changed [--base <ref>] | impact <symbol> | query "<q>" | drift',
+  'create-worktree': '<run_id> <task_id> [base_commit]',
+  'detect-heads': '[--json]',
+  'dispatch': '<run_id> <task_id> [--background]',
+  'freshness-gate': '<run_id> <task_id>',
+  'graph-impact': '<run_id> <task_id>',
+  'graphify-baseline': '<run_id> [source_path] [--backend claude|kimi]',
+  'graphify-investigate': '<run_id> <task_id> | <run_id> --files <f>...',
+  'graphify-repo': 'build | update | query "<q>" | status',
+  'help': '(prints this listing)',
+  'herdr-push': '<run_id> [--notify]',
+  'index-candidate': '<run_id> <task_id> [logical_label]',
+  'integrate': '<run_id> <task_id_in_dependency_order>...',
+  'ledger-view': '<run_id> [out.html]',
+  'measure-divergence': '[run_id...] (defaults to all runs)',
+  'otel-env': '(no args — prints OTEL exporter env shell exports)',
+  'promote': '<run_id> <task_id> <inbox_result.json>',
+  'record-review': '<run_id> <task_id> <verdict.json>',
+  'record-usage': '<run_id> <task_id> <vendor> <agent_run_id>',
+  'review-dispatch': '<run_id> <review_id> <vendor> <prompt_file> [--image PATH]',
+  'review-required': '<implementer_vendor> <risk> [label...]',
+  'run-init': '<run_id> [base_commit]',
+  'squash': '<run_id> <task_id>',
+  'status': '<run_id> <task_id> [--lines N] [--json]',
+  'verify': '<worktree> <policy.yaml> [out.json]',
+  'version': '[--json]',
 };
 
 export function usage(): string {
@@ -117,7 +171,10 @@ export function usage(): string {
     'Usage: hydra <subcommand> [args...]',
     '',
     'Subcommands:',
-    ...names.map((name) => `  ${name}`),
+    ...names.flatMap((name) => {
+      const signature = SIGNATURES[name];
+      return signature === undefined ? [`  ${name}`] : [`  ${name}`, `      ${signature}`];
+    }),
     '',
   ].join('\n');
 }
@@ -159,7 +216,7 @@ if (isMain) {
   // in the tree carrying it. The embedded-binary behavior itself is verified
   // in Phase 3 (compile lane), not here.
   if (isCompiledBinary()) {
-    const [resultSchema, reviewSchema, profileClaude, profileCodex, profileOpencode, profileKimi] =
+    const [resultSchema, reviewSchema, profileClaude, profileCodex, profileOpencode, profileKimi, pluginManifest] =
       await Promise.all([
         // @ts-ignore -- Bun 'text'-loader asset specifier; tsc cannot resolve it (no network for typecheck here — visually confirmed, Phase 3 verifies the compile lane).
         import('../../hydra/schemas/result.schema.json', { with: { type: 'text' } }),
@@ -173,6 +230,10 @@ if (isMain) {
         import('../../hydra/profiles/opencode-glm-5.2.yaml', { with: { type: 'text' } }),
         // @ts-ignore -- Bun 'text'-loader asset specifier; see above.
         import('../../hydra/profiles/kimi-k2.7-code.yaml', { with: { type: 'text' } }),
+        // @ts-ignore -- Bun 'text'-loader asset specifier; see above. The
+        // manifest is embedded so `version` reports the version the binary
+        // was BUILT from, even when it runs outside any checkout.
+        import('../../../.claude-plugin/plugin.json', { with: { type: 'text' } }),
       ]);
     initEmbeddedAssets({
       // The Bun text loader yields strings at runtime; tsc resolves the .json
@@ -183,6 +244,7 @@ if (isMain) {
       'profiles/codex-gpt-5.6-sol.yaml': profileCodex.default,
       'profiles/opencode-glm-5.2.yaml': profileOpencode.default,
       'profiles/kimi-k2.7-code.yaml': profileKimi.default,
+      'plugin.json': pluginManifest.default as unknown as string,
     });
   }
   process.exitCode = await route(process.argv.slice(2));

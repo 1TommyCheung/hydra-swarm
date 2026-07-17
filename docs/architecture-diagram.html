@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hydra-Swarm — Architecture (v0.7.0)</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --bg-card: #151824;
+    --bg-band: #10131c;
+    --text: #e7e4dc;
+    --dim: #8b90a0;
+    --faint: #565c6e;
+    --accent: #4fc4b0;
+    --warn: #e0a83e;
+    --danger: #d66;
+    --border: rgba(231,228,220,.14);
+    --claude: #e2896f;
+    --codex: #7aa2f7;
+    --kimi: #b48ead;
+    --opencode: #a3be8c;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    padding: 2.5rem 1rem 4rem;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; font-weight: 650; letter-spacing: .01em; }
+  h1 .v { color: var(--accent); font-weight: 500; }
+  .sub { color: var(--dim); margin: .35rem 0 2rem; max-width: 70ch; }
+  .diagram { width: 100%; height: auto; display: block; }
+  svg text { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 1.1rem;
+    margin: 1.6rem 0 0; color: var(--dim); font-size: .85rem;
+  }
+  .legend span { display: inline-flex; align-items: center; gap: .45rem; }
+  .sw { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+  .notes { margin-top: 2.2rem; display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  .note { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.1rem; }
+  .note h2 { font-size: .95rem; color: var(--accent); margin-bottom: .4rem; font-weight: 600; }
+  .note p, .note li { color: var(--dim); font-size: .88rem; }
+  .note ul { padding-left: 1.1rem; }
+  .note code { color: var(--text); background: rgba(231,228,220,.07); padding: .05em .35em; border-radius: 4px; font-size: .92em; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Hydra-Swarm architecture <span class="v">v0.7.0</span></h1>
+  <p class="sub">Deterministic gates decide; probabilistic tools inform. A lead plans and judges,
+  four vendor heads implement in isolated worktrees, and nothing a worker claims is real until it
+  crosses the trust boundary.</p>
+
+  <svg class="diagram" viewBox="0 0 1180 1240" role="img"
+       aria-label="Hydra-Swarm pipeline: human to lead to harness dispatch across four vendor workers, through the promote trust boundary, review, squash, integration, and back to the human.">
+    <defs>
+      <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="#8b90a0"/>
+      </marker>
+      <marker id="arrA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="#4fc4b0"/>
+      </marker>
+    </defs>
+
+    <!-- ======================= HUMAN ======================= -->
+    <rect x="420" y="10" width="340" height="58" rx="10" fill="#151824" stroke="#e0a83e" stroke-width="1.5"/>
+    <text x="590" y="34" text-anchor="middle" fill="#e7e4dc" font-size="16" font-weight="600">Human operator</text>
+    <text x="590" y="54" text-anchor="middle" fill="#8b90a0" font-size="12">authorizes merge · push · deploy — the harness never does</text>
+
+    <line x1="590" y1="68" x2="590" y2="96" stroke="#8b90a0" stroke-width="1.5" marker-end="url(#arr)"/>
+
+    <!-- ======================= LEAD ======================= -->
+    <rect x="420" y="98" width="340" height="58" rx="10" fill="#151824" stroke="#e2896f" stroke-width="1.5"/>
+    <text x="590" y="122" text-anchor="middle" fill="#e7e4dc" font-size="16" font-weight="600">Lead — Claude Code</text>
+    <text x="590" y="142" text-anchor="middle" fill="#8b90a0" font-size="12">plans · decomposes · judges promoted evidence</text>
+
+    <line x1="590" y1="156" x2="590" y2="184" stroke="#8b90a0" stroke-width="1.5" marker-end="url(#arr)"/>
+
+    <!-- ======================= HARNESS BAND ======================= -->
+    <rect x="30" y="186" width="880" height="150" rx="12" fill="#10131c" stroke="rgba(231,228,220,.14)"/>
+    <text x="46" y="210" fill="#4fc4b0" font-size="13" font-weight="600" letter-spacing=".06em">DETERMINISTIC HARNESS · kit/hydra/scripts/*.sh → TypeScript / compiled Bun binary</text>
+
+    <rect x="46" y="226" width="150" height="52" rx="8" fill="#151824" stroke="rgba(231,228,220,.2)"/>
+    <text x="121" y="248" text-anchor="middle" fill="#e7e4dc" font-size="13" font-weight="600">run-init</text>
+    <text x="121" y="266" text-anchor="middle" fill="#8b90a0" font-size="11">+ detect-heads probe</text>
+
+    <line x1="196" y1="252" x2="222" y2="252" stroke="#8b90a0" stroke-width="1.5" marker-end="url(#arr)"/>
+
+    <rect x="224" y="226" width="150" height="52" rx="8" fill="#151824" stroke="rgba(231,228,220,.2)"/>
+    <text x="299" y="248" text-anchor="middle" fill="#e7e4dc" font-size="13" font-weight="600">task specs</text>
+    <text x="299" y="266" text-anchor="middle" fill="#8b90a0" font-size="11">disjoint writable_paths</text>
+
+    <line x1="374" y1="252" x2="400" y2="252" stroke="#8b90a0" stroke-width="1.5" marker-end="url(#arr)"/>
+
+    <rect x="402" y="226" width="150" height="52" rx="8" fill="#151824" stroke="rgba(231,228,220,.2)"/>
+    <text x="477" y="248" text-anchor="middle" fill="#e7e4dc" font-size="13" font-weight="600">create-worktree</text>
+    <text x="477" y="266" text-anchor="middle" fill="#8b90a0" font-size="11">branch + bootstrap</text>
+
+    <line x1="552" y1="252" x2="578" y2="252" stroke="#8b90a0" stroke-width="1.5" marker-end="url(#arr)"/>
+
+    <rect x="580" y="226" width="150" height="52" rx="8" fill="#151824" stroke="rgba(231,228,220,.2)"/>
+    <text x="655" y="248" text-anchor="middle" fill="#e7e4dc" font-size="13" font-weight="600">dispatch</text>
+    <text x="655" y="266" text-anchor="middle" fill="#8b90a0" font-size="11">vendor gate + preflight</text>
+
+    <rect x="748" y="226" width="150" height="52" rx="8" fill="#151824" stroke="rgba(231,228,220,.2)"/>
+    <text x="823" y="248" text-anchor="middle" fill="#e7e4dc" font-size="13" font-weight="600">allocate</text>
+    <text x="823" y="266" text-anchor="middle" fill="#8b90a0" font-size="11">recommends; humans pin</text>
+
+    <text x="46" y="322" fill="#565c6e" font-size="11">status · cancel-task · loop-thinking detector (auto-cancel) · herdr pane hosting with live progress tails</text>
+
+    <!-- ======================= MACHINE STATE (right column) ======================= -->
+    <rect x="930" y="186" width="220" height="330" rx="12" fill="#10131c" stroke="rgba(231,228,220,.14)"/>
+    <text x="946" y="210" fill="#4fc4b0" font-size="13" font-weight="600" letter-spacing=".06em">STATE (outside worktrees)</text>
+
+    <rect x="946" y="224" width="188" height="84" rx="8" fill="#151824" stroke="rgba(231,228,220,.2)"/>
+    <text x="1040" y="244" text-anchor="middle" fill="#e7e4dc" font-size="12" font-weight="600">run state root</text>
+    <text x="1040" y="262" text-anchor="middle" fill="#8b90a0" font-size="11">~/.local/state/&lt;repo&gt;-hydra</text>
+    <text x="1040" y="278" text-anchor="middle" fill="#8b90a0" font-size="11">ledger · runs · sessions</text>
+    <text x="1040" y="294" text-anchor="middle" fill="#8b90a0" font-size="11">authoritative/ (promoted)</text>
+
+    <rect x="946" y="320" width="188" height="84" rx="8" fill="#151824" stroke="rgba(231,228,220,.2)"/>
+    <text x="1040" y="340" text-anchor="middle" fill="#e7e4dc" font-size="12" font-weight="600">machine-global config</text>
+    <text x="1040" y="358" text-anchor="middle" fill="#8b90a0" font-size="11">~/.local/state/hydra/</text>
+    <text x="1040" y="374" text-anchor="middle" fill="#4fc4b0" font-size="11">heads.json (detect-heads)</text>
+    <text x="1040" y="390" text-anchor="middle" fill="#8b90a0" font-size="11">kimi domains · opencode model</text>
+
+    <rect x="946" y="416" width="188" height="84" rx="8" fill="#151824" stroke="rgba(231,228,220,.2)"/>
+    <text x="1040" y="436" text-anchor="middle" fill="#e7e4dc" font-size="12" font-weight="600">Git — source of truth</text>
+    <text x="1040" y="454" text-anchor="middle" fill="#8b90a0" font-size="11">tracked specs · policies</text>
+    <text x="1040" y="470" text-anchor="middle" fill="#8b90a0" font-size="11">schemas · worker branches</text>
+    <text x="1040" y="486" text-anchor="middle" fill="#8b90a0" font-size="11">recoverable from ledger + Git</text>
+
+    <line x1="930" y1="252" x2="912" y2="252" stroke="#4fc4b0" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrA)"/>
+    <line x1="946" y1="362" x2="770" y2="284" stroke="#4fc4b0" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrA)"/>
+    <text x="856" y="308" fill="#4fc4b0" font-size="10.5">heads.json → allocate + dispatch gate</text>
+
+    <!-- ======================= FAN OUT ======================= -->
+    <line x1="470" y1="336" x2="150" y2="392" stroke="#8b90a0" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="510" y1="336" x2="400" y2="392" stroke="#8b90a0" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="620" y1="336" x2="660" y2="392" stroke="#8b90a0" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="680" y1="336" x2="905" y2="392" stroke="#8b90a0" stroke-width="1.5" marker-end="url(#arr)"/>
+
+    <!-- ======================= WORKERS BAND ======================= -->
+    <rect x="30" y="394" width="880" height="188" rx="12" fill="#10131c" stroke="rgba(231,228,220,.14)"/>
+    <text x="46" y="418" fill="#4fc4b0" font-size="13" font-weight="600" letter-spacing=".06em">UNTRUSTED WORKERS · one isolated git worktree + branch each · no push credentials</text>
+
+    <rect x="46" y="432" width="200" height="118" rx="8" fill="#151824" stroke="#e2896f" stroke-width="1.4"/>
+    <text x="146" y="454" text-anchor="middle" fill="#e2896f" font-size="14" font-weight="650">Claude</text>
+    <text x="146" y="474" text-anchor="middle" fill="#8b90a0" font-size="11">implement · integrate · review</text>
+    <text x="146" y="490" text-anchor="middle" fill="#8b90a0" font-size="11">no OS sandbox — bounded by</text>
+    <text x="146" y="506" text-anchor="middle" fill="#8b90a0" font-size="11">structure + ownership audit</text>
+    <text x="146" y="530" text-anchor="middle" fill="#565c6e" font-size="10.5">pane-hosted</text>
+
+    <rect x="262" y="432" width="200" height="118" rx="8" fill="#151824" stroke="#7aa2f7" stroke-width="1.4"/>
+    <text x="362" y="454" text-anchor="middle" fill="#7aa2f7" font-size="14" font-weight="650">Codex</text>
+    <text x="362" y="474" text-anchor="middle" fill="#8b90a0" font-size="11">implement · review · integrate</text>
+    <text x="362" y="490" text-anchor="middle" fill="#8b90a0" font-size="11">workspace-write sandbox</text>
+    <text x="362" y="530" text-anchor="middle" fill="#565c6e" font-size="10.5">pane-hosted · JSONL live tail</text>
+
+    <rect x="478" y="432" width="200" height="118" rx="8" fill="#151824" stroke="#b48ead" stroke-width="1.4"/>
+    <text x="578" y="454" text-anchor="middle" fill="#b48ead" font-size="14" font-weight="650">Kimi</text>
+    <text x="578" y="474" text-anchor="middle" fill="#8b90a0" font-size="11">implement · visual debugging</text>
+    <text x="578" y="490" text-anchor="middle" fill="#e0a83e" font-size="11">srt OS sandbox mandatory</text>
+    <text x="578" y="506" text-anchor="middle" fill="#8b90a0" font-size="11">domain allowlist + devenv preflight</text>
+    <text x="578" y="530" text-anchor="middle" fill="#565c6e" font-size="10.5">pane-hosted · NDJSON live tail</text>
+
+    <rect x="694" y="432" width="200" height="118" rx="8" fill="#151824" stroke="#a3be8c" stroke-width="1.4"/>
+    <text x="794" y="454" text-anchor="middle" fill="#a3be8c" font-size="14" font-weight="650">OpenCode / GLM</text>
+    <text x="794" y="474" text-anchor="middle" fill="#8b90a0" font-size="11">review · explore (read-only)</text>
+    <text x="794" y="490" text-anchor="middle" fill="#8b90a0" font-size="11">model discoverable + pinnable</text>
+    <text x="794" y="506" text-anchor="middle" fill="#8b90a0" font-size="11">(opencode_model in task spec)</text>
+    <text x="794" y="530" text-anchor="middle" fill="#565c6e" font-size="10.5">background process · monitor pane</text>
+
+    <text x="46" y="572" fill="#565c6e" font-size="11">workers receive HYDRA_NODE_BIN (verified node ≥ 22.6) — login-shell PATH rebuilds can’t strand them on a stale system node</text>
+
+    <!-- ======================= DROP ======================= -->
+    <line x1="470" y1="582" x2="470" y2="610" stroke="#8b90a0" stroke-width="1.5" marker-end="url(#arr)"/>
+    <rect x="330" y="612" width="280" height="46" rx="8" fill="#151824" stroke="rgba(231,228,220,.2)" stroke-dasharray="5 4"/>
+    <text x="470" y="632" text-anchor="middle" fill="#e7e4dc" font-size="13" font-weight="600">inbox drop — result.json</text>
+    <text x="470" y="650" text-anchor="middle" fill="#d66" font-size="11.5">an UNTRUSTED CLAIM, never read as truth</text>
+
+    <line x1="470" y1="658" x2="470" y2="686" stroke="#8b90a0" stroke-width="1.5" marker-end="url(#arr)"/>
+
+    <!-- ======================= TRUST BOUNDARY ======================= -->
+    <rect x="30" y="688" width="880" height="150" rx="12" fill="#10131c" stroke="#4fc4b0" stroke-width="2" stroke-dasharray="8 5"/>
+    <text x="46" y="712" fill="#4fc4b0" font-size="13" font-weight="650" letter-spacing=".06em">TRUST BOUNDARY · promote — every gate deterministic, every failure a ledger record</text>
+
+    <rect x="46" y="728" width="192" height="64" rx="8" fill="#151824" stroke="rgba(231,228,220,.2)"/>
+    <text x="142" y="752" text-anchor="middle" fill="#e7e4dc" font-size="13" font-weight="600">1 · schema</text>
+    <text x="142" y="770" text-anchor="middle" fill="#8b90a0" font-size="11">result shape + spec freshness</text>
+
+    <line x1="238" y1="760" x2="262" y2="760" stroke="#4fc4b0" stroke-width="1.5" marker-end="url(#arrA)"/>
+
+    <rect x="264" y="728" width="192" height="64" rx="8" fill="#151824" stroke="rgba(231,228,220,.2)"/>
+    <text x="360" y="752" text-anchor="middle" fill="#e7e4dc" font-size="13" font-weight="600">2 · git evidence</text>
+    <text x="360" y="770" text-anchor="middle" fill="#8b90a0" font-size="11">commits exist · ancestry · clean tree</text>
+
+    <line x1="456" y1="760" x2="480" y2="760" stroke="#4fc4b0" stroke-width="1.5" marker-end="url(#arrA)"/>
+
+    <rect x="482" y="728" width="192" height="64" rx="8" fill="#151824" stroke="rgba(231,228,220,.2)"/>
+    <text x="578" y="752" text-anchor="middle" fill="#e7e4dc" font-size="13" font-weight="600">3 · ownership audit</text>
+    <text x="578" y="770" text-anchor="middle" fill="#8b90a0" font-size="11">every path within writable scope</text>
+
+    <line x1="674" y1="760" x2="698" y2="760" stroke="#4fc4b0" stroke-width="1.5" marker-end="url(#arrA)"/>
+
+    <rect x="700" y="728" width="192" height="64" rx="8" fill="#151824" stroke="rgba(231,228,220,.2)"/>
+    <text x="796" y="752" text-anchor="middle" fill="#e7e4dc" font-size="13" font-weight="600">4 · sandboxed verify</text>
+    <text x="796" y="770" text-anchor="middle" fill="#8b90a0" font-size="11">tracked policy · network off</text>
+
+    <text x="46" y="822" fill="#565c6e" font-size="11">any gate fails → REJECTED with reason in the ledger; the worktree is preserved for forensics. Worker claims vs harness observation divergence is recorded.</text>
+
+    <!-- ======================= POST-PROMOTION ======================= -->
+    <line x1="470" y1="838" x2="470" y2="866" stroke="#4fc4b0" stroke-width="1.5" marker-end="url(#arrA)"/>
+
+    <rect x="30" y="868" width="880" height="132" rx="12" fill="#10131c" stroke="rgba(231,228,220,.14)"/>
+    <text x="46" y="892" fill="#4fc4b0" font-size="13" font-weight="600" letter-spacing=".06em">CONVERGENCE · serialized through one integration lane</text>
+
+    <rect x="46" y="908" width="256" height="64" rx="8" fill="#151824" stroke="rgba(231,228,220,.2)"/>
+    <text x="174" y="932" text-anchor="middle" fill="#e7e4dc" font-size="13" font-weight="600">cross-vendor review</text>
+    <text x="174" y="950" text-anchor="middle" fill="#8b90a0" font-size="11">different model family · only accept proceeds</text>
+
+    <line x1="302" y1="940" x2="326" y2="940" stroke="#8b90a0" stroke-width="1.5" marker-end="url(#arr)"/>
+
+    <rect x="328" y="908" width="200" height="64" rx="8" fill="#151824" stroke="rgba(231,228,220,.2)"/>
+    <text x="428" y="932" text-anchor="middle" fill="#e7e4dc" font-size="13" font-weight="600">squash</text>
+    <text x="428" y="950" text-anchor="middle" fill="#8b90a0" font-size="11">harness-owned single commit</text>
+
+    <line x1="528" y1="940" x2="552" y2="940" stroke="#8b90a0" stroke-width="1.5" marker-end="url(#arr)"/>
+
+    <rect x="554" y="908" width="340" height="64" rx="8" fill="#151824" stroke="rgba(231,228,220,.2)"/>
+    <text x="724" y="932" text-anchor="middle" fill="#e7e4dc" font-size="13" font-weight="600">integrate</text>
+    <text x="724" y="950" text-anchor="middle" fill="#8b90a0" font-size="11">dependency-ordered cherry-picks · smoke · combined verify gate</text>
+
+    <!-- ======================= BACK TO HUMAN ======================= -->
+    <path d="M 724 1000 L 724 1060 L 590 1060 L 590 1092" fill="none" stroke="#e0a83e" stroke-width="1.5" marker-end="url(#arr)"/>
+    <rect x="420" y="1094" width="340" height="58" rx="10" fill="#151824" stroke="#e0a83e" stroke-width="1.5"/>
+    <text x="590" y="1118" text-anchor="middle" fill="#e7e4dc" font-size="16" font-weight="600">Human decision</text>
+    <text x="590" y="1138" text-anchor="middle" fill="#8b90a0" font-size="12">final report → merge / push / deploy stay manual</text>
+
+    <text x="30" y="1210" fill="#565c6e" font-size="11">Every arrow into or out of state passes through a kit/hydra/scripts launcher — the lead never hand-mutates authoritative state. Ledger + Git alone can reconstruct a run for a replacement lead.</text>
+  </svg>
+
+  <div class="legend">
+    <span><span class="sw" style="background:#e2896f"></span>Claude</span>
+    <span><span class="sw" style="background:#7aa2f7"></span>Codex</span>
+    <span><span class="sw" style="background:#b48ead"></span>Kimi</span>
+    <span><span class="sw" style="background:#a3be8c"></span>OpenCode/GLM</span>
+    <span><span class="sw" style="border:1.5px dashed #4fc4b0; background:transparent"></span>trust boundary</span>
+    <span><span class="sw" style="border:1.5px solid #e0a83e; background:transparent"></span>human-authorized</span>
+  </div>
+
+  <div class="notes">
+    <div class="note">
+      <h2>Head detection (v0.7.0)</h2>
+      <ul>
+        <li><code>detect-heads</code> probes all four vendor CLIs, enumerates opencode's configured models and active model, and checks <code>srt</code> for Kimi write-capability.</li>
+        <li>Snapshot: <code>~/.local/state/hydra/heads.json</code>, refreshed by <code>run-init</code> (ledger event <code>heads_detected</code>).</li>
+        <li><code>allocate</code> never recommends an uninstalled head (degrades with a warning when nothing probes available); <code>dispatch</code> fails fast naming available substitutes — never auto-substitutes.</li>
+      </ul>
+    </div>
+    <div class="note">
+      <h2>Worker environment (v0.7.0)</h2>
+      <ul>
+        <li><code>HYDRA_NODE_BIN</code>: a verified node ≥ 22.6 exported into every worker env; the worker prompt names the one-line PATH fix.</li>
+        <li>Kimi preflight (<code>worker-devenv</code>): toolchain, per-task store/cache dirs (canonicalized tmp base — srt matches physical paths), manifest-derived network domains.</li>
+      </ul>
+    </div>
+    <div class="note">
+      <h2>Runtime</h2>
+      <ul>
+        <li>Default: Bun-compiled single binary (<code>npm run build:bin</code>); source lane falls back automatically.</li>
+        <li><code>hydra version</code> reports the version the binary was <em>built</em> from; <code>hydra help</code> lists every subcommand with its arguments.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+</body>
+</html>

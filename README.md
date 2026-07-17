@@ -107,6 +107,7 @@ hydra-swarm/
 ## Documentation
 
 - [CHANGELOG.md](CHANGELOG.md) — release history
+- `docs/architecture-diagram.html` — visual architecture diagram (open in a browser)
 - `docs/architecture.md` — trust boundary, verification gates, wave design
 - `docs/operations.md` — day-to-day driving reference
 - `docs/vendor-adapters.md` — per-vendor dispatch behavior and quirks
