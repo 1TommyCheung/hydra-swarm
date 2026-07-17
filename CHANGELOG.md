@@ -5,6 +5,21 @@ All notable changes to Hydra-Swarm. The format follows
 `.claude-plugin/plugin.json`. Deeper narrative history (design rationale,
 run-by-run evidence) lives in `docs/roadmap.md`.
 
+## [0.7.1] — 2026-07-17
+
+### Added
+- **`version` subcommand** (`hydra version [--json]`): reports the plugin
+  version and runtime lane (`compiled`/`ts`). The compiled binary embeds the
+  manifest at build time, so it reports the version it was *built* from —
+  previously a binary's version could only be inferred from mtime or feature
+  probes.
+- **`help` subcommand** and a parameterized usage listing: every subcommand
+  now shows its argument signature (`hydra help`, or any unknown subcommand).
+- **HTML architecture diagram** at `docs/architecture-diagram.html` —
+  self-contained, browser-openable pipeline diagram (lead → harness → four
+  worker heads → trust boundary → convergence → human), with the v0.7.0
+  head-detection and worker-environment features annotated.
+
 ## [0.7.0] — 2026-07-17
 
 Head auto-detection, worker environment hardening, and a swarm-reviewed fix
