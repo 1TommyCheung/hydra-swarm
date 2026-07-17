@@ -82,6 +82,17 @@ Use a lightweight `Agent` subagent directly when the deliverable is an opinion o
 
 Rule of thumb: if the deliverable is a file the codebase depends on, use Hydra. If it is a recommendation read once and decided from, use a subagent. To obtain a multi-vendor perspective, fan out per-vendor via Hydra tasks; a single subagent cannot impersonate another vendor.
 
+### Vendor CLIs are never invoked directly
+
+Never invoke a vendor CLI (`codex exec …`, `opencode run …`, `kimi -p …`, `claude -p …`) as a raw shell command — not even for a read-only, no-worktree consultation. A raw call leaves no ledger trace, records no usage, captures no session file, and hosts no pane; the entire premise of the harness is that every agent action is observable and evidenced.
+
+Route by deliverable:
+
+- **Writes anything** (code, docs, config in a worktree) → full Hydra dispatch, as above.
+- **Read-only vendor consultation** (describe/analyze/advise, one-off cross-vendor question) → `bash ${CLAUDE_PLUGIN_ROOT}/kit/hydra/scripts/review-dispatch.sh <run_id> <review_id> <vendor> <prompt_file>`. Despite the name it is the general read-only vendor lane, not just for candidate reviews: it hosts the vendor in a herdr pane (OpenCode gets its decoupled monitor pane), appends `review_started`/`review_completed` to the run ledger, and captures the raw session to `runs/run-<id>/sessions/<review_id>.<vendor>.raw`. It needs a run to attach to — reuse the active run's id, or `run-init.sh` a consultation run first.
+
+The only vendor-CLI exception is `/hydra-doctor`'s availability probing (`command -v`), which executes nothing.
+
 ## Additional Resources
 
 - [references/vendor-dispatch.md](references/vendor-dispatch.md) — pane-hosting shapes per vendor, live-progress mechanisms (Codex JSONL tail, Kimi NDJSON stdout tail, Claude non-streaming JSON, OpenCode decoupled monitor pane), and the record-before-cleanup ordering rule.
