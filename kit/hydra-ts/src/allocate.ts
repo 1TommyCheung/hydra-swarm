@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { die, stateRoot, YAML_BLOCK_HEADER } from './lib.ts';
+import { die, stateRoot, warn, YAML_BLOCK_HEADER } from './lib.ts';
 import {
   KNOWN_HEADS,
   headsFilePath,
@@ -96,6 +96,8 @@ export interface AllocateResult {
   ranked: Candidate[];
   /** Eligible vendors dropped because their CLI is not on PATH (run 0047). */
   unavailable: string[];
+  /** True when NO eligible vendor probed available and ranking proceeded unfiltered (advisory degrade). */
+  availability_degraded: boolean;
   human_gated: boolean;
   note: string;
 }
@@ -258,17 +260,26 @@ export function allocate(
   // BEFORE ranking — recommending a head that cannot launch is useless.
   const availability = availabilityByVendor(options);
   const eligibleVendors = eligible(role);
-  const unavailable = eligibleVendors.filter(
-    (vendor) => vendor !== excludeVendor && availability[vendor] === false,
-  );
-  const candidates = eligibleVendors.filter(
-    (vendor) => vendor !== excludeVendor && availability[vendor] !== false,
-  );
+  const eligibleAfterExclude = eligibleVendors.filter((vendor) => vendor !== excludeVendor);
+  if (eligibleAfterExclude.length === 0) {
+    die(`no eligible vendor for role=${role}`);
+  }
+  const unavailable = eligibleAfterExclude.filter((vendor) => availability[vendor] === false);
+  let candidates = eligibleAfterExclude.filter((vendor) => availability[vendor] !== false);
+  let availabilityDegraded = false;
   if (candidates.length === 0) {
-    const suffix = unavailable.length > 0
-      ? ` — eligible vendors unavailable on PATH: ${unavailable.join(', ')}`
-      : '';
-    die(`no eligible vendor for role=${role}${suffix}`);
+    // Allocation is recommend-only ("the ledger recommends, humans pin"): an
+    // environment where NO eligible CLI probes as available — a scrubbed CI
+    // PATH, cron without a login env — must degrade to unfiltered ranking
+    // with a warning, not die. A hard error here breaks advisory callers
+    // that never intend to dispatch from this environment; dispatch has its
+    // own fail-fast gate for the machine that actually launches the worker.
+    warn(
+      `allocate: no eligible vendor for role=${role} is available on PATH `
+      + `(${unavailable.join(', ')}); ranking unfiltered — verify availability before dispatch`,
+    );
+    candidates = eligibleAfterExclude;
+    availabilityDegraded = true;
   }
 
   const ranked: Candidate[] = candidates.map((vendor) => {
@@ -312,6 +323,7 @@ export function allocate(
     recommendation: ranked[0]?.vendor ?? null,
     ranked,
     unavailable,
+    availability_degraded: availabilityDegraded,
     human_gated: true,
     note: 'Recommendation only — a human pins the role. Ranking uses measured stats at n>=8, else seeded priors; community claims marked do_not_allocate_on are never used.',
   };

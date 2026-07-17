@@ -455,16 +455,20 @@ describe('allocate availability filter', () => {
     assert.deepEqual(result.unavailable, ['claude']);
   });
 
-  it('dies naming the unavailable vendors when every eligible vendor is unavailable', () => {
+  it('degrades to unfiltered ranking with a warning when every eligible vendor is unavailable', () => {
+    // Allocation is recommend-only: a scrubbed environment (blackbox harness,
+    // CI, cron without a login PATH) must still produce a ranking — dispatch
+    // owns the fail-fast gate on the machine that actually launches.
     const { profilesDir, stateRoot } = setupFixture();
     writeSeed(profilesDir, 'claude', 'cost_hint: subscription\n');
     const headsFile = join(stateRoot, 'heads.json');
     writeHeadsSnapshot(headsFile, { claude: false, codex: false, opencode: false, kimi: false });
 
-    assert.throws(
-      () => allocate('implementer', 'feature', 'medium', '', { profilesDir, stateRoot, headsFile }),
-      /no eligible vendor for role=implementer .*unavailable on PATH: claude, codex, kimi/,
-    );
+    const result = allocate('implementer', 'feature', 'medium', '', { profilesDir, stateRoot, headsFile });
+    assert.equal(result.availability_degraded, true);
+    assert.deepEqual(result.unavailable, ['claude', 'codex', 'kimi']);
+    assert.ok(result.recommendation !== null);
+    assert.equal(result.ranked.length, 3);
   });
 
   it('probes live with the injectable when heads.json is missing', () => {
@@ -477,11 +481,13 @@ describe('allocate availability filter', () => {
       return liveSnapshot({ kimi: false });
     };
 
-    assert.throws(
-      () => allocate('visual_debugging', 'screenshot', 'medium', '', { profilesDir, stateRoot, headsFile, probeHeads }),
-      /no eligible vendor for role=visual_debugging/,
-    );
+    const result = allocate('visual_debugging', 'screenshot', 'medium', '', { profilesDir, stateRoot, headsFile, probeHeads });
     assert.equal(probed, 1);
+    // kimi (the only eligible vendor) probed unavailable → advisory degrade,
+    // not a hard error: the live probe was still consulted exactly once.
+    assert.equal(result.availability_degraded, true);
+    assert.deepEqual(result.unavailable, ['kimi']);
+    assert.equal(result.recommendation, 'kimi');
   });
 
   it('does not probe live when heads.json is present', () => {
