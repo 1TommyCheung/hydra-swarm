@@ -5,7 +5,9 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -428,7 +430,9 @@ describe('kimiStart', () => {
     assert.deepEqual(settingsAtSpawn?.network.deniedDomains, []);
     assert.ok(settingsAtSpawn?.filesystem.allowWrite.includes(worktree));
     assert.ok(settingsAtSpawn?.filesystem.allowWrite.includes(join(repoRoot, '.git')));
-    assert.ok(settingsAtSpawn?.filesystem.allowWrite.includes(process.env.TMPDIR ?? '/tmp'));
+    // srt allowWrite matching needs physical paths (see the realpathSync calls in
+    // kimiStart): the TMPDIR root must be canonicalized, not the raw env value.
+    assert.ok(settingsAtSpawn?.filesystem.allowWrite.includes(realpathSync(process.env.TMPDIR ?? '/tmp')));
     assert.ok(settingsAtSpawn?.filesystem.allowWrite.includes('/private/tmp'));
     assert.ok(settingsAtSpawn?.filesystem.allowWrite.includes(`${process.env.HOME}/.kimi-code`));
     assert.deepEqual(settingsAtSpawn?.filesystem.denyWrite, []);
@@ -442,9 +446,12 @@ describe('kimiStart', () => {
     assert.ok(!commandString.includes("'-y'"));
     assert.ok(stderr.includes('live progress'));
 
-    const expectedStoreDir = join(process.env.TMPDIR ?? '/tmp', `hydra-pnpm-store-${agentRunId}`);
+    // The per-task pnpm store lives under the canonicalized TMPDIR (so it is
+    // beneath an srt allowWrite root that actually matches) and is removed once
+    // the run ends — a per-attempt store has no consumers after kimiStart.
+    const expectedStoreDir = join(realpathSync(process.env.TMPDIR ?? '/tmp'), `hydra-pnpm-store-${agentRunId}`);
     assert.equal(recording.options?.env?.npm_config_store_dir, expectedStoreDir);
-    assert.equal(existsSync(expectedStoreDir), true);
+    assert.equal(existsSync(expectedStoreDir), false);
     assert.ok(stderr.includes(expectedStoreDir));
 
     const sessionJson = JSON.parse(readFileSync(join(sessions, `${agentRunId}.json`), 'utf8'));
@@ -459,6 +466,72 @@ describe('kimiStart', () => {
     assert.equal(resultDrop.vendor, 'kimi');
     assert.equal(resultDrop.session_id, 'sess-write-1');
     assert.equal(resultDrop.status, 'completed');
+  });
+
+  it('keeps the per-task pnpm store under an effective srt allowWrite root when TMPDIR contains a symlink (regression: raw TMPDIR is not a physical path)', async () => {
+    const dir = makeTempDir('start-symlinked-tmp');
+    const repoRoot = join(dir, 'repo');
+    initGitRepo(repoRoot);
+    const baseCommit = commitFile(repoRoot, 'README.md', '# hi\n');
+
+    const worktree = join(dir, 'worktree');
+    execFileSync('git', ['-C', repoRoot, 'worktree', 'add', '--quiet', worktree, baseCommit], {
+      encoding: 'utf8',
+      stdio: 'ignore',
+    });
+
+    // macOS hands out TMPDIR under /var/folders (a symlink to /private/var), and
+    // kimiStart canonicalizes the worktree/git-common-dir precisely because srt
+    // allowWrite matching works on physical paths. Model that here: the tmp base
+    // the store is rooted at must be the canonicalized one, or the sandboxed
+    // pnpm still cannot write its store.
+    const realTmp = join(dir, 'real-tmp');
+    const tmpLink = join(dir, 'tmp-link');
+    mkdirSync(realTmp, { recursive: true });
+    symlinkSync(realTmp, tmpLink);
+    const symlinkedTmp = join(tmpLink, 'T');
+    mkdirSync(symlinkedTmp, { recursive: true });
+    const resolvedTmp = realpathSync(symlinkedTmp);
+    assert.notEqual(symlinkedTmp, resolvedTmp);
+
+    const taskSpec = join(dir, 'task.yaml');
+    writeTaskSpec(taskSpec, { base_commit: baseCommit });
+    const inbox = join(dir, 'inbox');
+    const sessions = join(dir, 'sessions');
+    const agentRunId = 'agent-symlinked-tmp';
+
+    const recording: SpawnRecording = {};
+    let settingsAtSpawn: { filesystem: { allowWrite: string[] } } | undefined;
+    const spawn = fakeSpawn(recording, {
+      stdout: '',
+      onSpawn: (_command, args) => {
+        const settingsPath = args[args.indexOf('-s') + 1];
+        settingsAtSpawn = JSON.parse(readFileSync(settingsPath, 'utf8'));
+      },
+    });
+
+    const originalTmpdir = process.env.TMPDIR;
+    process.env.TMPDIR = symlinkedTmp;
+    try {
+      await captureStderr(async () => {
+        await kimiStart(taskSpec, worktree, inbox, sessions, agentRunId, {
+          spawn,
+          exec: adapterExec([]),
+          commandExists: commandLookup(),
+          sandboxDomainsPath: writeBaselineDomains(dir),
+        });
+      });
+    } finally {
+      if (originalTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = originalTmpdir;
+    }
+
+    const expectedStoreDir = join(resolvedTmp, `hydra-pnpm-store-${agentRunId}`);
+    assert.ok(settingsAtSpawn?.filesystem.allowWrite.includes(resolvedTmp));
+    assert.equal(recording.options?.env?.npm_config_store_dir, expectedStoreDir);
+    // The store is per-attempt; nothing references it after the run, so it is
+    // removed rather than left to accumulate in TMPDIR.
+    assert.equal(existsSync(expectedStoreDir), false);
   });
 
   it('falls back to the provider domains when the baseline file is missing', async () => {

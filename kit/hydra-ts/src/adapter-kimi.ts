@@ -588,6 +588,16 @@ export async function kimiStart(
     persistDerivedDomains(baselinePath, [...baseline, ...derivedDomains]);
   }
 
+  // TMPDIR routinely contains a symlink component (/var -> /private/var on
+  // macOS), and srt allowWrite matching works on physical paths (see the
+  // realpathSync calls for wtAbs/gitCommon above) — so canonicalize the tmp
+  // base before using it as an allowWrite root or as the base of the per-task
+  // pnpm store below. Create it first so realpathSync has something to
+  // resolve even when the TMPDIR directory does not exist yet.
+  const tmpBaseRaw = process.env.TMPDIR ?? '/tmp';
+  mkdirSync(tmpBaseRaw, { recursive: true });
+  const tmpBase = realpathSync(tmpBaseRaw);
+
   const settingsPath = join(sessionsAbs, `${agentRunId}.srt-settings.json`);
   const settingsFactory = options.makeSrtSettings ?? makeSrtSettings;
   let generatedSettingsPath = '';
@@ -595,7 +605,7 @@ export async function kimiStart(
     generatedSettingsPath = settingsFactory(settingsPath, [
       wtAbs,
       gitCommon,
-      process.env.TMPDIR ?? '/tmp',
+      tmpBase,
       '/private/tmp',
       `${process.env.HOME ?? ''}/.kimi-code`,
     ], allowedDomains);
@@ -629,14 +639,16 @@ export async function kimiStart(
   // global pnpm store is correctly outside allowWrite so there is no
   // sandbox-side fallback either.
   //
-  // Guaranteed fix: point pnpm's store at a per-task directory under TMPDIR,
-  // which makeSrtSettings already allowWrites unconditionally. pnpm reads
-  // `npm_config_store_dir` from the environment, so its store (and every
-  // ephemeral git clone underneath it) never touches worktree `.git` dirs and
-  // never lands inside the worktree at all — sidestepping both the srt
-  // mandatory-deny block and the promote.sh ownership-audit false positives
-  // that a worktree-local `.pnpm-store` used to trigger.
-  const pnpmStoreDir = join(process.env.TMPDIR ?? '/tmp', `hydra-pnpm-store-${agentRunId}`);
+  // Guaranteed fix: point pnpm's store at a per-task directory under the
+  // canonicalized tmp base, which is allowWritten above (raw TMPDIR would NOT
+  // be an effective root whenever it contains a symlink component — srt
+  // matches physical paths). pnpm reads `npm_config_store_dir` from the
+  // environment, so its store (and every ephemeral git clone underneath it)
+  // never touches worktree `.git` dirs and never lands inside the worktree at
+  // all — sidestepping both the srt mandatory-deny block and the promote.sh
+  // ownership-audit false positives that a worktree-local `.pnpm-store` used
+  // to trigger.
+  const pnpmStoreDir = join(tmpBase, `hydra-pnpm-store-${agentRunId}`);
   mkdirSync(pnpmStoreDir, { recursive: true });
   log(`kimi: pnpm store confined to ${pnpmStoreDir} (npm_config_store_dir, outside worktree/.git)`);
 
@@ -669,6 +681,16 @@ export async function kimiStart(
   // so domain and filesystem policy do not linger longer than the worker run.
   try {
     rmSync(settingsPath, { force: true });
+  } catch {
+    // Best-effort cleanup.
+  }
+
+  // The pnpm store is per-attempt: nothing references it once the run ends
+  // (pnpm hardlinks keep any worktree node_modules it populated alive), so
+  // remove it rather than letting per-task stores pile up in TMPDIR until the
+  // OS tmp janitor runs.
+  try {
+    rmSync(pnpmStoreDir, { recursive: true, force: true });
   } catch {
     // Best-effort cleanup.
   }

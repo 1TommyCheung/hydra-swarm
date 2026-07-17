@@ -185,13 +185,22 @@ Removing worktrees never deletes commits already on branches. Worktrees are pres
   write root — including pnpm's ephemeral tmp clones of git-hosted
   dependencies — and that protection has no settings-file opt-out. `adapter-kimi.ts`
   (`kimiStart`) now sets `npm_config_store_dir` to a per-task directory under
-  `TMPDIR` (already an allowed write root) before invoking `srt`, so pnpm's
-  store — and its ephemeral git clones — never touches worktree `.git` dirs
-  and never lands inside the worktree at all. Do **not** hand-symlink
-  `node_modules` from the main checkout as a workaround: that trips
-  `promote.sh`'s ownership audit (changes outside `writable_paths`). The
-  global pnpm store (`~/Library/pnpm/store` and equivalents) stays outside
-  `allowWrite` on purpose and is not a viable fallback.
+  the **canonicalized** `TMPDIR` (already an allowed write root) before
+  invoking `srt`, so pnpm's store — and its ephemeral git clones — never
+  touches worktree `.git` dirs and never lands inside the worktree at all.
+  The canonicalization (`realpathSync`, like the worktree/git-common-dir
+  roots) is load-bearing: srt's allowWrite matching works on physical paths,
+  so a raw `TMPDIR` under `/var/folders` (`/var`→`/private/var`) would leave
+  the store outside every effective write root and the in-sandbox
+  `pnpm install` would still fail with EPERM. The store is per-attempt and is
+  removed when the run ends — nothing references it afterwards (pnpm
+  hardlinks keep any worktree `node_modules` it populated alive), so leaving
+  it would just pile stores up in `TMPDIR` until the OS tmp janitor runs. Do
+  **not** hand-symlink `node_modules` from the main checkout as a workaround:
+  that trips `promote.sh`'s ownership audit (changes outside
+  `writable_paths`). The global pnpm store (`~/Library/pnpm/store` and
+  equivalents) stays outside `allowWrite` on purpose and is not a viable
+  fallback.
 - **State-root override.** `HYDRA_STATE_ROOT` / `HYDRA_WORKTREE_ROOT` /
   `HYDRA_REPO_ID` override the default locations (the boundary tests and recovery
   drill redirect all state into a throwaway dir this way).
