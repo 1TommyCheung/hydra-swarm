@@ -6,6 +6,8 @@
 
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 
+import { main as detectHeadsMain } from './detect-heads.ts';
+
 // Bun documents that `BUN_BE_BUN=1` can cause a compiled executable to ignore its
 // bundled entry point and run Bun's own generic CLI instead. Unset it in our own
 // process before any routing, and strip it from every child we spawn.
@@ -14,7 +16,7 @@ if (process.env.BUN_BE_BUN !== undefined) {
 }
 
 function printUsage(): void {
-  console.error('Usage: hydra-bin-stage0 <status|__adapter stub <verb> [args...]>');
+  console.error('Usage: hydra-bin-stage0 <status|detect-heads [--json]|__adapter stub <verb> [args...]>');
 }
 
 function failUnknown(): void {
@@ -76,12 +78,21 @@ function handleAdapter(): void {
   process.exitCode = 0;
 }
 
+function handleDetectHeads(): void {
+  // Same subcommand surface as cli.ts's extension route, registered here too
+  // so the standalone compiled router exposes vendor-head detection (run 0047).
+  process.exitCode = detectHeadsMain(process.argv.slice(3));
+}
+
 function main(): void {
   const subcommand = process.argv[2];
 
   switch (subcommand) {
     case 'status':
       handleStatus();
+      break;
+    case 'detect-heads':
+      handleDetectHeads();
       break;
     case '__adapter':
       handleAdapter();

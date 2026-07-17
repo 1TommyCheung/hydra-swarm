@@ -3,6 +3,15 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { die, stateRoot, YAML_BLOCK_HEADER } from './lib.ts';
+import {
+  KNOWN_HEADS,
+  headsFilePath,
+  probeHeads,
+  readHeadsFile,
+  type DetectHeadsOptions,
+  type HeadsSnapshot,
+  type ProbeExec,
+} from './detect-heads.ts';
 import { isCompiledBinary, kitAssetText } from './kit-assets.ts';
 
 // ---------------------------------------------------------------------------
@@ -85,6 +94,8 @@ export interface AllocateResult {
   excluded: string | null;
   recommendation: string | null;
   ranked: Candidate[];
+  /** Eligible vendors dropped because their CLI is not on PATH (run 0047). */
+  unavailable: string[];
   human_gated: boolean;
   note: string;
 }
@@ -98,11 +109,16 @@ export interface AllocateOptions {
   profilesDir?: string;
   /** Optional execFileSync injection for testing side-effectful calls. */
   exec?: typeof execFileSync;
+  /** Optional override path for the machine-global heads.json snapshot. */
+  headsFile?: string;
+  /** Optional injectable live head probe (heads.json fallback, used by tests). */
+  probeHeads?: (options?: DetectHeadsOptions) => HeadsSnapshot;
 }
 
 // Hard constraints: which vendors CAN take this role at all
 // (capability matrix §2/§3; role rules §8; Wave 2 write-role policy).
-function eligible(role: string): string[] {
+// Exported for dispatch.ts's fail-with-suggestions substitute lookup.
+export function eligible(role: string): string[] {
   switch (role) {
     case 'visual_debugging':
       return ['kimi']; // multimodal HARD pin
@@ -171,6 +187,45 @@ function readMeasured(measuredPath: string): MeasuredStats {
   };
 }
 
+/** Adapt AllocateOptions.exec (typeof execFileSync) to the probe exec shape. */
+function allocateProbeExec(exec: typeof execFileSync): ProbeExec {
+  return (file, args, probeOptions) =>
+    exec(file, args, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: probeOptions?.timeoutMs,
+    }) as string;
+}
+
+/**
+ * Per-vendor CLI availability (run 0047): the availability filter made real.
+ * The machine-global heads.json snapshot is authoritative when present and
+ * parseable; when it is missing (or malformed) the vendors are probed live
+ * through the same injectable exec detect-heads uses — allocation NEVER fails
+ * just because the file is absent. A probe that itself blows up fails open
+ * (every vendor treated as available) so detection trouble cannot wedge
+ * allocation; a probe that answers "not on PATH" fails closed for exactly
+ * that vendor, which is the signal this filter exists for.
+ */
+function availabilityByVendor(options: AllocateOptions): Record<string, boolean> {
+  const headsFile = options.headsFile ?? headsFilePath();
+  let snapshot = readHeadsFile(headsFile);
+  if (snapshot === null) {
+    const probe = options.probeHeads
+      ?? (() => probeHeads({ exec: options.exec ? allocateProbeExec(options.exec) : undefined }));
+    try {
+      snapshot = probe();
+    } catch {
+      snapshot = null;
+    }
+  }
+  const availability: Record<string, boolean> = {};
+  for (const name of KNOWN_HEADS) {
+    availability[name] = snapshot === null ? true : snapshot.heads[name].available === true;
+  }
+  return availability;
+}
+
 /**
  * Choose a vendor for a task from live capability profiles (seeded/measured).
  *
@@ -199,8 +254,22 @@ export function allocate(
 
   const measuredDir = join(stateRootPath, 'agents', 'profiles');
 
-  const candidates = eligible(role).filter((v) => v !== excludeVendor);
-  if (candidates.length === 0) die(`no eligible vendor for role=${role}`);
+  // Availability filter (run 0047): drop vendors whose CLI is not on PATH
+  // BEFORE ranking — recommending a head that cannot launch is useless.
+  const availability = availabilityByVendor(options);
+  const eligibleVendors = eligible(role);
+  const unavailable = eligibleVendors.filter(
+    (vendor) => vendor !== excludeVendor && availability[vendor] === false,
+  );
+  const candidates = eligibleVendors.filter(
+    (vendor) => vendor !== excludeVendor && availability[vendor] !== false,
+  );
+  if (candidates.length === 0) {
+    const suffix = unavailable.length > 0
+      ? ` — eligible vendors unavailable on PATH: ${unavailable.join(', ')}`
+      : '';
+    die(`no eligible vendor for role=${role}${suffix}`);
+  }
 
   const ranked: Candidate[] = candidates.map((vendor) => {
     const seedText = readSeedText(vendor, options.profilesDir);
@@ -242,6 +311,7 @@ export function allocate(
     excluded: excludeVendor || null,
     recommendation: ranked[0]?.vendor ?? null,
     ranked,
+    unavailable,
     human_gated: true,
     note: 'Recommendation only — a human pins the role. Ranking uses measured stats at n>=8, else seeded priors; community claims marked do_not_allocate_on are never used.',
   };

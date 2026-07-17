@@ -814,3 +814,97 @@ acceptance_criteria:
     await start(spec, worktree, inbox, sessions, agentRunId, { spawn, deriveDropFromGit });
   });
 });
+
+describe('start opencode_model task-spec pin', () => {
+  before(() => mkdirSync(TEST_TMP, { recursive: true }));
+  after(() => {
+    cleanTmp();
+    restoreEnv();
+  });
+
+  function setupPinSpec(extraSpecLines = '') {
+    const agentRunId = `ar-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const worktree = join(TEST_TMP, 'worktrees', agentRunId);
+    const inbox = join(TEST_TMP, 'inbox', agentRunId);
+    const sessions = join(TEST_TMP, 'sessions', agentRunId);
+    const spec = join(TEST_TMP, 'specs', `${agentRunId}.yaml`);
+    mkdirSync(worktree, { recursive: true });
+    mkdirSync(inbox, { recursive: true });
+    mkdirSync(sessions, { recursive: true });
+    mkdirSync(dirname(spec), { recursive: true });
+    writeFileSync(
+      spec,
+      `task_id: adapter-opencode
+run_id: 0047
+spec_version: 1
+branch: hydra/0047/adapter-opencode
+base_commit: 71bcbcf9acf0aeadc5d8eb5d1c0d3868b45b6070
+objective: >
+  Do the thing.
+writable_paths:
+  - hydra-ts/src/adapter-opencode.ts
+acceptance_criteria:
+  - pass
+${extraSpecLines}`,
+      'utf8',
+    );
+    return { agentRunId, worktree, inbox, sessions, spec };
+  }
+
+  async function captureStartModel(
+    ctx: { agentRunId: string; worktree: string; inbox: string; sessions: string; spec: string },
+    options: Record<string, unknown> = {},
+  ) {
+    let capturedModel = '';
+    const spawn = makeSpawn(eventsStdout({ sessionID: 'pin-1', type: 'text', text: 'ok' }), {
+      onSpawn: (_command, args) => {
+        capturedModel = args[args.indexOf('--model') + 1] ?? '';
+      },
+    });
+    await start(ctx.spec, ctx.worktree, ctx.inbox, ctx.sessions, ctx.agentRunId, {
+      spawn,
+      deriveDropFromGit: () => false,
+      stateRoot: join(TEST_TMP, 'missing-state', ctx.agentRunId),
+      ...options,
+    });
+    const session = readJson(`${ctx.sessions}/${ctx.agentRunId}.json`) as Record<string, unknown>;
+    return { capturedModel, sessionModel: session.model };
+  }
+
+  it('passes the task-spec opencode_model to the opencode CLI', async () => {
+    delete process.env.HYDRA_OPENCODE_MODEL;
+    const ctx = setupPinSpec('opencode_model: acme/pinned-model\n');
+
+    const { capturedModel, sessionModel } = await captureStartModel(ctx);
+
+    assert.equal(capturedModel, 'acme/pinned-model');
+    assert.equal(sessionModel, 'acme/pinned-model');
+  });
+
+  it('task-spec opencode_model beats HYDRA_OPENCODE_MODEL', async () => {
+    process.env.HYDRA_OPENCODE_MODEL = 'env/model';
+    const ctx = setupPinSpec('opencode_model: acme/pinned-model\n');
+
+    const { capturedModel } = await captureStartModel(ctx);
+
+    assert.equal(capturedModel, 'acme/pinned-model');
+  });
+
+  it('HYDRA_OPENCODE_MODEL applies when the spec carries no pin', async () => {
+    process.env.HYDRA_OPENCODE_MODEL = 'env/model';
+    const ctx = setupPinSpec();
+
+    const { capturedModel } = await captureStartModel(ctx);
+
+    assert.equal(capturedModel, 'env/model');
+  });
+
+  it('an explicit options.model still wins over the task-spec pin', async () => {
+    delete process.env.HYDRA_OPENCODE_MODEL;
+    const ctx = setupPinSpec('opencode_model: acme/pinned-model\n');
+
+    const { capturedModel } = await captureStartModel(ctx, { model: 'override/model' });
+
+    assert.equal(capturedModel, 'override/model');
+  });
+});

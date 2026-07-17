@@ -26,6 +26,26 @@ import {
   type HerdrClient,
   type SpawnLike,
 } from '../src/dispatch.ts';
+import type { HeadsSnapshot } from '../src/detect-heads.ts';
+
+function headsSnapshot(
+  availability: Partial<Record<string, boolean>> = {},
+  models: string[] = [],
+): HeadsSnapshot {
+  const head = (name: string) => {
+    const available = availability[name] ?? true;
+    return { available, path: available ? `/usr/bin/${name}` : null };
+  };
+  return {
+    detected_at: '2026-01-01T00:00:00Z',
+    heads: {
+      claude: head('claude'),
+      codex: head('codex'),
+      opencode: { ...head('opencode'), models, active_model: 'zai-coding-plan/glm-5.2' },
+      kimi: { ...head('kimi'), srt_available: true, write_capable: true },
+    },
+  };
+}
 
 const TEST_TMP = join(tmpdir(), `hydra-ts-dispatch-${process.pid}`);
 let sequence = 0;
@@ -229,6 +249,7 @@ function injectedOptions(
     killTree: (pid) => { killed.push(pid); },
     recordUsage: (...args) => { usage.push(args); },
     execFileSync: () => { throw new Error('external command execution was not expected'); },
+    probeHeads: () => headsSnapshot(),
     clock: new StepClock(),
     ...overrides,
     killed,
@@ -249,6 +270,21 @@ async function captureStdout<T>(callback: () => Promise<T>): Promise<{ output: s
     return { output: chunks.join(''), value };
   } finally {
     process.stdout.write = original;
+  }
+}
+
+async function captureStderr<T>(callback: () => Promise<T>): Promise<{ output: string; value: T }> {
+  const chunks: string[] = [];
+  const original = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    chunks.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const value = await callback();
+    return { output: chunks.join(''), value };
+  } finally {
+    process.stderr.write = original;
   }
 }
 
@@ -1885,5 +1921,171 @@ describe('dispatch Bash parity', () => {
       assert.ok(events.includes('agent_loop_cleared'));
       assert.equal(events.at(-1), 'agent_exited');
     });
+  });
+});
+
+describe('dispatch head availability gate', () => {
+  before(() => {
+    rmSync(TEST_TMP, { recursive: true, force: true });
+    mkdirSync(TEST_TMP, { recursive: true });
+  });
+
+  after(() => rmSync(TEST_TMP, { recursive: true, force: true }));
+
+  it('dies with suggestions when the assigned vendor CLI is not on PATH', async () => {
+    const f = fixture(runId(), { vendor: 'claude' });
+    const mock = fakeSpawn();
+    await assert.rejects(
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+        probeHeads: () => headsSnapshot({ claude: false }),
+      })),
+      (error: unknown) => {
+        const message = (error as Error).message;
+        assert.match(message, /assigned vendor 'claude' is not on PATH at dispatch time/);
+        assert.match(message, /Available heads: codex, opencode, kimi/);
+        assert.match(message, /Best eligible substitute for role 'implementer': codex/);
+        assert.match(message, /never auto-substitute/);
+        return true;
+      },
+    );
+    assert.equal(mock.calls.length, 0, 'the worker must never be spawned');
+    assert.deepEqual(ledger(f).map(({ event }) => event), [], 'the gate fires before task_started');
+  });
+
+  it('orders the substitute by the eligible() ordering of the spec role', async () => {
+    const f = fixture(runId(), { vendor: 'codex' });
+    appendFileSync(f.taskSpecPath, 'role: reviewer\n', 'utf8');
+    const mock = fakeSpawn();
+    await assert.rejects(
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+        probeHeads: () => headsSnapshot({ codex: false }),
+      })),
+      /Best eligible substitute for role 'reviewer': opencode/,
+    );
+  });
+
+  it('reports no substitute when no eligible head is available', async () => {
+    const f = fixture(runId(), { vendor: 'kimi' });
+    const mock = fakeSpawn();
+    await assert.rejects(
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+        probeHeads: () => headsSnapshot({ claude: false, codex: false, opencode: false, kimi: false }),
+      })),
+      (error: unknown) => {
+        const message = (error as Error).message;
+        assert.match(message, /Available heads: none/);
+        assert.match(message, /Best eligible substitute for role 'implementer': none/);
+        return true;
+      },
+    );
+  });
+
+  it('skips the gate for vendors outside the detected head set', async () => {
+    const f = fixture(runId(), { vendor: 'stub' });
+    let called = false;
+    const mock = fakeSpawn();
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+      probeHeads: () => {
+        called = true;
+        return headsSnapshot();
+      },
+    }));
+    assert.equal(called, false, 'stub is not a detected head; no probe expected');
+    assert.equal(mock.calls.length, 1);
+  });
+
+  it('fails open when the availability probe throws', async () => {
+    const f = fixture(runId(), { vendor: 'claude' });
+    const mock = fakeSpawn();
+    const { output } = await captureStderr(() =>
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+        probeHeads: () => {
+          throw new Error('probe exploded');
+        },
+      })),
+    );
+    assert.equal(mock.calls.length, 1, 'a probe failure must not block dispatch');
+    assert.match(output, /head availability probe failed/);
+  });
+});
+
+describe('dispatch opencode_model pin', () => {
+  before(() => {
+    rmSync(TEST_TMP, { recursive: true, force: true });
+    mkdirSync(TEST_TMP, { recursive: true });
+  });
+
+  after(() => rmSync(TEST_TMP, { recursive: true, force: true }));
+
+  function writeHeadsFile(f: Fixture, models: string[]): string {
+    const headsFile = join(f.runDir, 'heads.json');
+    writeFileSync(headsFile, JSON.stringify(headsSnapshot({}, models)), 'utf8');
+    return headsFile;
+  }
+
+  it('warns but proceeds when the pinned model is absent from the detected list', async () => {
+    const f = fixture(runId(), { vendor: 'opencode' });
+    appendFileSync(f.taskSpecPath, 'opencode_model: acme/model-x\n', 'utf8');
+    const headsFile = writeHeadsFile(f, ['zai-coding-plan/glm-5.2']);
+    const mock = fakeSpawn();
+
+    const { output } = await captureStderr(() =>
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { headsFile })),
+    );
+
+    assert.match(output, /opencode_model 'acme\/model-x' is not in the detected opencode model list/);
+    assert.match(output, /proceeding anyway/);
+    assert.equal(mock.calls.length, 1, 'dispatch proceeds despite the stale model list');
+  });
+
+  it('stays silent when the pinned model is in the detected list', async () => {
+    const f = fixture(runId(), { vendor: 'opencode' });
+    appendFileSync(f.taskSpecPath, 'opencode_model: acme/model-x\n', 'utf8');
+    const headsFile = writeHeadsFile(f, ['acme/model-x', 'zai-coding-plan/glm-5.2']);
+    const mock = fakeSpawn();
+
+    const { output } = await captureStderr(() =>
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { headsFile })),
+    );
+
+    assert.doesNotMatch(output, /not in the detected opencode model list/);
+    assert.equal(mock.calls.length, 1);
+  });
+
+  it('stays silent when heads.json is missing or lists no models', async () => {
+    const missing = fixture(runId(), { vendor: 'opencode' });
+    appendFileSync(missing.taskSpecPath, 'opencode_model: acme/model-x\n', 'utf8');
+    const mockMissing = fakeSpawn();
+    const { output: missingOutput } = await captureStderr(() =>
+      dispatch(missing.runId, 'task-a', injectedOptions(missing, mockMissing.spawn, {
+        headsFile: join(missing.runDir, 'absent-heads.json'),
+      })),
+    );
+    assert.doesNotMatch(missingOutput, /not in the detected opencode model list/);
+    assert.equal(mockMissing.calls.length, 1);
+
+    const empty = fixture(runId(), { vendor: 'opencode' });
+    appendFileSync(empty.taskSpecPath, 'opencode_model: acme/model-x\n', 'utf8');
+    const headsFile = writeHeadsFile(empty, []);
+    const mockEmpty = fakeSpawn();
+    const { output: emptyOutput } = await captureStderr(() =>
+      dispatch(empty.runId, 'task-a', injectedOptions(empty, mockEmpty.spawn, { headsFile })),
+    );
+    assert.doesNotMatch(emptyOutput, /not in the detected opencode model list/);
+    assert.equal(mockEmpty.calls.length, 1);
+  });
+
+  it('ignores opencode_model for non-opencode vendors', async () => {
+    const f = fixture(runId(), { vendor: 'claude' });
+    appendFileSync(f.taskSpecPath, 'opencode_model: acme/model-x\n', 'utf8');
+    const headsFile = writeHeadsFile(f, ['zai-coding-plan/glm-5.2']);
+    const mock = fakeSpawn();
+
+    const { output } = await captureStderr(() =>
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { headsFile })),
+    );
+
+    assert.doesNotMatch(output, /not in the detected opencode model list/);
+    assert.equal(mock.calls.length, 1);
   });
 });

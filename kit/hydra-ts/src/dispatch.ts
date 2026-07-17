@@ -17,6 +17,17 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildWorkerPrompt } from './build-worker-prompt.ts';
 import { type LedgerEntry } from './current-attempt.ts';
+import { eligible } from './allocate.ts';
+import {
+  KNOWN_HEADS,
+  availableHeadNames,
+  headsFilePath,
+  probeHeads,
+  readHeadsFile,
+  type DetectHeadsOptions,
+  type HeadsSnapshot,
+  type KnownHead,
+} from './detect-heads.ts';
 import {
   codexEventText,
   die,
@@ -172,6 +183,10 @@ export interface DispatchOptions {
   noSignals?: boolean;
   /** Injectable HYDRA_NODE_BIN resolver (used by tests). */
   resolveNodeBinDir?: () => string;
+  /** Injectable head availability probe for the assigned-vendor gate (used by tests). */
+  probeHeads?: (options?: DetectHeadsOptions) => HeadsSnapshot;
+  /** Override path to heads.json for the opencode_model stale-list check (used by tests). */
+  headsFile?: string;
 }
 
 export interface DispatchHandle {
@@ -330,6 +345,66 @@ function discoverRepoRoot(options: DispatchOptions, cwd: string): string {
     })).trim();
   } catch {
     die(`not inside a git repository (cwd: ${cwd}) — hydra resolves its state dir from the repo root; cd into the target repo (or one of its worktrees) and re-run`);
+  }
+}
+
+/**
+ * Vendor-head availability gate (run 0047): when the task spec's
+ * assigned_vendor CLI is not on PATH at dispatch time, die with a
+ * fail-with-suggestions message naming the heads that ARE available and the
+ * best eligible substitute for the role (allocate's eligible() ordering).
+ * Hydra NEVER auto-substitutes — re-pinning is a human decision.
+ *
+ * The gate covers exactly the detected head set (claude/codex/opencode/kimi);
+ * test adapters like 'stub' bypass it. It fails open when the probe itself
+ * errors so detection trouble can never wedge dispatch; a probe that answers
+ * "not on PATH" fails closed for exactly that vendor, which is the signal
+ * this gate exists for.
+ */
+function enforceHeadAvailability(spec: TaskSpec, taskSpecPath: string, options: DispatchOptions): void {
+  if (!(KNOWN_HEADS as readonly string[]).includes(spec.vendor)) return;
+
+  const probe = options.probeHeads ?? (() => probeHeads());
+  let snapshot: HeadsSnapshot | null = null;
+  try {
+    snapshot = probe();
+  } catch (error) {
+    warn(`head availability probe failed; skipping the gate: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+
+  const head = snapshot.heads[spec.vendor as KnownHead];
+  if (head.available) return;
+
+  const role = yamlScalar(taskSpecPath, 'role') || 'implementer';
+  const available = availableHeadNames(snapshot);
+  const substitute = eligible(role).find(
+    (vendor) => vendor !== spec.vendor
+      && snapshot.heads[vendor as KnownHead]?.available === true,
+  ) ?? null;
+  die(
+    `assigned vendor '${spec.vendor}' is not on PATH at dispatch time. `
+      + `Available heads: ${available.length > 0 ? available.join(', ') : 'none'}. `
+      + `Best eligible substitute for role '${role}': ${substitute ?? 'none'}. `
+      + `Re-pin assigned_vendor in the task spec or install the ${spec.vendor} CLI, then re-dispatch — hydra never auto-substitutes.`,
+  );
+}
+
+/**
+ * Task-spec opencode_model pin (run 0047): dispatch reads the pin and the
+ * opencode adapter receives it through the spec file itself (adapter-opencode
+ * resolveModel gives it precedence over HYDRA_OPENCODE_MODEL). When the pin
+ * is absent from the detected opencode model list in heads.json, warn but
+ * proceed — the snapshot may simply be stale.
+ */
+function warnOnStaleOpencodeModelPin(spec: TaskSpec, taskSpecPath: string, options: DispatchOptions): void {
+  if (spec.vendor !== 'opencode') return;
+  const pinnedModel = yamlScalar(taskSpecPath, 'opencode_model');
+  if (!pinnedModel) return;
+  const headsFile = options.headsFile ?? headsFilePath();
+  const models: unknown = readHeadsFile(headsFile)?.heads.opencode.models;
+  if (Array.isArray(models) && models.length > 0 && !models.includes(pinnedModel)) {
+    warn(`opencode_model '${pinnedModel}' is not in the detected opencode model list (${models.length} models in ${headsFile}); proceeding anyway`);
   }
 }
 
@@ -1138,6 +1213,8 @@ export async function dispatch(
   const taskSpecPath = join(runPath, 'tasks', `${taskId}.yaml`);
   const spec = readTaskSpec(taskSpecPath);
   const repo = discoverRepoRoot(options, cwd);
+  enforceHeadAvailability(spec, taskSpecPath, options);
+  warnOnStaleOpencodeModelPin(spec, taskSpecPath, options);
   const env = options.env ?? process.env;
   // Strip BUN_BE_BUN in place so the worker spawn (runWorkerPlain passes
   // `env: ctx.env` explicitly, by reference — see dispatch.test.ts's identity

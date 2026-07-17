@@ -14,6 +14,12 @@ base_commit: 91df24a               # filled/confirmed at instantiation
 branch: hydra/0042/canvas-node-validation   # harness-assigned; do not hand-edit
 worktree:                          # harness-assigned by create-worktree.sh
 assigned_vendor: claude            # claude | codex | opencode | kimi
+# opencode_model: zai-coding-plan/glm-5.2   # OPTIONAL, opencode tasks only.
+# Pin the model for this task's opencode worker. Precedence: this task-spec
+# field > HYDRA_OPENCODE_MODEL > ~/.local/state/hydra/opencode-model.json >
+# the adapter default. When the pin is absent from the detected model list in
+# heads.json (see detect-heads.sh), dispatch warns but proceeds — the
+# snapshot may simply be stale.
 writable_paths:
   - src/canvas/**
   - tests/canvas/**

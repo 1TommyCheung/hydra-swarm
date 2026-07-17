@@ -2,8 +2,20 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { log, die, runDir, repoId, repoRoot, now, ledgerAppend } from './lib.ts';
+import { log, die, warn, runDir, repoId, repoRoot, now, ledgerAppend } from './lib.ts';
+import { availableHeadNames, detectHeads, type HeadsSnapshot } from './detect-heads.ts';
 import { isCompiledBinary } from './kit-assets.ts';
+
+export interface RunInitOptions {
+  /**
+   * Injectable head detector (run 0047). When provided, run-init probes the
+   * vendor heads, refreshes the machine-global heads.json, and appends a
+   * heads_detected ledger event summarizing the available heads. Detection is
+   * wired at the CLI boundary (main below); library callers that omit it get
+   * no detection and no event, keeping run-init composition in tests hermetic.
+   */
+  detectHeads?: () => HeadsSnapshot | null;
+}
 
 /**
  * Create the external state layout for a run.
@@ -14,9 +26,10 @@ import { isCompiledBinary } from './kit-assets.ts';
  *
  * @param runId - required run identifier
  * @param baseCommit - optional base commit; defaults to current HEAD
+ * @param options - optional injectables (head detection)
  * @returns absolute path to the run directory
  */
-export function runInit(runId: string, baseCommit?: string): string {
+export function runInit(runId: string, baseCommit?: string, options: RunInitOptions = {}): string {
   if (!runId) {
     die('usage: runInit(runId, baseCommit?)');
   }
@@ -60,6 +73,26 @@ tasks: []
 
   ledgerAppend(runId, 'run_started', 'base_commit', resolvedBase);
 
+  // Vendor-head detection (run 0047): refresh the machine-global heads.json
+  // and summarize the available heads in the ledger. Detection is best effort
+  // — a probe failure must never block run initialization.
+  if (options.detectHeads) {
+    try {
+      const snapshot = options.detectHeads();
+      if (snapshot) {
+        const available = availableHeadNames(snapshot);
+        ledgerAppend(
+          runId,
+          'heads_detected',
+          'available', available.length > 0 ? available.join(',') : 'none',
+          'count', String(available.length),
+        );
+      }
+    } catch (error) {
+      warn(`head detection failed at run init; continuing: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   log(`run ${runId} initialized at ${dir} (base ${resolvedBase})`);
   process.stdout.write(`${dir}\n`);
   return dir;
@@ -70,7 +103,7 @@ export default runInit;
 export function main(args: string[] = process.argv.slice(2)): number {
   try {
     if (!args[0]) die('usage: run-init.sh <run_id> [base_commit]');
-    runInit(args[0], args[1]);
+    runInit(args[0], args[1], { detectHeads: () => detectHeads() });
     return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

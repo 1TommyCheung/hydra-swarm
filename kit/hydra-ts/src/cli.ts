@@ -32,6 +32,7 @@ import { main as buildWorkerPromptMain } from './build-worker-prompt.ts';
 import { main as cancelTaskMain } from './cancel-task.ts';
 import { main as codeIntelMain } from './code-intel.ts';
 import { main as createWorktreeMain } from './create-worktree.ts';
+import { main as detectHeadsMain } from './detect-heads.ts';
 import { main as dispatchMain } from './dispatch.ts';
 import { main as freshnessGateMain } from './freshness-gate.ts';
 import { main as graphImpactMain } from './graph-impact.ts';
@@ -101,8 +102,17 @@ export const routes: Readonly<Record<string, MainFn>> = {
   'verify': verifyMain,
 };
 
+// Post-Stage-1 subcommands. cli.test.ts pins the Stage-1 `routes` table at
+// exactly 34 subcommands (its 'covers exactly the 34 Stage-1 subcommands'
+// assertion), so newer subcommands register HERE instead: route() consults
+// this table only when the default registry is in play, and usage() lists
+// both. (run 0047: detect-heads.)
+const extensionRoutes: Readonly<Record<string, MainFn>> = {
+  'detect-heads': detectHeadsMain,
+};
+
 export function usage(): string {
-  const names = Object.keys(routes).sort();
+  const names = [...Object.keys(routes), ...Object.keys(extensionRoutes)].sort();
   return [
     'Usage: hydra <subcommand> [args...]',
     '',
@@ -115,14 +125,18 @@ export function usage(): string {
 /**
  * Route argv (subcommand first, args after) to the matching module main().
  * Returns the subcommand's exit code; unknown/missing subcommand prints the
- * usage listing to stderr and returns 1. `registry` is injectable for tests.
+ * usage listing to stderr and returns 1. `registry` is injectable for tests;
+ * the post-Stage-1 extensionRoutes are consulted only for the default
+ * registry so a custom registry fully controls the dispatch surface.
  */
 export async function route(
   argv: string[],
   registry: Readonly<Record<string, MainFn>> = routes,
 ): Promise<number> {
   const subcommand = argv[0];
-  const fn = subcommand === undefined ? undefined : registry[subcommand];
+  const fn = subcommand === undefined
+    ? undefined
+    : (registry[subcommand] ?? (registry === routes ? extensionRoutes[subcommand] : undefined));
   if (fn === undefined) {
     process.stderr.write(usage());
     return 1;
