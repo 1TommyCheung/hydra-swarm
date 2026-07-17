@@ -118,6 +118,37 @@ else
   json_emit "node" "fail" "$detail" "auto" '{"nvm_bootstrap":"curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash","nvm_install":"nvm install 22 && nvm alias default 22"}'
 fi
 
+# --- 2b. Compiled binary: presence + version drift (advisory; ts lane always works) ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+plugin_version=""
+plugin_manifest="$SCRIPT_DIR/../../.claude-plugin/plugin.json"
+if [ -f "$plugin_manifest" ] && command -v jq >/dev/null 2>&1; then
+  plugin_version="$(jq -r '.version // empty' "$plugin_manifest" 2>/dev/null)"
+fi
+bin_target="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/aarch64/arm64/;s/x86_64/x64/')"
+resolved_bin=""
+for bin_candidate in "${HYDRA_BIN:-}" \
+  "$SCRIPT_DIR/../hydra-ts/dist/hydra-cli" \
+  "${XDG_DATA_HOME:-$HOME/.local/share}/hydra-bin/v${plugin_version}/hydra-cli-${bin_target}"; do
+  [ -n "$bin_candidate" ] && [ -f "$bin_candidate" ] && [ -x "$bin_candidate" ] && { resolved_bin="$bin_candidate"; break; }
+done
+if [ -n "$resolved_bin" ]; then
+  bin_version="$(env -u BUN_BE_BUN "$resolved_bin" version --json 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
+  if [ -z "$bin_version" ]; then
+    warn "compiled binary" "$resolved_bin has no version subcommand (pre-0.7.1 build) — rebuild or re-fetch to enable drift detection"
+    json_emit "compiled binary" "warn" "no version subcommand (pre-0.7.1 build): $resolved_bin" "auto" '{"fetch":"bash '"$SCRIPT_DIR"'/../hydra/scripts/fetch-bin.sh","rebuild":"cd '"$SCRIPT_DIR"'/../hydra-ts && npm run build:bin"}'
+  elif [ -n "$plugin_version" ] && [ "$bin_version" != "$plugin_version" ]; then
+    warn "compiled binary" "version drift: binary reports $bin_version, plugin is $plugin_version ($resolved_bin) — stale builds run old harness code"
+    json_emit "compiled binary" "warn" "drift: binary $bin_version vs plugin $plugin_version" "auto" '{"fetch":"bash '"$SCRIPT_DIR"'/../hydra/scripts/fetch-bin.sh","rebuild":"cd '"$SCRIPT_DIR"'/../hydra-ts && npm run build:bin"}'
+  else
+    pass "compiled binary ($bin_version at $resolved_bin)"
+    json_emit "compiled binary" "pass" "v$bin_version at $resolved_bin" "none"
+  fi
+else
+  warn "compiled binary" "none found — the ts/Node source lane will be used; fetch-bin.sh downloads the verified release binary"
+  json_emit "compiled binary" "warn" "no compiled binary; ts lane in use" "auto" '{"fetch":"bash '"$SCRIPT_DIR"'/../hydra/scripts/fetch-bin.sh","rebuild":"cd '"$SCRIPT_DIR"'/../hydra-ts && npm run build:bin"}'
+fi
+
 # --- 3. Vendor CLIs (fatal only in the sense of "unusable", not install-blocking) ---
 for vendor_bin in claude codex opencode kimi; do
   if command -v "$vendor_bin" >/dev/null 2>&1; then

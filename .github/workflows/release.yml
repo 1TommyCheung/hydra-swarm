@@ -1,0 +1,77 @@
+name: release
+
+# Tag-driven binary release: v<version> tag -> build-matrix all four targets
+# with the pinned Bun, blackbox-verify the runner-native artifact, assert the
+# tag matches .claude-plugin/plugin.json, upload binaries + provenance
+# manifests as release assets. fetch-bin.sh downloads and re-verifies these
+# (sha256 + self-reported version) on operator machines.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert tag matches plugin.json version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest="$(jq -r .version .claude-plugin/plugin.json)"
+          if [ "$tag" != "$manifest" ]; then
+            echo "tag v$tag does not match plugin.json version $manifest" >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+
+      - name: Build all targets (build-matrix)
+        working-directory: kit/hydra-ts
+        run: |
+          export HYDRA_BUN="$(command -v bun)"
+          node --experimental-strip-types scripts/build-matrix.ts
+
+      - name: Blackbox-verify the runner-native artifact
+        working-directory: kit/hydra-ts
+        run: |
+          node --experimental-strip-types scripts/blackbox-compiled.ts dist/bun-linux-x64/hydra-cli
+
+      - name: Self-report check (version must equal the tag)
+        working-directory: kit/hydra-ts
+        run: |
+          reported="$(env -u BUN_BE_BUN dist/bun-linux-x64/hydra-cli version --json | jq -r .version)"
+          if [ "v$reported" != "$GITHUB_REF_NAME" ]; then
+            echo "binary self-reports $reported, tag is $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+
+      - name: Stage release assets
+        working-directory: kit/hydra-ts
+        run: |
+          mkdir -p release-assets
+          for t in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            cp "dist/bun-$t/hydra-cli" "release-assets/hydra-cli-$t"
+            cp "dist/bun-$t/manifest.json" "release-assets/manifest-$t.json"
+          done
+          (cd release-assets && shasum -a 256 hydra-cli-* > SHA256SUMS)
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "hydra-swarm $GITHUB_REF_NAME" \
+            --notes "Compiled harness binaries (Bun 1.3.14). Verify with the per-target manifest sha256, or install via kit/hydra/scripts/fetch-bin.sh which re-verifies checksum and self-reported version. See CHANGELOG.md." \
+            kit/hydra-ts/release-assets/*

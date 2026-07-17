@@ -1,6 +1,6 @@
 # Hydra-Swarm
 
-**v0.7.0** · A local multi-agent development harness. A lead (Claude Code)
+**v0.7.2** · A local multi-agent development harness. A lead (Claude Code)
 plans, dispatches, and judges; a deterministic harness owns state, process
 launch, and verification. Four vendor heads — **Claude**, **Codex**,
 **OpenCode/GLM**, and **Kimi** — implement tasks in isolated Git worktrees.
@@ -45,11 +45,21 @@ the start of every run.
 
 ## Runtime
 
-The default runtime is a Bun-compiled single binary (`npm run build:bin` →
-`kit/hydra-ts/dist/hydra-cli`, built per machine, never committed). With no
-binary present, the unchanged `kit/hydra/scripts/*.sh` entry points fall back
-to the TypeScript/Node source lane automatically — a fresh checkout works out
-of the box. Workers additionally receive `HYDRA_NODE_BIN` pointing at a
+The default runtime is a Bun-compiled single binary — never committed to
+git. Get one either way:
+
+- **Download a verified release**: `bash kit/hydra/scripts/fetch-bin.sh`
+  fetches the binary matching this plugin's version from GitHub Releases
+  (darwin-arm64/x64, linux-x64/arm64; Windows via WSL), verifies the
+  manifest SHA-256 and the binary's self-reported version, and installs to
+  `~/.local/share/hydra-bin/v<version>/`.
+- **Build locally**: `npm run build:bin` in `kit/hydra-ts`.
+
+Resolution order: `HYDRA_BIN` → checkout `dist/` → version-keyed download
+cache → automatic fallback to the TypeScript/Node source lane, so a fresh
+checkout works out of the box with no binary at all. `hydra version` and
+`/hydra-doctor` both detect a stale binary (version drift vs the plugin
+manifest). Workers additionally receive `HYDRA_NODE_BIN` pointing at a
 verified Node ≥ 22.6, so login-shell PATH rebuilds inside vendor tool shells
 can't strand them on a stale system node.
 
