@@ -5,6 +5,39 @@ All notable changes to Hydra-Swarm. The format follows
 `.claude-plugin/plugin.json`. Deeper narrative history (design rationale,
 run-by-run evidence) lives in `docs/roadmap.md`.
 
+## [0.8.0] — 2026-07-19
+
+Run 0048: worktree lifecycle management — closes the "worktrees grow forever"
+gap (issue #12) with a document-then-delete design. 11 Kimi worker attempts,
+7 Codex adversarial review rounds, 18 deletion-safety/fidelity findings
+closed across both features before acceptance.
+
+### Added
+- **`hydra gc`** (#12): reaps worktrees+branches ONLY when the ledger proves
+  integration — authoritative result + recorded integration SHA (candidate
+  head / squash record) reachable from the default branch, proof paired to
+  the current tip through the same squash-record evidence chain (no evidence
+  borrowing, no cross-generation proof). Dry-run by default; `--apply`
+  required; `--keep-last N`; `--json`. Deletion safety: NUL-framed git
+  status parsing (no ' -> ' delimiter ambiguity), candidate paths validated
+  against `git worktree list --porcelain` and bound to their exact
+  `hydra/<run>/<task>` branch, default-branch discovery fails closed,
+  revalidation before EACH destructive op, atomic compare-and-delete via
+  `git update-ref --no-deref -d <ref> <expected-sha>`, `worktree_reaped` /
+  `worktree_reap_partial` ledger events with rerun recovery.
+- **`hydra run-log`**: renders a per-run lifecycle audit document to
+  `docs/hydra-dev-logs/run-<id>.md` (`--out` / `HYDRA_DEV_LOG_DIR`
+  override) from the ledger + authoritative tree: run header, per-task
+  lifecycle (dispatch attempts, promote outcomes incl. rejection reasons,
+  reviews, squash/integration, reaps), full event timeline, usage,
+  explicit "(none recorded)" gaps, ledger-anomaly section. Injection-safe:
+  strict id validation, canonicalized output paths, symlink refusal,
+  markdown/control-byte neutralization, authoritative-vs-ledger divergence
+  rendering. This is what makes aggressive gc safe: document, then delete.
+- **Retention policy** (SKILL.md step 10 + operations.md): at run close,
+  `run-log` then `gc --apply --keep-last 3`; monthly `git worktree prune`;
+  PR-flow worktrees (unprovable by design) removed manually post-merge.
+
 ## [0.7.2] — 2026-07-17
 
 ### Added
