@@ -7,6 +7,8 @@
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 
 import { main as detectHeadsMain } from './detect-heads.ts';
+import { main as gcMain } from './gc.ts';
+import { main as runLogMain } from './run-log.ts';
 
 // Bun documents that `BUN_BE_BUN=1` can cause a compiled executable to ignore its
 // bundled entry point and run Bun's own generic CLI instead. Unset it in our own
@@ -16,7 +18,7 @@ if (process.env.BUN_BE_BUN !== undefined) {
 }
 
 function printUsage(): void {
-  console.error('Usage: hydra-bin-stage0 <status|detect-heads [--json]|__adapter stub <verb> [args...]>');
+  console.error('Usage: hydra-bin-stage0 <status|detect-heads [--json]|gc [--apply] [--keep-last N] [--default-branch REF] [--json]|run-log <run_id> [--out <dir>] [--json]|__adapter stub <verb> [args...]>');
 }
 
 function failUnknown(): void {
@@ -84,6 +86,18 @@ function handleDetectHeads(): void {
   process.exitCode = detectHeadsMain(process.argv.slice(3));
 }
 
+function handleGc(): void {
+  // Same subcommand surface as cli.ts's extension route, registered here too
+  // so the standalone compiled router exposes worktree/branch reaping (run 0048).
+  process.exitCode = gcMain(process.argv.slice(3));
+}
+
+function handleRunLog(): void {
+  // Same subcommand surface as cli.ts's extension route (run 0048): the
+  // per-run lifecycle audit document that makes worktree reaping safe.
+  process.exitCode = runLogMain(process.argv.slice(3));
+}
+
 function main(): void {
   const subcommand = process.argv[2];
 
@@ -93,6 +107,12 @@ function main(): void {
       break;
     case 'detect-heads':
       handleDetectHeads();
+      break;
+    case 'gc':
+      handleGc();
+      break;
+    case 'run-log':
+      handleRunLog();
       break;
     case '__adapter':
       handleAdapter();

@@ -241,3 +241,26 @@ bash kit/hydra/tests/run-boundary-tests.sh   # the trust boundary's unit tests (
 bash kit/hydra/tests/recovery-drill.sh       # lead-kill reconstruction (expect 3/3)
 ```
 Run both after any change to `promote.sh`, `lib.sh`, or an adapter.
+
+
+## Worktree retention policy
+
+Worktrees are audit artifacts while a task is in flight — vendor per-commit
+history, session captures, the promote divergence baseline. Once the run's
+lifecycle is captured by `run-log` (docs/hydra-dev-logs/run-<id>.md) and the
+squash commit is on the default branch, the worktree is redundant.
+
+- **At run close** (post-merge): `run-log.sh <run-id>` then
+  `gc.sh --apply --keep-last 3`. Keep-last covers amend/re-entry flows.
+- **gc proves before it deletes**: authoritative result + a recorded
+  integration SHA reachable from the default branch, proof paired to the
+  current branch tip via the same squash-record evidence chain, clean tree
+  beyond the known-junk set, path validated against `git worktree list`,
+  atomic compare-and-delete (`update-ref --no-deref -d <ref> <expected>`).
+  Anything unprovable is skipped with a reason — including worktrees
+  integrated via GitHub PR squash-merges, which git cannot tie back to the
+  candidate SHA; remove those manually after the PR merges.
+- **Every removal is audited**: `worktree_reaped` (or `worktree_reap_partial`
+  with rerun recovery) in the run ledger.
+- **Monthly hygiene**: `git worktree prune` clears stale admin data for
+  directories removed outside gc.

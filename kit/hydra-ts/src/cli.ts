@@ -35,6 +35,7 @@ import { main as createWorktreeMain } from './create-worktree.ts';
 import { main as detectHeadsMain } from './detect-heads.ts';
 import { main as dispatchMain } from './dispatch.ts';
 import { main as freshnessGateMain } from './freshness-gate.ts';
+import { main as gcMain } from './gc.ts';
 import { main as graphImpactMain } from './graph-impact.ts';
 import { main as graphifyBaselineMain } from './graphify-baseline.ts';
 import { main as graphifyInvestigateMain } from './graphify-investigate.ts';
@@ -51,6 +52,7 @@ import { main as recordUsageMain } from './record-usage.ts';
 import { main as reviewDispatchMain } from './review-dispatch.ts';
 import { main as reviewRequiredMain } from './review-required.ts';
 import { main as runInitMain } from './run-init.ts';
+import { main as runLogMain } from './run-log.ts';
 import { main as squashMain } from './squash.ts';
 import { main as statusMain } from './status.ts';
 import { main as verifyMain } from './verify.ts';
@@ -107,9 +109,11 @@ export const routes: Readonly<Record<string, MainFn>> = {
 // exactly 34 subcommands (its 'covers exactly the 34 Stage-1 subcommands'
 // assertion), so newer subcommands register HERE instead: route() consults
 // this table only when the default registry is in play, and usage() lists
-// both. (run 0047: detect-heads.)
+// both. (run 0047: detect-heads; run 0048: gc, run-log.)
 const extensionRoutes: Readonly<Record<string, MainFn>> = {
   'detect-heads': detectHeadsMain,
+  'gc': gcMain,
+  'run-log': runLogMain,
   'help': (args) => {
     void args;
     process.stdout.write(usage());
@@ -142,6 +146,8 @@ const SIGNATURES: Readonly<Record<string, string>> = {
   'detect-heads': '[--json]',
   'dispatch': '<run_id> <task_id> [--background]',
   'freshness-gate': '<run_id> <task_id>',
+  'gc': '[--apply] [--keep-last N] [--default-branch REF] [--json]',
+  'run-log': '<run_id> [--out <dir>] [--json]',
   'graph-impact': '<run_id> <task_id>',
   'graphify-baseline': '<run_id> [source_path] [--backend claude|kimi]',
   'graphify-investigate': '<run_id> <task_id> | <run_id> --files <f>...',
