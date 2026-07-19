@@ -7,8 +7,9 @@
 hardening (Bun single-binary migration, bash lane retirement, head
 auto-detection, GitHub Releases binary distribution, and the `hydra gc` +
 `hydra run-log` worktree-lifecycle pair) shipped across the 0.6.x–0.6.x
-releases. The front of the roadmap is now kit extraction (Wave 3) and the
-hardening daemon. This file is a *delivered changelog + forward plan*, not a
+releases. The front of the roadmap is now the two prioritized
+moat-sharpeners (adversarial verification vault, PR-mode trust check),
+alongside kit extraction (Wave 3) and the hardening daemon. This file is a *delivered changelog + forward plan*, not a
 design proposal — per-wave evidence reports lived in the pre-extraction tree
 (`docs/hydra-reports/`) and were not carried into this standalone repo.
 
@@ -478,6 +479,43 @@ document-then-delete design.
   and `docs/codex-review-loop-detector-fix2.md`.
 
 ## Now: the front of the roadmap
+
+### Moat-sharpeners — **prioritized 2026-07-19 (operator decision)**
+
+A cross-vendor deep-research consultation (run 0050: Codex + OpenCode/GLM
+independent landscape research, Fable 5 consolidation; artifacts in the
+machine-local `docs/dev-notes/roadmap-research-2026-07/`) surveyed the
+mid-2026 multi-agent coding landscape. Conclusion: hydra-swarm's deterministic
+trust boundary is genuinely rare — the highest-leverage roadmap items are the
+ones that *sharpen that moat*, not the ones that chase the market. The
+operator prioritized these two:
+
+1. **Adversarial verification vault** (M) — a verifier-owned area that
+   workers and reviewers cannot read or modify: hidden tests, behavioral
+   contracts, mutation-test recipes, protected test snapshots. Promotion
+   compares visible-test results against held-out results, flags
+   modifications to verification infrastructure, detects suspicious coverage
+   reductions, and classifies excessive mocking. Rationale: documented
+   reward-hacking and over-mocking evidence (NIST, METR) shows agents game
+   visible tests; the agent that writes a patch must not control all the
+   evidence used to approve it. Direct extension of the existing
+   promote-gate pipeline.
+2. **PR-mode trust check** (M) — `hydra pr-check <PR>`: apply the
+   deterministic half of the pipeline (schema → git evidence → ownership
+   audit → sandboxed verify → verdict) to an arbitrary PR and emit a
+   structured GitHub Check with the same evidence chain `promote` already
+   produces. No worker dispatch, no review — the gate as a service.
+   "We don't review your PR — we re-verify it." Exercises ~80% of existing
+   code and ships the #1 differentiator where developers live.
+
+The remaining consolidated backlog (budgets/circuit breakers, steering and
+approval checkpoints, reliability-lab eval harness, tournament dispatch,
+durable resume/replay, scheduler + triggers, OTel + read-only dashboard,
+deferred A2A/MCP adapter lane) is recorded in the research consolidation and
+queues behind these two and the existing Wave 3 / daemon milestones.
+Explicitly rejected as hype: swarm consensus topologies, opaque
+self-learning memory, agent federation, autonomous merge on agent-authored
+tests alone.
 
 ### Wave 3 — packaging & portability (`packaging.md`) — **next**
 
