@@ -30,6 +30,7 @@ import {
   type UsageLimitDetails,
 } from '../src/dispatch.ts';
 import type { HeadsSnapshot } from '../src/detect-heads.ts';
+import { activeCooldown, recordCooldown } from '../src/vendor-cooldown.ts';
 
 function headsSnapshot(
   availability: Partial<Record<string, boolean>> = {},
@@ -2169,11 +2170,16 @@ describe('dispatch Bash parity', () => {
       const f = fixture(runId(), { vendor: 'opencode', timeoutMinutes: 30 });
       const mock = fakeSpawn({ autoExit: false });
       const stderrPath = join(f.sessionsDir, `${f.runId}-task-a-v1.stderr`);
+      const cooldownFile = join(f.runDir, 'vendor-cooldowns.json');
       const clock = new StepClock((_, count) => {
         if (count === 2) appendFileSync(stderrPath, `${INCIDENT_LINE}\n`, 'utf8');
         if (count >= 8) mock.calls[0]?.child.exit(0);
       });
-      const options = injectedOptions(f, mock.spawn, { clock, pollIntervalMs: 60_000 });
+      const options = injectedOptions(f, mock.spawn, {
+        clock,
+        pollIntervalMs: 60_000,
+        env: { HYDRA_COOLDOWN_FILE: cooldownFile },
+      });
       await dispatch(f.runId, 'task-a', options);
 
       const events = ledger(f).map(({ event }) => event);
@@ -2195,6 +2201,49 @@ describe('dispatch Bash parity', () => {
       );
       // The forever-retrying worker tree is killed alongside the ledger event.
       assert.deepEqual(options.killed, [mock.calls[0].child.pid]);
+
+      // The same tick records a machine-global cooldown (run 0055 task 3):
+      // keyed with the detected provider/model, active until the vendor's own
+      // reset time, then expired with no explicit clear step. (Epoch-based
+      // clock reads keep this independent of the host timezone.)
+      const storeEnv = { HYDRA_COOLDOWN_FILE: cooldownFile };
+      const recorded = activeCooldown('opencode', undefined, undefined, { env: storeEnv, now: () => 0 });
+      assert.ok(recorded);
+      const retryAtMs = Date.parse(recorded.retryAt ?? '');
+      assert.ok(Number.isFinite(retryAtMs));
+      assert.ok(recorded.rawError.includes('Usage limit reached for 5 hour'));
+      assert.ok(activeCooldown('opencode', 'zai-coding-plan', 'glm-5.2', { env: storeEnv, now: () => 0 }));
+      assert.ok(activeCooldown('opencode', undefined, undefined, { env: storeEnv, now: () => retryAtMs - 1000 }));
+      assert.equal(
+        activeCooldown('opencode', undefined, undefined, { env: storeEnv, now: () => retryAtMs + 1000 }),
+        null,
+      );
+    });
+
+    it('still terminates via recordUsageLimited when the cooldown write itself fails', async () => {
+      const f = fixture(runId(), { vendor: 'opencode', timeoutMinutes: 30 });
+      // A cooldown path whose parent exists as a FILE makes the write fail.
+      const blocker = join(f.runDir, 'cooldown-blocker');
+      writeFileSync(blocker, 'not a directory', 'utf8');
+      const mock = fakeSpawn({ autoExit: false });
+      const stderrPath = join(f.sessionsDir, `${f.runId}-task-a-v1.stderr`);
+      const clock = new StepClock((_, count) => {
+        if (count === 2) appendFileSync(stderrPath, `${INCIDENT_LINE}\n`, 'utf8');
+        if (count >= 8) mock.calls[0]?.child.exit(0);
+      });
+      const options = injectedOptions(f, mock.spawn, {
+        clock,
+        pollIntervalMs: 60_000,
+        env: { HYDRA_COOLDOWN_FILE: join(blocker, 'vendor-cooldowns.json') },
+      });
+      const { output } = await captureStderr(() => dispatch(f.runId, 'task-a', options));
+
+      assert.deepEqual(ledger(f).map(({ event }) => event), ['task_started', 'agent_usage_limited']);
+      assert.equal(
+        readFileSync(join(f.sessionsDir, `${f.runId}-task-a-v1.exit`), 'utf8'),
+        '125',
+      );
+      assert.match(output, /failed to record vendor cooldown/);
     });
 
     it('is fully disabled when HYDRA_USAGE_DETECTOR=0', async () => {
@@ -2319,6 +2368,114 @@ describe('dispatch head availability gate', () => {
     );
     assert.equal(mock.calls.length, 1, 'a probe failure must not block dispatch');
     assert.match(output, /head availability probe failed/);
+  });
+});
+
+describe('dispatch vendor cooldown gate', () => {
+  before(() => {
+    rmSync(TEST_TMP, { recursive: true, force: true });
+    mkdirSync(TEST_TMP, { recursive: true });
+  });
+
+  after(() => rmSync(TEST_TMP, { recursive: true, force: true }));
+
+  function writeCooldown(f: Fixture, details: Parameters<typeof recordCooldown>[0]): string {
+    const cooldownFile = join(f.runDir, 'vendor-cooldowns.json');
+    recordCooldown(details, { env: { HYDRA_COOLDOWN_FILE: cooldownFile } });
+    return cooldownFile;
+  }
+
+  it('dies before any worker spawns when the assigned vendor has an active cooldown', async () => {
+    const f = fixture(runId(), { vendor: 'opencode' });
+    const retryAt = new Date(Date.now() + 3_600_000).toISOString();
+    // Recorded WITH provider/model detail, exactly as the detector reports it;
+    // the bare-vendor gate lookup must still find it (machine-global credential).
+    const cooldownFile = writeCooldown(f, {
+      vendor: 'opencode',
+      provider: 'zai-coding-plan',
+      model: 'glm-5.2',
+      retryAt,
+      rawError: 'Usage limit reached for 5 hour',
+    });
+    const mock = fakeSpawn();
+    await assert.rejects(
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { cooldownFile })),
+      (error: unknown) => {
+        const message = (error as Error).message;
+        assert.match(message, /assigned vendor 'opencode' is in a usage-limit cooldown/);
+        assert.ok(message.includes(retryAt), 'the message names the vendor reset time');
+        assert.match(message, /re-pin assigned_vendor/);
+        assert.match(message, /never auto-substitute/);
+        return true;
+      },
+    );
+    assert.equal(mock.calls.length, 0, 'the worker must never be spawned');
+    assert.deepEqual(ledger(f).map(({ event }) => event), [], 'the gate fires before task_started');
+  });
+
+  it('reports the reset as unknown when the cooldown has no retryAt (fallback window)', async () => {
+    const f = fixture(runId(), { vendor: 'opencode' });
+    const cooldownFile = writeCooldown(f, { vendor: 'opencode', rawError: 'rate limited' });
+    const mock = fakeSpawn();
+    await assert.rejects(
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { cooldownFile })),
+      (error: unknown) => {
+        const message = (error as Error).message;
+        assert.match(message, /assigned vendor 'opencode' is in a usage-limit cooldown/);
+        assert.match(message, /unknown — try again later/);
+        assert.match(message, /never auto-substitute/);
+        return true;
+      },
+    );
+    assert.equal(mock.calls.length, 0);
+  });
+
+  it('does not block a different vendor than the one in cooldown', async () => {
+    const f = fixture(runId(), { vendor: 'codex' });
+    const cooldownFile = writeCooldown(f, {
+      vendor: 'opencode',
+      retryAt: new Date(Date.now() + 3_600_000).toISOString(),
+      rawError: 'opencode limited',
+    });
+    const mock = fakeSpawn();
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { cooldownFile }));
+    assert.equal(mock.calls.length, 1);
+  });
+
+  it('proceeds once the cooldown has expired', async () => {
+    const f = fixture(runId(), { vendor: 'opencode' });
+    const cooldownFile = writeCooldown(f, {
+      vendor: 'opencode',
+      retryAt: new Date(Date.now() - 60_000).toISOString(),
+      rawError: 'limited earlier',
+    });
+    const mock = fakeSpawn();
+    // The env-override channel resolves the same file as the cooldownFile option.
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+      env: { HYDRA_COOLDOWN_FILE: cooldownFile },
+    }));
+    assert.equal(mock.calls.length, 1);
+  });
+
+  it('is a complete no-op when no cooldown file exists', async () => {
+    const f = fixture(runId(), { vendor: 'opencode' });
+    const mock = fakeSpawn();
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+      cooldownFile: join(f.runDir, 'vendor-cooldowns.json'),
+    }));
+    assert.equal(mock.calls.length, 1);
+  });
+
+  it('fails open with a warning when the cooldown file is corrupt', async () => {
+    const f = fixture(runId(), { vendor: 'opencode' });
+    const cooldownFile = join(f.runDir, 'vendor-cooldowns.json');
+    writeFileSync(cooldownFile, '{ not json', 'utf8');
+    const mock = fakeSpawn();
+    const { output } = await captureStderr(() =>
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { cooldownFile })),
+    );
+    assert.equal(mock.calls.length, 1, 'a corrupt cooldown file must not block dispatch');
+    assert.match(output, /vendor cooldown file is corrupt/);
   });
 });
 

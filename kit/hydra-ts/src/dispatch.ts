@@ -56,6 +56,12 @@ import {
   usageDetectorTick,
   type UsageDetectorState,
 } from './usage-detector.ts';
+import {
+  activeCooldown,
+  recordCooldown,
+  type ActiveCooldown,
+  type CooldownOptions,
+} from './vendor-cooldown.ts';
 import { isCompiledBinary } from './kit-assets.ts';
 import { resolveWorkerNodeBinDir } from './resolve-node.ts';
 
@@ -213,6 +219,8 @@ export interface DispatchOptions {
   probeHeads?: (options?: DetectHeadsOptions) => HeadsSnapshot;
   /** Override path to heads.json for the opencode_model stale-list check (used by tests). */
   headsFile?: string;
+  /** Override path to vendor-cooldowns.json for the usage-limit cooldown gate and recorder (used by tests). */
+  cooldownFile?: string;
 }
 
 export interface DispatchHandle {
@@ -429,6 +437,49 @@ function enforceHeadAvailability(spec: TaskSpec, taskSpecPath: string, options: 
   );
 }
 
+/** Cooldown-store options honoring the DispatchOptions.cooldownFile test override. */
+function cooldownStoreOptions(env: NodeJS.ProcessEnv, cooldownFile: string | undefined): CooldownOptions {
+  return cooldownFile !== undefined
+    ? { env: { ...env, HYDRA_COOLDOWN_FILE: cooldownFile } }
+    : { env };
+}
+
+/**
+ * Vendor usage-limit cooldown gate (run 0055, task 3): when the assigned
+ * vendor's machine-global credential was recently reported exhausted (recorded
+ * by runUsageDetectorTick into vendor-cooldowns.json), die before any worker
+ * spawns — a second dispatch would hit the same still-limited account and hang
+ * again. The message names the vendor and the vendor's reset time (or
+ * "unknown — try again later") and tells the operator to wait or re-pin
+ * assigned_vendor: hydra NEVER auto-substitutes — the same policy
+ * enforceHeadAvailability applies to a missing CLI, applied here to a
+ * usage-limited credential. Fails open on any read error so a broken cooldown
+ * file can never itself wedge dispatch.
+ */
+function enforceVendorCooldown(spec: TaskSpec, options: DispatchOptions): void {
+  let cooldown: ActiveCooldown | null = null;
+  try {
+    cooldown = activeCooldown(
+      spec.vendor,
+      undefined,
+      undefined,
+      cooldownStoreOptions(options.env ?? process.env, options.cooldownFile),
+    );
+  } catch (error) {
+    warn(`vendor cooldown check failed; proceeding with dispatch: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  if (cooldown === null) return;
+
+  const rawError = cooldown.rawError.replace(/\s+/g, ' ').slice(0, 200);
+  die(
+    `assigned vendor '${spec.vendor}' is in a usage-limit cooldown`
+      + `${rawError === '' ? '' : ` (vendor reported: ${rawError})`}. `
+      + `Usage-limit reset: ${cooldown.retryAt ?? 'unknown — try again later'}. `
+      + `Wait for the vendor's usage limit to reset, or re-pin assigned_vendor in the task spec and re-dispatch — hydra never auto-substitutes.`,
+  );
+}
+
 /**
  * Task-spec opencode_model pin (run 0047): dispatch reads the pin and the
  * opencode adapter receives it through the spec file itself (adapter-opencode
@@ -540,6 +591,8 @@ interface WorkerContext {
   loopDetectorState: LoopDetectorState;
   usageDetectorState: UsageDetectorState;
   execFileSync: ExecFileSyncLike;
+  /** Override path to vendor-cooldowns.json for the usage-limit cooldown recorder (used by tests). */
+  cooldownFile?: string;
 }
 
 function releaseSlot(slotsDir: string, agentRunId: string): void {
@@ -876,6 +929,16 @@ function runUsageDetectorTick(ctx: WorkerContext, recorder: ExitRecorder): boole
     });
     if (match) {
       recorder.recordUsageLimited(match);
+      // Machine-global cooldown side-channel (run 0055, task 3): record the
+      // exhaustion so a later dispatch to this vendor refuses at the
+      // enforceVendorCooldown gate instead of hanging again. Best-effort —
+      // recordUsageLimited above is the correctness-critical write; a
+      // cooldown-write failure must never affect it.
+      try {
+        recordCooldown(match, cooldownStoreOptions(ctx.env, ctx.cooldownFile));
+      } catch (error) {
+        warn(`failed to record vendor cooldown: ${error instanceof Error ? error.message : String(error)}`);
+      }
       return true;
     }
     return false;
@@ -1436,6 +1499,7 @@ export async function dispatch(
   const spec = readTaskSpec(taskSpecPath);
   const repo = discoverRepoRoot(options, cwd);
   enforceHeadAvailability(spec, taskSpecPath, options);
+  enforceVendorCooldown(spec, options);
   warnOnStaleOpencodeModelPin(spec, taskSpecPath, options);
   const env = options.env ?? process.env;
   // Strip BUN_BE_BUN in place so the worker spawn (runWorkerPlain passes
@@ -1589,6 +1653,7 @@ export async function dispatch(
     loopDetectorState: createLoopDetectorState(),
     usageDetectorState: createUsageDetectorState(),
     execFileSync: commandRunner,
+    cooldownFile: options.cooldownFile,
   };
   const recorder = makeExitRecorder(ctx);
   recorder.register(options.signal, options.noSignals);
