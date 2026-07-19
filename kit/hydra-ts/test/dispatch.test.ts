@@ -974,6 +974,102 @@ describe('dispatch Bash parity', () => {
     assert.equal(unsupportedMock.calls[0].args.at(-1), 'session-ts');
   });
 
+  it('emits a distinct loud warning when resume is requested but no prior session exists (issue #20)', async () => {
+    // Run-0051 scenario variant: an operator amends a task with
+    // HYDRA_DELIVERY=resume but the prior session file is missing entirely.
+    // The single generic warn() line was easy to miss — the new warning must
+    // call out plainly that NO PRIOR SESSION was found AND that a full cold
+    // restart (not a quick continuation) is about to run.
+    const f = fixture(runId(), { vendor: 'kimi' });
+    // Deliberately do NOT write any sessions/<run>-task-a-v*.json —
+    // findPriorSession returns '' and the no-prior-session branch fires.
+    const mock = fakeSpawn();
+    const { output } = await captureStderr(() =>
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+        env: { HYDRA_DELIVERY: 'resume' },
+      })),
+    );
+    // Behavior unchanged: cold restart (verb=start), priorSession='' forwarded.
+    assert.equal(mock.calls[0].args[2], 'start');
+    assert.equal(mock.calls[0].args.at(-1), '');
+    // Message content: distinct, loud, specific.
+    assert.match(output, /HYDRA_DELIVERY=resume/i);
+    assert.match(output, /NO PRIOR SESSION/i);
+    assert.match(output, /kimi/i);
+    assert.match(output, /FULL COLD RESTART/i);
+    assert.match(output, /NOT a quick incremental continuation/);
+    assert.match(output, /timeout_minutes=45/);
+  });
+
+  it('emits a vendor-named loud warning when resume is requested with a session but the adapter lacks resume support (issue #20)', async () => {
+    // Run-0051 scenario: an operator amends a ~40-minute kimi task with
+    // delivery=resume; a session file exists, but adapter-kimi has no resume
+    // verb. The cold restart must be loud and specific about WHY (vendor
+    // adapter lacks resume) and WHAT happens next (full re-run).
+    const f = fixture(runId(), { vendor: 'kimi' });
+    writeFileSync(
+      join(f.sessionsDir, `${f.runId}-task-a-v1.json`),
+      JSON.stringify({ session_id: 'session-kimi' }),
+    );
+    const mock = fakeSpawn();
+    const { output } = await captureStderr(() =>
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+        env: { HYDRA_DELIVERY: 'resume' },
+      })),
+    );
+    // Behavior unchanged: cold restart (verb=start), priorSession forwarded.
+    assert.equal(mock.calls[0].args[2], 'start');
+    assert.equal(mock.calls[0].args.at(-1), 'session-kimi');
+    // Message content: explicitly names the vendor and the cold-restart cost.
+    assert.match(output, /HYDRA_DELIVERY=resume/i);
+    assert.match(output, /kimi ADAPTER HAS NO REAL RESUME SUPPORT/);
+    assert.match(output, /FULL COLD RESTART/);
+    assert.match(output, /NOT a quick incremental continuation/);
+    assert.match(output, /timeout_minutes=45/);
+  });
+
+  it('stays silent about cold-restart fallback when delivery is not resume (issue #20)', async () => {
+    // First-dispatch case: HYDRA_DELIVERY is unset, so determineDelivery
+    // short-circuits and the cold-restart warning must NOT fire (this is the
+    // normal/expected path on a task's first dispatch).
+    const f = fixture(runId(), { vendor: 'kimi' });
+    const mock = fakeSpawn();
+    const { output } = await captureStderr(() =>
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+        env: {},
+      })),
+    );
+    assert.equal(mock.calls[0].args[2], 'start');
+    assert.doesNotMatch(output, /FULL COLD RESTART/);
+    assert.doesNotMatch(output, /NO PRIOR SESSION/);
+    assert.doesNotMatch(output, /NO REAL RESUME SUPPORT/);
+  });
+
+  it('stays silent about cold-restart fallback when resume succeeds (issue #20)', async () => {
+    // adapter-claude supports resume; with a prior session the resume verb is
+    // selected and the cold-restart warning must NOT fire.
+    const f = fixture(runId(), {
+      vendor: 'claude',
+      tsAdapterContent: 'export function start(): void {}\nexport function resume(): void {}\n',
+    });
+    writeFileSync(
+      join(f.sessionsDir, `${f.runId}-task-a-v1.json`),
+      JSON.stringify({ session_id: 'session-claude' }),
+    );
+    const mock = fakeSpawn();
+    const { output } = await captureStderr(() =>
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+        env: { HYDRA_DELIVERY: 'resume' },
+      })),
+    );
+    assert.equal(mock.calls[0].args[2], 'resume');
+    assert.equal(mock.calls[0].args.at(-1), 'session-claude');
+    assert.doesNotMatch(output, /FULL COLD RESTART/);
+    assert.doesNotMatch(output, /NO PRIOR SESSION/);
+    assert.doesNotMatch(output, /NO REAL RESUME SUPPORT/);
+  });
+
+
   it('keeps non-opencode vendors hosted in an injected herdr pane', async () => {
     const f = fixture(runId());
     const herdr = new FakeHerdr();

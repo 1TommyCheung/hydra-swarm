@@ -672,6 +672,7 @@ function determineDelivery(
   sessionsDir: string,
   adapter: { vendor: string; path: string; runtime: AdapterRuntime },
   env: NodeJS.ProcessEnv,
+  timeoutMinutes: number,
 ): { verb: 'start' | 'resume'; priorSession: string } {
   if (env.HYDRA_DELIVERY !== 'resume') return { verb: 'start', priorSession: '' };
   const priorSession = findPriorSession(runId, taskId, sessionsDir);
@@ -693,7 +694,26 @@ function determineDelivery(
     }
   }
   if (priorSession && supportsResume) return { verb: 'resume', priorSession };
-  warn('resume requested but unavailable (no session / adapter lacks resume) — cold restart');
+  // Issue #20 (run 0052): when an operator amends a task with delivery=resume
+  // but the cold-restart fallback fires, the SINGLE generic warn() line below
+  // used to be easy to miss in a scrolling pane, and gave no indication of the
+  // cost about to be incurred. The two distinct reasons for the fallback now
+  // get distinct, loud, specific messages — both make plain that a FULL re-run
+  // (not a quick incremental continuation) is about to start in the same
+  // worktree. The dispatch BEHAVIOR (verb='start', priorSession preserved) is
+  // unchanged; this is a message-clarity fix only.
+  const timeoutHint = ` A FULL COLD RESTART of the task will now run from scratch in the same worktree — this is NOT a quick incremental continuation or verification pass; expect time and cost comparable to the original dispatch (task timeout_minutes=${timeoutMinutes}).`;
+  if (!priorSession) {
+    warn(
+      `HYDRA_DELIVERY=resume was requested for ${adapter.vendor} task '${taskId}', but NO PRIOR SESSION was found for this task under ${sessionsDir} (the session file may be missing, e.g. the prior run was cleaned up or never wrote one).`
+      + timeoutHint,
+    );
+  } else {
+    warn(
+      `HYDRA_DELIVERY=resume was requested for ${adapter.vendor} task '${taskId}', but the ${adapter.vendor} ADAPTER HAS NO REAL RESUME SUPPORT — the prior session was found but this vendor's adapter cannot consume it.`
+      + timeoutHint,
+    );
+  }
   return { verb: 'start', priorSession };
 }
 
@@ -1387,7 +1407,7 @@ export async function dispatch(
   mkdirSync(inbox, { recursive: true });
   mkdirSync(sessionsDir, { recursive: true });
 
-  const delivery = determineDelivery(runId, taskId, sessionsDir, { vendor: spec.vendor, path: adapterPath, runtime: adapterRuntime }, env);
+  const delivery = determineDelivery(runId, taskId, sessionsDir, { vendor: spec.vendor, path: adapterPath, runtime: adapterRuntime }, env, spec.timeoutMinutes);
   const dispatchInstanceId = randomBytes(8).toString('hex');
 
   const ledgerPath = join(runPath, 'authoritative', 'ledger', 'events.jsonl');
