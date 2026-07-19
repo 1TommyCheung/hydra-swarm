@@ -135,8 +135,8 @@ done
 if [ -n "$resolved_bin" ]; then
   bin_version="$(env -u BUN_BE_BUN "$resolved_bin" version --json 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
   if [ -z "$bin_version" ]; then
-    warn "compiled binary" "$resolved_bin has no version subcommand (pre-0.7.1 build) — rebuild or re-fetch to enable drift detection"
-    json_emit "compiled binary" "warn" "no version subcommand (pre-0.7.1 build): $resolved_bin" "auto" '{"fetch":"bash '"$SCRIPT_DIR"'/../hydra/scripts/fetch-bin.sh","rebuild":"cd '"$SCRIPT_DIR"'/../hydra-ts && npm run build:bin"}'
+    warn "compiled binary" "$resolved_bin has no version subcommand (pre-0.6.5 build) — rebuild or re-fetch to enable drift detection"
+    json_emit "compiled binary" "warn" "no version subcommand (pre-0.6.5 build): $resolved_bin" "auto" '{"fetch":"bash '"$SCRIPT_DIR"'/../hydra/scripts/fetch-bin.sh","rebuild":"cd '"$SCRIPT_DIR"'/../hydra-ts && npm run build:bin"}'
   elif [ -n "$plugin_version" ] && [ "$bin_version" != "$plugin_version" ]; then
     warn "compiled binary" "version drift: binary reports $bin_version, plugin is $plugin_version ($resolved_bin) — stale builds run old harness code"
     json_emit "compiled binary" "warn" "drift: binary $bin_version vs plugin $plugin_version" "auto" '{"fetch":"bash '"$SCRIPT_DIR"'/../hydra/scripts/fetch-bin.sh","rebuild":"cd '"$SCRIPT_DIR"'/../hydra-ts && npm run build:bin"}'

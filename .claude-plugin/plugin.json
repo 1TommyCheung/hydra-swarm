@@ -1,6 +1,6 @@
 {
   "name": "hydra-swarm",
-  "version": "0.8.1",
+  "version": "0.6.8",
   "description": "Multi-agent (Claude, Codex, OpenCode/GLM, Kimi) local dev harness: worktree-isolated dispatch, trust-boundary promotion, cross-vendor review, evidence-gated integration.",
   "license": "MIT",
   "author": {

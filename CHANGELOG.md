@@ -5,7 +5,12 @@ All notable changes to Hydra-Swarm. The format follows
 `.claude-plugin/plugin.json`. Deeper narrative history (design rationale,
 run-by-run evidence) lives in `docs/roadmap.md`.
 
-## [0.8.1] — 2026-07-19
+> **Renumbering note (2026-07-19):** the releases originally published as
+> 0.7.0/0.7.1/0.7.2/0.8.0/0.8.1 were re-aligned to 0.6.4–0.6.8 — the pace of
+> minor bumps overstated the changes. Content is identical; the superseded
+> tags/releases were retired and v0.6.8 republished.
+
+## [0.6.8] — 2026-07-19
 
 ### Changed
 - **Docs split: official vs dev notes.** 49 machine-generated development
@@ -15,7 +20,7 @@ run-by-run evidence) lives in `docs/roadmap.md`.
   remain recoverable from git history. Official docs, run audit logs
   (`docs/hydra-dev-logs/`), and operator guidance stay tracked.
 
-## [0.8.0] — 2026-07-19
+## [0.6.7] — 2026-07-19
 
 Run 0048: worktree lifecycle management — closes the "worktrees grow forever"
 gap (issue #12) with a document-then-delete design. 11 Kimi worker attempts,
@@ -48,7 +53,7 @@ closed across both features before acceptance.
   `run-log` then `gc --apply --keep-last 3`; monthly `git worktree prune`;
   PR-flow worktrees (unprovable by design) removed manually post-merge.
 
-## [0.7.2] — 2026-07-17
+## [0.6.6] — 2026-07-17
 
 ### Added
 - **Binary distribution via GitHub Releases.** A `v*` tag triggers
@@ -67,10 +72,10 @@ closed across both features before acceptance.
   version, so a stale binary is structurally invisible rather than merely
   checked for.
 - **Doctor: compiled-binary check** — reports the resolved binary and warns
-  on version drift or a pre-0.7.1 build (no `version` subcommand), with
+  on version drift or a pre-0.6.5 build (no `version` subcommand), with
   `fetch`/`rebuild` auto-fix commands.
 
-## [0.7.1] — 2026-07-17
+## [0.6.5] — 2026-07-17
 
 ### Added
 - **`version` subcommand** (`hydra version [--json]`): reports the plugin
@@ -82,10 +87,10 @@ closed across both features before acceptance.
   now shows its argument signature (`hydra help`, or any unknown subcommand).
 - **HTML architecture diagram** at `docs/architecture-diagram.html` —
   self-contained, browser-openable pipeline diagram (lead → harness → four
-  worker heads → trust boundary → convergence → human), with the v0.7.0
+  worker heads → trust boundary → convergence → human), with the v0.6.4
   head-detection and worker-environment features annotated.
 
-## [0.7.0] — 2026-07-17
+## [0.6.4] — 2026-07-17
 
 Head auto-detection, worker environment hardening, and a swarm-reviewed fix
 pass over every open PR (run 0047: 4 Kimi workers + 3 Sonnet subagents).

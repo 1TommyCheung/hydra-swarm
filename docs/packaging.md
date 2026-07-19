@@ -1,7 +1,7 @@
 # Hydra-Swarm — Packaging and Multi-Repo Deployment (Wave 3)
 
 > **Status: `hydra doctor` preflight and compiled-binary distribution via
-> GitHub Releases are built and live (v0.7.2+); kit extraction / `hydra-setup`
+> GitHub Releases are built and live (v0.6.6+); kit extraction / `hydra-setup`
 > install / upgrade / global-ledger machinery is still design-only.** Wave 2
 > is operational; the binary release mechanism (below) is the first real
 > packaging artifact. The rest of this doc remains the plan for kit-style
@@ -11,7 +11,7 @@
 
 Applies only after Wave 2 exit criteria pass on the first repository. Waves 0–2 are the de-risking sequence for building Hydra-Swarm **once**; subsequent repositories install the proven kit at full capability.
 
-## 0. Binary distribution (live, v0.7.2+)
+## 0. Binary distribution (live, v0.6.6+)
 
 The compiled binary is the operational default runtime, and it ships via
 GitHub Releases — not committed to git.
@@ -33,7 +33,7 @@ GitHub Releases — not committed to git.
   own plugin version, so a stale binary is structurally invisible rather than
   merely checked for.
 - **Doctor** reports the resolved binary and warns on version drift or a
-  pre-0.7.1 build (no `version` subcommand), with `fetch`/`rebuild` auto-fix
+  pre-0.6.5 build (no `version` subcommand), with `fetch`/`rebuild` auto-fix
   commands.
 
 This closes the "how does a fresh checkout get a binary" gap that was still

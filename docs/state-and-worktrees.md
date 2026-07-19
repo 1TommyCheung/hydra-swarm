@@ -186,7 +186,7 @@ here).
   be granted it as a writable root (resolved via `pwd -P`, since `sandbox-exec`
   and `git worktree` paths differ by the `/var`→`/private/var` symlink) or
   `git commit` fails in-sandbox.
-- **Retention — gc + run-log landed (v0.8.0).** The "still nothing pruned,
+- **Retention — gc + run-log landed (v0.6.7).** The "still nothing pruned,
   15 runs retained" gap noted in the original audit is closed: `run-log.sh`
   renders the per-run audit document to `docs/hydra-dev-logs/run-<id>.md`
   (document, then delete) and `gc.sh --apply --keep-last 3` reaps
