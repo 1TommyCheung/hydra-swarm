@@ -15,6 +15,56 @@ run-by-run evidence) lives in `docs/roadmap.md`.
 > minor bumps overstated the changes. Content is identical; the superseded
 > tags/releases were retired and v0.6.8 republished.
 
+## [0.6.8.1] — 2026-07-19
+
+Fixes to existing herdr-pane, dispatch, and amend-task functionality — no
+new features. Runs 0051–0055, closing issues #18–#23.
+
+### Fixed
+- **herdr pane live feedback for all vendors** (#18): review-dispatch's
+  live progress tail no longer skips OpenCode; Claude gets a heartbeat
+  line when it can't stream, so no dispatch mode leaves a blank pane.
+  Agent panes are shrunk (`HYDRA_HERDR_PANE_RATIO`, default 0.25) so the
+  lead console keeps the majority of the terminal.
+- **herdr panes stay pinned to their originating workspace** (#19): the
+  lead's workspace is captured once per run and reused on every later
+  pane spawn instead of re-querying "whatever is focused right now" —
+  switching macOS Spaces mid-run no longer redirects where new panes
+  land. Capture is atomic across concurrent dispatches (exclusive-create
+  lock file) so a race can't silently overwrite the run's first-recorded
+  workspace.
+- **louder resume-fallback warning** (#20 tier 1): when `delivery=resume`
+  falls back to a cold restart, the warning now names the vendor and
+  states plainly that a full re-run (not a quick continuation) is about
+  to happen, instead of one easy-to-miss generic line.
+- **real Kimi session resume** (#20 tier 2): `adapter-kimi.ts` now
+  resumes via the Kimi CLI's actual `-S, --session <id>` flag instead of
+  always cold-restarting; `COMPILED_ADAPTERS.kimi.resume` flipped to
+  `true`. Codex/OpenCode real resume remains unimplemented.
+- **`amend-task` preserves amendment detail** (#21): a hand-edited
+  `amendment_reason` is no longer silently discarded when a shorter CLI
+  reason is supplied; the CLI also accepts `@file` for reason and (new)
+  `amendment_check` arguments, so multi-line revise instructions don't
+  depend on shell-quoting.
+- **amended tasks get a machine-checkable completion gate** (#23): an
+  optional `amendment_check` list of shell assertions is rendered as a
+  mandatory verification block in the worker prompt, so a revise round
+  can't be satisfied by "the pre-existing tests still pass" alone.
+  `amendment_check` YAML list items are safely quoted/escaped on write.
+
+### Added
+- **Vendor usage-limit detection** (new; motivated by a live OpenCode/GLM
+  provider outage that hung two dispatches for the full 50-minute
+  timeout with no error surfaced): a new `agent_usage_limited` terminal
+  ledger state, a detector for OpenCode's `--print-logs` diagnostic
+  stream (hard-gated on the vendor SDK's own `AI_APICallError` marker,
+  never on assistant-authored text), and a machine-global cooldown
+  registry consulted before dispatch — a vendor known to be usage-limited
+  refuses to even start a second dispatch, mirroring the existing
+  "hydra never auto-substitutes" policy (no auto-reroute, no auto-retry
+  scheduling — dropped by design). Claude/Codex/Kimi detectors remain a
+  follow-up.
+
 ## [0.6.8] — 2026-07-19
 
 ### Changed
