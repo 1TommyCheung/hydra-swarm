@@ -15,12 +15,13 @@ Nothing in this document is implemented in Wave 0.
 
 **The two graph tools are complementary, not redundant** (see §5 for how the
 harness uses both): GitNexus gives *structure* (AST symbols, call chains,
-blast-radius) but — as-built — only parses **JavaScript** into symbols; the bash
-harness and the default TypeScript harness are file-level-only there. Graphify
-gives *intent* (semantic edges over code **and** docs, including TypeScript,
-bash, and markdown) with an EXTRACTED/INFERRED/AMBIGUOUS confidence audit trail.
-GitNexus answers "what does this change structurally touch"; Graphify answers
-"does this change still match approved design intent".
+blast-radius) but — as-built — only parses **JavaScript** into symbols; the
+TypeScript source (which the compiled binary is built from) and the shell
+launchers are file-level-only there. Graphify gives *intent* (semantic edges
+over code **and** docs, including TypeScript, bash, and markdown) with an
+EXTRACTED/INFERRED/AMBIGUOUS confidence audit trail. GitNexus answers "what
+does this change structurally touch"; Graphify answers "does this change
+still match approved design intent".
 
 ## 2. GitNexus (Wave 1)
 
@@ -109,8 +110,8 @@ Two harness scripts make GitNexus and Graphify a single code-intelligence layer.
 ### 5.1 The standing repo graph — `graphify-repo.sh`
 `graphify-baseline.sh` is run-scoped and ephemeral (one candidate's
 investigation). `graphify-repo.sh` maintains a **persistent** semantic graph over
-the whole repository — code **and** docs, including the TypeScript and frozen
-Bash harnesses plus markdown GitNexus can't parse into symbols. Stored in
+the whole repository — code **and** docs, including the TypeScript source
+and shell launchers plus markdown GitNexus can't parse into symbols. Stored in
 `graphify-out/` (gitignored — the tool's default location, so queries need no
 flags). Verbs: `build` (full semantic extraction; LLM-backed, timeout-guarded),
 `update` (AST-only, cheap), `query`, `status` (freshness vs HEAD). This is the
@@ -140,8 +141,8 @@ investigation requiring source/diff/test confirmation, INFERRED is a question.
 
 ### 5.4 Coverage reality
 `gitnexus analyze` indexes all repo files but parses only **JS** into symbols
-(call-graph/impact is JS-only), so both the default TypeScript harness and the
-frozen Bash fallback remain file-level there. Graphify's semantic pass covers
+(call-graph/impact is JS-only), so both the TypeScript source and the shell
+launchers remain file-level there. Graphify's semantic pass covers
 TypeScript + bash + markdown, so the standing graph is where harness- and doc-
 level reasoning lives. The Graphify build is LLM-backed and endpoint-gated — if
 the semantic backend is unavailable, the standing graph is simply absent and

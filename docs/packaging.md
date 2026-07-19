@@ -1,13 +1,44 @@
 # Hydra-Swarm — Packaging and Multi-Repo Deployment (Wave 3)
 
-> **Status: preflight tooling (`hydra doctor`) is built and tested; kit
-> extraction / install / upgrade machinery is still design-only.** Wave 2 is
-> operational (2026-07-13); the rest of this doc remains the plan for the *next*
-> wave. Scope and the preflight matrix below are informed by a portability audit
-> of what actually pins Hydra to the first machine (roadmap → Wave 3).
-> `last_verified: 2026-07-13`.
+> **Status: `hydra doctor` preflight and compiled-binary distribution via
+> GitHub Releases are built and live (v0.7.2+); kit extraction / `hydra-setup`
+> install / upgrade / global-ledger machinery is still design-only.** Wave 2
+> is operational; the binary release mechanism (below) is the first real
+> packaging artifact. The rest of this doc remains the plan for kit-style
+> multi-repo deployment. Scope and the preflight matrix are informed by a
+> portability audit of what actually pins Hydra to the first machine
+> (roadmap → Wave 3). `last_verified: 2026-07-19`.
 
 Applies only after Wave 2 exit criteria pass on the first repository. Waves 0–2 are the de-risking sequence for building Hydra-Swarm **once**; subsequent repositories install the proven kit at full capability.
+
+## 0. Binary distribution (live, v0.7.2+)
+
+The compiled binary is the operational default runtime, and it ships via
+GitHub Releases — not committed to git.
+
+- **Release pipeline** (`.github/workflows/release.yml`, triggered by a `v*`
+  tag): a 4-target build matrix compiles every release artifact
+  (darwin-arm64/x64, linux-x64/arm64 — glibc; Windows via WSL) with pinned
+  Bun 1.3.14, blackbox-verifies the runner-native artifact, asserts
+  `tag == plugin.json version == binary self-report`, and uploads binaries +
+  provenance manifests + SHA256SUMS.
+- **`fetch-bin.sh`** downloads the release binary matching THIS plugin's
+  version into a version-keyed cache
+  (`~/.local/share/hydra-bin/v<version>/hydra-cli-<target>`), gated on:
+  manifest SHA-256 match, binary self-reported version == plugin version, and
+  target-triple match. Any gate fails → nothing installed, the `ts` lane is
+  unaffected.
+- **Resolution ladder** (`hydra_resolve_bin`): `HYDRA_BIN` → checkout `dist/`
+  → version-keyed cache → `ts` fallback. The cache is keyed by the checkout's
+  own plugin version, so a stale binary is structurally invisible rather than
+  merely checked for.
+- **Doctor** reports the resolved binary and warns on version drift or a
+  pre-0.7.1 build (no `version` subcommand), with `fetch`/`rebuild` auto-fix
+  commands.
+
+This closes the "how does a fresh checkout get a binary" gap that was still
+future work when this doc was first written. The kit-extraction / multi-repo
+machinery in §1 onward remains design-only.
 
 ## 1. The kit
 

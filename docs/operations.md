@@ -24,6 +24,9 @@ bash kit/hydra/scripts/review-dispatch.sh 0042 <rev> <vendor> <prompt-file>   # 
 bash kit/hydra/scripts/record-review.sh 0042 <task> <verdict.json>            # record accept/revise/reject
 bash kit/hydra/scripts/squash.sh 0042 <task>                   # accepted candidates only
 bash kit/hydra/scripts/integrate.sh 0042 <task-in-dep-order>...# cherry-pick + smoke + combined gate
+# ── run close (after human merge): document, then reap ──
+bash kit/hydra/scripts/run-log.sh 0042                           # -> docs/hydra-dev-logs/run-0042.md
+bash kit/hydra/scripts/gc.sh --apply --keep-last 3              # reap ledger-proven-integrated worktrees+branches
 ```
 
 Only `accept` candidates enter `squash`/`integrate`. `revise`/`reject` return to
@@ -78,6 +81,15 @@ explicit-`bin` paths. Rebuild from source with
 `cd kit/hydra-ts && npm run build:bin` (requires `bun`) — that output
 (`kit/hydra-ts/dist/hydra-cli`) is also the implicit default's fallback
 lookup location when `HYDRA_BIN` is unset.
+
+To get a verified release binary without building, run
+`bash kit/hydra/scripts/fetch-bin.sh`: it downloads the binary matching this
+plugin's version from GitHub Releases (darwin-arm64/x64, linux-x64/arm64;
+Windows via WSL), verifies the manifest SHA-256, the binary's self-reported
+version, and the target-triple, and installs it into the version-keyed cache
+at `~/.local/share/hydra-bin/v<version>/`. Any gate failing leaves nothing
+installed (the `ts` lane is unaffected). `hydra_resolve_bin` picks this cache
+up automatically after the fact.
 
 A lower-level `HYDRA_ADAPTER_RUNTIME` override (`ts` or `compiled`) takes
 precedence inside TypeScript dispatch for the adapter only; leave it unset for

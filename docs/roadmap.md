@@ -3,11 +3,14 @@
 > **Dev notes:** vendor design/review/spike artifacts referenced below (`bun-migration-*`, `*-design-*`, `*-review-*`, `license-research-*`, `doc-audit-*`) live in the machine-local, gitignored `docs/dev-notes/` — production users do not need them; recover from git history pre-split if absent.
 
 
-**Status:** Wave 2 operational since 2026-07-13. Waves 0–2 delivered; the front of
-the roadmap is now packaging (Wave 3) and the hardening daemon. This file is a
-*delivered changelog + forward plan*, not a design proposal — per-wave evidence
-reports lived in the pre-extraction tree (`docs/hydra-reports/`) and were not
-carried into this standalone repo.
+**Status:** v0.8.1 (2026-07-19). Waves 0–2 delivered; the post-Wave-2
+hardening (Bun single-binary migration, bash lane retirement, head
+auto-detection, GitHub Releases binary distribution, and the `hydra gc` +
+`hydra run-log` worktree-lifecycle pair) shipped across the 0.6.x–0.8.x
+releases. The front of the roadmap is now kit extraction (Wave 3) and the
+hardening daemon. This file is a *delivered changelog + forward plan*, not a
+design proposal — per-wave evidence reports lived in the pre-extraction tree
+(`docs/hydra-reports/`) and were not carried into this standalone repo.
 
 ## Delivered (Waves 0–2)
 
@@ -309,6 +312,74 @@ Dates are the day the wave's exit criteria were met in this repo.
   and the ownership audit flagged the symlink escaping the worktree. Debris
   removed, re-promoted clean; committed content was always in-scope.
 
+### Version / help subcommands + HTML diagram (v0.7.1) · 2026-07-17
+
+- **`hydra version [--json]`** — reports the plugin version and runtime lane
+  (`compiled`/`ts`). The compiled binary embeds the manifest at build time,
+  so it reports the version it was *built* from — previously a binary's
+  version could only be inferred from mtime or feature probes.
+- **`hydra help`** and a parameterized usage listing: every subcommand now
+  shows its argument signature.
+- **HTML architecture diagram** at `docs/architecture-diagram.html` —
+  self-contained, browser-openable pipeline diagram.
+
+### Binary distribution via GitHub Releases (v0.7.2) · 2026-07-17
+
+- **Release pipeline.** A `v*` tag triggers
+  `.github/workflows/release.yml`: a 4-target build matrix compiles all four
+  targets (darwin-arm64/x64, linux-x64/arm64 — glibc; Windows via WSL) with
+  pinned Bun 1.3.14, blackbox-verifies the runner-native artifact, asserts
+  `tag == plugin.json version == binary self-report`, and uploads binaries +
+  provenance manifests + SHA256SUMS. Binaries are never committed to git.
+- **`fetch-bin.sh`** downloads the release binary matching THIS plugin's
+  version into a version-keyed cache
+  (`~/.local/share/hydra-bin/v<version>/hydra-cli-<target>`), gated on
+  manifest sha256 match, binary self-reported version == plugin version, and
+  target-triple match. Any gate fails → nothing installed, `ts` lane
+  unaffected.
+- **`hydra_resolve_bin` cache candidate**: `HYDRA_BIN` → checkout `dist/` →
+  version-keyed cache → ts fallback. Keyed by the checkout's own plugin
+  version, so a stale binary is structurally invisible.
+- **Doctor: compiled-binary check** — reports the resolved binary and warns
+  on version drift or a pre-0.7.1 build, with `fetch`/`rebuild` auto-fix
+  commands.
+
+### Worktree lifecycle — gc + run-log (v0.8.0) · 2026-07-19
+
+Run 0048: closes the "worktrees grow forever" gap (issue #12) with a
+document-then-delete design.
+
+- **`hydra gc`** (#12): reaps worktrees+branches ONLY when the ledger proves
+  integration — authoritative result + recorded integration SHA reachable
+  from the default branch, proof paired to the current tip through the same
+  squash-record evidence chain (no evidence borrowing, no cross-generation
+  proof). Dry-run by default; `--apply` required; `--keep-last N`; `--json`.
+  Deletion safety: NUL-framed git status parsing, candidate paths validated
+  against `git worktree list --porcelain`, default-branch discovery fails
+  closed, revalidation before each destructive op, atomic compare-and-delete
+  via `git update-ref --no-deref -d <ref> <expected-sha>`,
+  `worktree_reaped`/`worktree_reap_partial` ledger events with rerun
+  recovery.
+- **`hydra run-log`**: renders a per-run lifecycle audit document to
+  `docs/hydra-dev-logs/run-<id>.md` from the ledger + authoritative tree
+  (run header, per-task lifecycle, full event timeline, usage, ledger-anomaly
+  section). Injection-safe: strict id validation, canonicalized output paths,
+  symlink refusal, markdown/control-byte neutralization. This is what makes
+  aggressive gc safe: document, then delete.
+- **Retention policy** (SKILL.md step 10 + `operations.md`): at run close,
+  `run-log` then `gc --apply --keep-last 3`; monthly `git worktree prune`;
+  PR-flow worktrees (unprovable by design) removed manually post-merge.
+  Resolves open decision #7.
+
+### Docs split — official vs dev notes (v0.8.1) · 2026-07-19
+
+- 49 machine-generated development artifacts (bun-migration stages, vendor
+  design/review/research records) moved out of the repo into the
+  machine-local, gitignored `docs/dev-notes/`. Production users do not need
+  them; pre-split copies remain recoverable from git history. Official docs,
+  run audit logs (`docs/hydra-dev-logs/`), and operator guidance stay
+  tracked.
+
 ### Wave 3 preflight tooling — first real artifact · 2026-07-13
 
 - **`srt` replaces `sandbox-exec` for Kimi sandboxing** (run 0041, commit
@@ -352,8 +423,11 @@ Dates are the day the wave's exit criteria were met in this repo.
 6. **Minimum integration gate commands per project** — *still open*; Wave 0–2
    projects set them per run via `HYDRA_VERIFY_POLICY` / the task `verification:`
    list. A tracked per-project floor is a Wave 3 packaging item.
-7. **Retention of external run state / worktrees** — *still open*; nothing is
-   auto-pruned yet (15 runs retained). Revisit at packaging.
+7. **Retention of external run state / worktrees** — **RESOLVED (v0.8.0):**
+   `hydra gc` + `hydra run-log` reap ledger-proven-integrated worktrees at
+   run close (document, then delete; `--keep-last 3`). PR-flow worktrees are
+   removed manually post-merge. See `operations.md` § Worktree retention
+   policy.
 8. **Local-branch-only vs PR preparation** — *still open, local-branch-only
    holds.* All integration branches stay local; merge/push is human-authorized.
 9. **Daemon trigger** — *still open.* The protocol boundary held through Wave 2;
@@ -462,8 +536,9 @@ policy) are still design-only. Scope is informed by a portability audit
 6. **Per-project verification floor** — resolves open decision #6: a tracked
    minimum gate the kit ships as `verification.yaml.template` and the install
    self-check enforces.
-7. **Retention policy** — resolves open decision #7: prune/keep rules for external
-   run state + worktrees (nothing is pruned today; 15 runs retained).
+7. **Retention policy** — **delivered (v0.8.0):** `hydra gc` + `hydra run-log`
+   reap ledger-proven-integrated worktrees at run close (resolves open
+   decision #7). Kit-level policy templates remain a Wave 3 item.
 
 **Wave 3 exit criteria:**
 1. Kit installs on a second repo; the six boundary rejection tests + a headless

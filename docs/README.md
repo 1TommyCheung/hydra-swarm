@@ -3,7 +3,7 @@
 > **Dev notes:** vendor design/review/spike artifacts referenced below (`bun-migration-*`, `*-design-*`, `*-review-*`, `license-research-*`, `doc-audit-*`) live in the machine-local, gitignored `docs/dev-notes/` — production users do not need them; recover from git history pre-split if absent.
 
 
-**Date:** 2026-07-16 · **Status:** **Wave 2 operational** (all four heads). Waves 0–2 delivered; the compiled Bun binary is the operational default (Node/`ts` is the automatic fallback when no binary is provisioned yet); front of the roadmap is packaging + the hardening daemon.
+**Date:** 2026-07-19 · **Status:** **v0.8.1** — Waves 0–2 delivered; the compiled Bun binary is the operational default with GitHub Releases distribution (`fetch-bin.sh`), head auto-detection is live, and `hydra gc` + `hydra run-log` own the worktree-lifecycle close (Node/`ts` is the automatic fallback when no binary is provisioned yet). Front of the roadmap is kit extraction + the hardening daemon.
 **Supersedes:** the single-document specs v1–v3. This document set is self-contained; no prior version is a normative dependency.
 **Evidence:** per-wave completion reports and the Wave 2 exit snapshot lived in the pre-extraction tree (`../hydra-reports/`); they were not carried into this standalone repo. Day-to-day operation is documented in `operations.md`.
 
@@ -43,8 +43,8 @@ findings live in `docs/bun-migration-*.md`.
 | Integration branches | `hydra-integration/<run-id>` |
 | Wave marker file | `kit/hydra/WAVE` |
 | Git tags | `hydra-wave-0`, `hydra-wave-1`, `hydra-wave-2` |
-| Committed reports | `docs/hydra-reports/` — not yet committed in this repo |
-| Future standalone CLI | `hydra` |
+| Committed run audit logs | `docs/hydra-dev-logs/` (`run-log` output) |
+| Standalone CLI | `hydra` (compiled binary; `hydra version` reports the built-from version) |
 
 Reserved prefix rule: no human or agent creates branches under `hydra/` or `hydra-integration/` outside harness scripts.
 
@@ -52,16 +52,19 @@ Reserved prefix rule: no human or agent creates branches under `hydra/` or `hydr
 
 | File | Contents |
 |---|---|
+| `overview.html` | Landing-page overview (open in a browser) |
+| `architecture-diagram.html` | Visual pipeline diagram (open in a browser) |
 | `architecture.md` | Principles, system model, responsibility separation, evidence hierarchy, lead/harness trust decision |
-| `wave0-implementation.md` | Exactly what to build first — components, scripts, acceptance tests |
 | `trust-and-permissions.md` | Worker/lead/harness boundaries, ownership enforcement, audit rules, verification sandbox |
 | `state-and-worktrees.md` | Git-tracked vs external state vs worktrees; bootstrap lifecycle; portability; recovery bundles |
 | `task-result-review-contracts.md` | Task spec, result contract, inbox→promotion, review gates, integration lifecycle, ledger schemas |
 | `code-intelligence.md` | GitNexus and Graphify — Wave 1+ only |
 | `vendor-adapters.md` | Adapter contract, per-vendor capabilities and quirks, capability ledger |
-| `roadmap.md` | Delivered changelog (Waves 0–2), resolved open decisions, Wave 3 + daemon, doc-maintenance checklist |
-| `operations.md` | **Runbook** — start/monitor/kill a run, herdr, the lead-kill drill, common failures + fixes, concurrent-run rules |
-| `packaging.md` | Wave 3: kit extraction, deployment to new repos, global ledger, upgrade protocol |
+| `operations.md` | **Runbook** — start/monitor/kill a run, herdr, the lead-kill drill, common failures + fixes, worktree retention (gc + run-log) |
+| `packaging.md` | Kit extraction, binary distribution, deployment to new repos, global ledger, upgrade protocol |
+| `roadmap.md` | Delivered changelog (Waves 0–2 + post-Wave-2 hardening), resolved open decisions, Wave 3 + daemon, doc-maintenance checklist |
+| `kimi-network-allowlist-case-study.md` | Field-incident writeup: deriving the srt network allowlist from worktree manifests |
+| `hydra-dev-logs/` | Per-run lifecycle audit documents (`run-log` output) — committed |
 
 ## Operating the system? (Wave 2 is live)
 
@@ -74,8 +77,10 @@ Read, in order:
 
 ## Re-installing from scratch or learning how it was built?
 
-`wave0-implementation.md` is the frozen bootstrap record (historical). For a new
-repo, the planned `hydra-setup` skill will supersede it (Wave 3 / `packaging.md`).
+The frozen bootstrap record (`wave0-implementation.md`) was a pre-split
+artifact and now lives in the machine-local `docs/dev-notes/` (recover from
+git history pre-split if absent). For a new repo, the planned `hydra-setup`
+skill will supersede it (Wave 3 / `packaging.md`).
 
 ## Central hypothesis — verdict
 
