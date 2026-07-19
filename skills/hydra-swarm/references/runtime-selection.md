@@ -1,7 +1,7 @@
 # Runtime selection: `ts` and `bin`
 
 Hydra has exactly **two** runtime values. The Bash implementation lane was
-retired in run 0045 (`docs/bash-lane-retirement-plan.md`); `bash` is no longer
+retired in run 0045 (dev note `docs/dev-notes/bash-lane-retirement-plan.md`, machine-local); `bash` is no longer
 an executable implementation choice.
 
 ## Unset `HYDRA_HARNESS` — the default: prefer `bin`, fall back to `ts`
@@ -95,7 +95,7 @@ loudly with an explicit retirement error and do **not** silently coerce to `ts`:
 The six `kit/hydra/adapters/*.sh` shell adapters were deleted; vendor dispatch
 is TypeScript (`adapter-<vendor>.ts`) or the compiled binary's
 `adapter-<vendor>` route only. The 28 `kit/hydra/scripts/*.sh` filenames remain
-as stable launchers for `ts`/`bin` (see `docs/bash-lane-retirement-plan.md`
+as stable launchers for `ts`/`bin` (see the machine-local dev note `docs/dev-notes/bash-lane-retirement-plan.md`
 Lane 1).
 
 ## Stale-node PATH gotcha

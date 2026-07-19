@@ -25,3 +25,7 @@ graphify-out/
 
 # macOS
 .DS_Store
+
+# Machine-local development notes (vendor design/review/spike artifacts).
+# Production users do not need these; the git history retains pre-split copies.
+docs/dev-notes/

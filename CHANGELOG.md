@@ -5,6 +5,16 @@ All notable changes to Hydra-Swarm. The format follows
 `.claude-plugin/plugin.json`. Deeper narrative history (design rationale,
 run-by-run evidence) lives in `docs/roadmap.md`.
 
+## [0.8.1] — 2026-07-19
+
+### Changed
+- **Docs split: official vs dev notes.** 49 machine-generated development
+  artifacts (bun-migration stages, vendor design/review/research records)
+  moved out of the repo into the machine-local, gitignored
+  `docs/dev-notes/`. Production users do not need them; pre-split copies
+  remain recoverable from git history. Official docs, run audit logs
+  (`docs/hydra-dev-logs/`), and operator guidance stay tracked.
+
 ## [0.8.0] — 2026-07-19
 
 Run 0048: worktree lifecycle management — closes the "worktrees grow forever"

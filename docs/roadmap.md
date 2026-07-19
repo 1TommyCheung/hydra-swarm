@@ -1,5 +1,8 @@
 # Hydra-Swarm — Roadmap
 
+> **Dev notes:** vendor design/review/spike artifacts referenced below (`bun-migration-*`, `*-design-*`, `*-review-*`, `license-research-*`, `doc-audit-*`) live in the machine-local, gitignored `docs/dev-notes/` — production users do not need them; recover from git history pre-split if absent.
+
+
 **Status:** Wave 2 operational since 2026-07-13. Waves 0–2 delivered; the front of
 the roadmap is now packaging (Wave 3) and the hardening daemon. This file is a
 *delivered changelog + forward plan*, not a design proposal — per-wave evidence
