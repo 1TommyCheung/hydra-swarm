@@ -461,6 +461,76 @@ describe('status', () => {
     assert.equal(status(timedOut.runId, 'task-a', baseOptions(timedOut)).state, 'timed_out');
   });
 
+  it('reports usage_limited when the latest terminal event is agent_usage_limited', () => {
+    const f = fixture(uniqueRunId('usage-limited'), { vendor: 'opencode' });
+    writeLedger(f, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'opencode', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:25:00Z', event: 'agent_usage_limited', run_id: f.runId, task_id: 'task-a', vendor: 'opencode', provider: 'zai', model: 'glm-5.2', limit_kind: 'usage_window', retry_at: '2024-01-01T05:00:00Z', retryable: 'true', source: 'cli_diagnostic', confidence: 'high', raw_error: 'Usage limit reached for 5 hour' },
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f, {
+      now: () => Date.parse('2024-01-01T00:30:00Z'),
+    }));
+
+    assert.equal(result.state, 'usage_limited');
+    assert.equal(result.elapsed_seconds, 1800);
+    assert.equal(result.disagreement, null);
+    assert.equal(result.dispatch_liveness, null);
+    assert.equal(result.ledger_events.at(-1)?.event, 'agent_usage_limited');
+  });
+
+  it('surfaces usage-limit fields in human output for the usage_limited state', () => {
+    const f = fixture(uniqueRunId('usage-limited-human'), { vendor: 'opencode' });
+    writeLedger(f, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'opencode', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:25:00Z', event: 'agent_usage_limited', run_id: f.runId, task_id: 'task-a', vendor: 'opencode', provider: 'zai', model: 'glm-5.2', limit_kind: 'usage_window', retry_at: '2024-01-01T05:00:00Z', retryable: 'true', source: 'cli_diagnostic', confidence: 'high', raw_error: 'Usage limit reached for 5 hour' },
+    ]);
+
+    const previous = process.env.HYDRA_STATE_ROOT;
+    process.env.HYDRA_STATE_ROOT = f.stateRoot;
+    let stdout = '';
+    try {
+      stdout = captureStdout(() => main([f.runId, 'task-a']));
+    } finally {
+      if (previous === undefined) delete process.env.HYDRA_STATE_ROOT;
+      else process.env.HYDRA_STATE_ROOT = previous;
+    }
+
+    assert.match(stdout, /state: usage_limited/);
+    assert.match(stdout, /usage_limit_vendor: opencode/);
+    assert.match(stdout, /usage_limit_provider: zai/);
+    assert.match(stdout, /usage_limit_model: glm-5\.2/);
+    assert.match(stdout, /usage_limit_limit_kind: usage_window/);
+    assert.match(stdout, /usage_limit_retry_at: 2024-01-01T05:00:00Z/);
+    assert.match(stdout, /usage_limit_raw_error: Usage limit reached for 5 hour/);
+  });
+
+  it('omits absent usage-limit fields from human output', () => {
+    const f = fixture(uniqueRunId('usage-limited-minimal'));
+    writeLedger(f, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:25:00Z', event: 'agent_usage_limited', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', limit_kind: 'rate_limit', retryable: 'false', source: 'stderr', confidence: 'heuristic', raw_error: '429 too many requests' },
+    ]);
+
+    const previous = process.env.HYDRA_STATE_ROOT;
+    process.env.HYDRA_STATE_ROOT = f.stateRoot;
+    let stdout = '';
+    try {
+      stdout = captureStdout(() => main([f.runId, 'task-a']));
+    } finally {
+      if (previous === undefined) delete process.env.HYDRA_STATE_ROOT;
+      else process.env.HYDRA_STATE_ROOT = previous;
+    }
+
+    assert.match(stdout, /state: usage_limited/);
+    assert.match(stdout, /usage_limit_vendor: kimi/);
+    assert.match(stdout, /usage_limit_limit_kind: rate_limit/);
+    assert.match(stdout, /usage_limit_raw_error: 429 too many requests/);
+    assert.ok(!stdout.includes('usage_limit_provider'));
+    assert.ok(!stdout.includes('usage_limit_model'));
+    assert.ok(!stdout.includes('usage_limit_retry_at'));
+  });
+
   it('returns unknown when no task events exist', () => {
     const f = fixture(uniqueRunId('unknown'));
     writeLedger(f, [
@@ -665,6 +735,25 @@ describe('status', () => {
     const result = status(f.runId, 'task-a', baseOptions(f));
 
     assert.equal(result.state, 'completed');
+    assert.equal(result.loop_suspicion, null);
+  });
+
+  it('does not carry stale loop suspicion across an agent_usage_limited terminal event', () => {
+    // agent_usage_limited is its own terminal event, added alongside
+    // agent_exited/agent_cancelled/agent_timed_out in LOOP_TERMINAL_EVENTS --
+    // without it, a task that hit a prior loop_suspected verdict and then
+    // separately terminated on a usage-limit detection would incorrectly
+    // keep reporting the stale loop_suspicion alongside state=usage_limited.
+    const f = fixture(uniqueRunId('usage-limited-clears-suspicion'));
+    writeLedger(f, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:10:00Z', event: 'agent_loop_suspected', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1`, dominant_action_hash: 'abc123', repeat_count: '8', failure_count: '6' },
+      { time: '2024-01-01T00:12:00Z', event: 'agent_usage_limited', run_id: f.runId, task_id: 'task-a', vendor: 'kimi' },
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f));
+
+    assert.equal(result.state, 'usage_limited');
     assert.equal(result.loop_suspicion, null);
   });
 

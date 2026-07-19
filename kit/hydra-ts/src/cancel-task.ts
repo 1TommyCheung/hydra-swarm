@@ -57,7 +57,7 @@ interface AttemptSnapshot {
   terminalEntry: LedgerEntry | undefined;
 }
 
-const TERMINAL_EVENTS = new Set(['agent_exited', 'agent_cancelled', 'agent_timed_out']);
+const TERMINAL_EVENTS = new Set(['agent_exited', 'agent_cancelled', 'agent_timed_out', 'agent_usage_limited']);
 
 const defaultProcessAlive = (pid: number): boolean => {
   try {

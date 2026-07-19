@@ -37,7 +37,7 @@ export interface LoopSuspicion {
 }
 
 export interface StatusResult {
-  state: 'running' | 'completed' | 'failed' | 'cancelled' | 'timed_out' | 'unknown';
+  state: 'running' | 'completed' | 'failed' | 'cancelled' | 'timed_out' | 'usage_limited' | 'unknown';
   agent_run_id: string;
   vendor: string;
   elapsed_seconds: number | null;
@@ -61,7 +61,7 @@ interface TaskSpec {
   specVersion: string;
 }
 
-const TERMINAL_EVENTS = ['agent_exited', 'agent_cancelled', 'agent_timed_out'];
+const TERMINAL_EVENTS = ['agent_exited', 'agent_cancelled', 'agent_timed_out', 'agent_usage_limited'];
 
 // Grace window after task_started before we treat a missing dispatch pidfile as
 // a disagreement. task_started is appended before the pidfile is written, and
@@ -136,6 +136,7 @@ function determineState(events: LedgerEntry[]): StatusResult['state'] {
     }
     if (event === 'agent_cancelled') return 'cancelled';
     if (event === 'agent_timed_out') return 'timed_out';
+    if (event === 'agent_usage_limited') return 'usage_limited';
   }
   const hasStarted = events.some((entry) => entry.event === 'task_started');
   return hasStarted ? 'running' : 'unknown';
@@ -148,6 +149,7 @@ const LOOP_TERMINAL_EVENTS = new Set([
   'agent_exited',
   'agent_cancelled',
   'agent_timed_out',
+  'agent_usage_limited',
 ]);
 
 function deriveLoopSuspicion(events: LedgerEntry[]): LoopSuspicion | null {
@@ -353,6 +355,19 @@ function renderHuman(result: StatusResult): string {
   if (result.loop_suspicion) {
     const { status, since, dominant_action_hash } = result.loop_suspicion;
     lines.push(`loop_suspicion: ${status} since ${since} (hash=${dominant_action_hash})`);
+  }
+
+  if (result.state === 'usage_limited') {
+    const terminal = [...result.ledger_events].reverse()
+      .find((entry) => entry.event === 'agent_usage_limited');
+    if (terminal) {
+      for (const key of ['vendor', 'provider', 'model', 'limit_kind', 'retry_at', 'raw_error']) {
+        const value = terminal[key];
+        if (value !== undefined && value !== null && value !== '') {
+          lines.push(`usage_limit_${key}: ${String(value)}`);
+        }
+      }
+    }
   }
 
   lines.push(`progress_tail (${result.progress_source ?? 'none'}):`);

@@ -115,7 +115,7 @@ const CONFIRMATION_FRESH_FAILURES_THRESHOLD = 2;
 const CONFIRMATION_FRESH_CYCLE_REPETITIONS = 2;
 const GIT_SAMPLE_INTERVAL_MS = 30_000;
 
-const TERMINAL_EVENTS = new Set(['agent_exited', 'agent_cancelled', 'agent_timed_out']);
+const TERMINAL_EVENTS = new Set(['agent_exited', 'agent_cancelled', 'agent_timed_out', 'agent_usage_limited']);
 const STREAMING_VENDORS = new Set(['codex', 'kimi', 'opencode']);
 
 function sha256(value: string | Buffer): string {

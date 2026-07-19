@@ -469,6 +469,24 @@ interface LedgerAppender {
   (runId: string, event: string, ...kvs: string[]): void;
 }
 
+export interface UsageLimitDetails {
+  /** Vendor whose usage limit was hit. */
+  vendor: string;
+  /** Upstream provider; the ledger kv is omitted entirely when absent. */
+  provider?: string;
+  /** Model; the ledger kv is omitted entirely when absent. */
+  model?: string;
+  limitKind: 'rate_limit' | 'quota_exhausted' | 'usage_window' | 'concurrency_limit' | 'unknown';
+  scope?: 'credential' | 'account' | 'provider' | 'model' | 'unknown';
+  /** UTC ISO-8601 reset timestamp from the vendor's own error; omitted when unknown. */
+  retryAt?: string;
+  retryable: boolean;
+  source: 'structured_event' | 'cli_diagnostic' | 'stderr' | 'exit';
+  confidence: 'exact' | 'high' | 'heuristic';
+  /** Vendor's raw error text; the caller redacts/size-caps before passing it in. */
+  rawError: string;
+}
+
 interface ExitRecorder {
   readonly cancelled: Promise<void>;
   isRecorded(): boolean;
@@ -477,6 +495,7 @@ interface ExitRecorder {
   setPaneId(paneId: string): void;
   recordExit(event: string, rc?: string, ...extraKvs: string[]): void;
   recordTimeout(reason: 'stalled' | 'hard_cap', metric?: [string, string]): void;
+  recordUsageLimited(details: UsageLimitDetails): void;
   cancel(): void;
   register(signal: AbortSignal | undefined, noSignals: boolean | undefined): void;
   unregister(): void;
@@ -521,7 +540,9 @@ function releaseSlot(slotsDir: string, agentRunId: string): void {
   rmSync(join(slotsDir, agentRunId), { force: true });
 }
 
-function makeExitRecorder(ctx: WorkerContext): ExitRecorder {
+// Exported for tests; production wiring of recordUsageLimited lands with the
+// future usage-limit detector task.
+export function makeExitRecorder(ctx: WorkerContext): ExitRecorder {
   let recorded = false;
   let wasCancelled = false;
   let workerPid: number | undefined;
@@ -577,6 +598,21 @@ function makeExitRecorder(ctx: WorkerContext): ExitRecorder {
       const extra = ['reason', reason];
       if (metric) extra.push(metric[0], metric[1]);
       finish('agent_timed_out', extra, '124');
+    },
+    recordUsageLimited: (details) => {
+      const extra = ['vendor', details.vendor];
+      if (details.provider !== undefined) extra.push('provider', details.provider);
+      if (details.model !== undefined) extra.push('model', details.model);
+      extra.push('limit_kind', details.limitKind);
+      if (details.scope !== undefined) extra.push('scope', details.scope);
+      if (details.retryAt !== undefined) extra.push('retry_at', details.retryAt);
+      extra.push(
+        'retryable', String(details.retryable),
+        'source', details.source,
+        'confidence', details.confidence,
+        'raw_error', details.rawError,
+      );
+      finish('agent_usage_limited', extra, '125');
     },
     cancel,
     register: (signal, noSignals) => {

@@ -159,6 +159,37 @@ describe('cancelTask', () => {
     assert.match(output, /test dispatcher response/);
   });
 
+  it('reports already_terminal when the latest event is agent_usage_limited', async () => {
+    const f = fixture();
+    writeLedger(f, [
+      started(f),
+      {
+        time: '2026-07-14T00:00:01Z',
+        event: 'agent_usage_limited',
+        run_id: f.runId,
+        task_id: f.taskId,
+        vendor: 'codex',
+        limit_kind: 'quota_exhausted',
+        retryable: 'false',
+        source: 'structured_event',
+        confidence: 'exact',
+        raw_error: 'quota exhausted',
+      },
+    ]);
+    const signals: Array<[number, CancelSignal]> = [];
+    let output = '';
+
+    const result = await cancelTask(f.runId, f.taskId, options(f, {
+      signalProcess: (pid, signal) => { signals.push([pid, signal]); },
+      write: (text) => { output += text; },
+    }));
+
+    assert.equal(result.outcome, 'already_terminal');
+    assert.equal(result.terminal_event.event, 'agent_usage_limited');
+    assert.deepEqual(signals, []);
+    assert.match(output, /agent_usage_limited/);
+  });
+
   it('rejects a missing current task attempt', async () => {
     const f = fixture({ specVersion: 2 });
     writeLedger(f, [

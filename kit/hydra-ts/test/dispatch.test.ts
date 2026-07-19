@@ -19,6 +19,7 @@ import {
   dispatch,
   herdrAgentPaneRatio,
   kimiEventText,
+  makeExitRecorder,
   resolveAdapterRuntime,
   type ChildProcessLike,
   type Clock,
@@ -26,6 +27,7 @@ import {
   type ExecFileSyncLike,
   type HerdrClient,
   type SpawnLike,
+  type UsageLimitDetails,
 } from '../src/dispatch.ts';
 import type { HeadsSnapshot } from '../src/detect-heads.ts';
 
@@ -2505,5 +2507,100 @@ describe('dispatch herdr workspace pin (issue #19)', () => {
     }));
     assert.equal(herdr.starts.length, 1);
     assert.equal(herdr.starts[0].workspace, 'ws-opencode-live');
+  });
+});
+
+describe('exit recorder', () => {
+  function testRecorder(f: Fixture): {
+    recorder: ReturnType<typeof makeExitRecorder>;
+    entries: Array<Record<string, string>>;
+  } {
+    const entries: Array<Record<string, string>> = [];
+    const ctx = {
+      runId: f.runId,
+      taskId: 'task-a',
+      vendor: 'opencode',
+      agentRunId: `${f.runId}-task-a-v1`,
+      sessionsDir: f.sessionsDir,
+      slotsDir: join(f.runDir, 'slots'),
+      appendLedger: (id: string, event: string, ...kvs: string[]) => {
+        const entry: Record<string, string> = { run_id: id, event };
+        for (let index = 0; index + 1 < kvs.length; index += 2) {
+          entry[kvs[index]] = kvs[index + 1];
+        }
+        entries.push(entry);
+      },
+    } as unknown as Parameters<typeof makeExitRecorder>[0];
+    return { recorder: makeExitRecorder(ctx), entries };
+  }
+
+  it('recordUsageLimited writes agent_usage_limited with every ledger kv and exit code 125', () => {
+    const f = fixture(runId());
+    const { recorder, entries } = testRecorder(f);
+    const details: UsageLimitDetails = {
+      vendor: 'opencode',
+      provider: 'zai',
+      model: 'glm-5.2',
+      limitKind: 'usage_window',
+      scope: 'account',
+      retryAt: '2026-07-19T17:00:00Z',
+      retryable: true,
+      source: 'cli_diagnostic',
+      confidence: 'high',
+      rawError: 'Usage limit reached for 5 hour',
+    };
+
+    recorder.recordUsageLimited(details);
+
+    assert.deepEqual(entries, [{
+      run_id: f.runId,
+      event: 'agent_usage_limited',
+      task_id: 'task-a',
+      vendor: 'opencode',
+      provider: 'zai',
+      model: 'glm-5.2',
+      limit_kind: 'usage_window',
+      scope: 'account',
+      retry_at: '2026-07-19T17:00:00Z',
+      retryable: 'true',
+      source: 'cli_diagnostic',
+      confidence: 'high',
+      raw_error: 'Usage limit reached for 5 hour',
+    }]);
+    assert.equal(recorder.isRecorded(), true);
+    assert.equal(
+      readFileSync(join(f.sessionsDir, `${f.runId}-task-a-v1.exit`), 'utf8'),
+      '125',
+    );
+  });
+
+  it('recordUsageLimited omits absent optional kvs instead of writing empty placeholders', () => {
+    const f = fixture(runId());
+    const { recorder, entries } = testRecorder(f);
+
+    recorder.recordUsageLimited({
+      vendor: 'claude',
+      limitKind: 'rate_limit',
+      retryable: false,
+      source: 'stderr',
+      confidence: 'heuristic',
+      rawError: 'rate limited',
+    });
+
+    assert.deepEqual(entries, [{
+      run_id: f.runId,
+      event: 'agent_usage_limited',
+      task_id: 'task-a',
+      vendor: 'claude',
+      limit_kind: 'rate_limit',
+      retryable: 'false',
+      source: 'stderr',
+      confidence: 'heuristic',
+      raw_error: 'rate limited',
+    }]);
+    assert.equal('provider' in entries[0], false);
+    assert.equal('model' in entries[0], false);
+    assert.equal('scope' in entries[0], false);
+    assert.equal('retry_at' in entries[0], false);
   });
 });
