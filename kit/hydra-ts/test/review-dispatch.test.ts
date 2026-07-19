@@ -1282,3 +1282,293 @@ describe('defaultExec', () => {
     assert.equal(result.exitCode, 143);
   });
 });
+
+describe('reviewDispatch herdr workspace pin (issue #19)', () => {
+  function options(
+    extras: Omit<ReviewDispatchOptions, 'stateRoot' | 'cwd'> = {},
+  ): ReviewDispatchOptions {
+    return {
+      stateRoot: TEST_TMP,
+      cwd: TEST_TMP,
+      ...extras,
+    };
+  }
+
+  function writePrompt(content: string): string {
+    const p = join(TEST_TMP, `prompt-pin-${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
+    writeFileSync(p, content, 'utf8');
+    return p;
+  }
+
+  function makeExecReturningWorkspace(workspaceId: string | undefined): { exec: ExecFn; calls: Call[] } {
+    const calls: Call[] = [];
+    const exec: ExecFn = (file, args, opts) => {
+      calls.push({ file, args, cwd: opts?.cwd });
+      if (args[0] === 'status') return { stdout: '', stderr: '', exitCode: 0 };
+      if (args[0] === 'pane' && args[1] === 'list') {
+        const panes = workspaceId === undefined
+          ? []
+          : [{ agent: {}, cwd: TEST_TMP, workspace_id: workspaceId }];
+        return {
+          stdout: JSON.stringify({ result: { panes } }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'agent' && args[1] === 'start') {
+        return {
+          stdout: JSON.stringify({ result: { agent: { pane_id: 'pane-pin' } } }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'pane' && (args[1] === 'resize' || args[1] === 'close')) {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(' ')}`);
+    };
+    return { exec, calls };
+  }
+
+  function agentStartCall(calls: Call[]): Call | undefined {
+    return calls.find((c) => c.args[0] === 'agent' && c.args[1] === 'start');
+  }
+
+  function workspaceArg(call: Call | undefined): string | undefined {
+    if (!call) return undefined;
+    const idx = call.args.indexOf('--workspace');
+    if (idx === -1) return undefined;
+    return call.args[idx + 1];
+  }
+
+  function runYamlPathFor(runId: string): string {
+    return join(TEST_TMP, 'runs', `run-${runId}`, 'run.yaml');
+  }
+
+  it('persists the workspace id on the first reviewer pane spawn', () => {
+    const runId = 'review-pin-first';
+    const reviewId = 'rev1';
+    const previousPanes = process.env.HYDRA_HERDR_PANES;
+    const previousTimeout = process.env.HYDRA_REVIEW_TIMEOUT_MIN;
+    process.env.HYDRA_HERDR_PANES = '1';
+    process.env.HYDRA_REVIEW_TIMEOUT_MIN = '1';
+
+    const sentinelPath = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions', `${reviewId}.claude.exit`);
+    const { exec, calls } = makeExecReturningWorkspace('ws-review-initial');
+
+    try {
+      reviewDispatch(
+        runId,
+        reviewId,
+        'claude',
+        writePrompt('first pane review'),
+        options({
+          exec,
+          sleep: () => { writeFileSync(sentinelPath, '0', 'utf8'); },
+        }),
+      );
+    } finally {
+      restoreEnv('HYDRA_HERDR_PANES', previousPanes);
+      restoreEnv('HYDRA_REVIEW_TIMEOUT_MIN', previousTimeout);
+    }
+
+    assert.equal(workspaceArg(agentStartCall(calls)), 'ws-review-initial');
+    assert.equal(existsSync(runYamlPathFor(runId)), true);
+    assert.equal(
+      readFileSync(runYamlPathFor(runId), 'utf8').trim(),
+      'herdr_workspace: ws-review-initial',
+    );
+  });
+
+  it('reuses the persisted workspace id even when the live focus has changed', () => {
+    const runId = 'review-pin-reuse';
+    const reviewId = 'rev1';
+    const previousPanes = process.env.HYDRA_HERDR_PANES;
+    const previousTimeout = process.env.HYDRA_REVIEW_TIMEOUT_MIN;
+    process.env.HYDRA_HERDR_PANES = '1';
+    process.env.HYDRA_REVIEW_TIMEOUT_MIN = '1';
+
+    // Pre-pin run.yaml with ws-captured; the live workspace is now elsewhere.
+    mkdirSync(dirname(runYamlPathFor(runId)), { recursive: true });
+    writeFileSync(runYamlPathFor(runId), `herdr_workspace: ws-captured\n`);
+
+    const sentinelPath = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions', `${reviewId}.claude.exit`);
+    const { exec, calls } = makeExecReturningWorkspace('ws-focus-moved');
+
+    try {
+      reviewDispatch(
+        runId,
+        reviewId,
+        'claude',
+        writePrompt('reuse pin review'),
+        options({
+          exec,
+          sleep: () => { writeFileSync(sentinelPath, '0', 'utf8'); },
+        }),
+      );
+    } finally {
+      restoreEnv('HYDRA_HERDR_PANES', previousPanes);
+      restoreEnv('HYDRA_REVIEW_TIMEOUT_MIN', previousTimeout);
+    }
+
+    assert.equal(
+      workspaceArg(agentStartCall(calls)),
+      'ws-captured',
+      'second reviewer spawn must reuse the pinned workspace, not the live focus',
+    );
+  });
+
+  it('does not invoke herdr pane list at all on a subsequent spawn when a pin exists', () => {
+    // Spec contract (issue #19, step 2): the persisted workspace id is read
+    // FIRST; the live `herdr pane list` shell-out (the backing query for
+    // findHerdrWorkspace) is SKIPPED entirely once a pin exists, not merely
+    // have its result discarded.
+    const runId = 'review-pin-no-live-call';
+    const reviewId = 'rev1';
+    const previousPanes = process.env.HYDRA_HERDR_PANES;
+    const previousTimeout = process.env.HYDRA_REVIEW_TIMEOUT_MIN;
+    process.env.HYDRA_HERDR_PANES = '1';
+    process.env.HYDRA_REVIEW_TIMEOUT_MIN = '1';
+
+    mkdirSync(dirname(runYamlPathFor(runId)), { recursive: true });
+    writeFileSync(runYamlPathFor(runId), `herdr_workspace: ws-captured\n`);
+
+    const sentinelPath = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions', `${reviewId}.claude.exit`);
+    const { exec, calls } = makeExecReturningWorkspace('ws-focus-moved');
+
+    try {
+      reviewDispatch(
+        runId,
+        reviewId,
+        'claude',
+        writePrompt('no live call review'),
+        options({
+          exec,
+          sleep: () => { writeFileSync(sentinelPath, '0', 'utf8'); },
+        }),
+      );
+    } finally {
+      restoreEnv('HYDRA_HERDR_PANES', previousPanes);
+      restoreEnv('HYDRA_REVIEW_TIMEOUT_MIN', previousTimeout);
+    }
+
+    const paneListCalls = calls.filter((c) => c.args[0] === 'pane' && c.args[1] === 'list');
+    assert.equal(paneListCalls.length, 0, 'live pane list query must not be called once a pin exists');
+    assert.equal(workspaceArg(agentStartCall(calls)), 'ws-captured');
+  });
+
+  it('HYDRA_HERDR_WORKSPACE_PIN=0 disables the pin and restores the live-query behavior', () => {
+    const runId = 'review-pin-escape';
+    const reviewId = 'rev1';
+    const previousPanes = process.env.HYDRA_HERDR_PANES;
+    const previousTimeout = process.env.HYDRA_REVIEW_TIMEOUT_MIN;
+    const previousPin = process.env.HYDRA_HERDR_WORKSPACE_PIN;
+    process.env.HYDRA_HERDR_PANES = '1';
+    process.env.HYDRA_REVIEW_TIMEOUT_MIN = '1';
+    process.env.HYDRA_HERDR_WORKSPACE_PIN = '0';
+
+    // Pre-pin run.yaml with ws-captured; the escape hatch must skip it.
+    mkdirSync(dirname(runYamlPathFor(runId)), { recursive: true });
+    writeFileSync(runYamlPathFor(runId), `herdr_workspace: ws-captured\n`);
+
+    const sentinelPath = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions', `${reviewId}.claude.exit`);
+    const { exec, calls } = makeExecReturningWorkspace('ws-live');
+
+    try {
+      reviewDispatch(
+        runId,
+        reviewId,
+        'claude',
+        writePrompt('escape hatch review'),
+        options({
+          exec,
+          sleep: () => { writeFileSync(sentinelPath, '0', 'utf8'); },
+        }),
+      );
+    } finally {
+      restoreEnv('HYDRA_HERDR_PANES', previousPanes);
+      restoreEnv('HYDRA_REVIEW_TIMEOUT_MIN', previousTimeout);
+      restoreEnv('HYDRA_HERDR_WORKSPACE_PIN', previousPin);
+    }
+
+    assert.equal(
+      workspaceArg(agentStartCall(calls)),
+      'ws-live',
+      'escape hatch must live-query rather than reuse the pin',
+    );
+  });
+
+  it('falls back to the live workspace when run.yaml is missing', () => {
+    const runId = 'review-pin-missing';
+    const reviewId = 'rev1';
+    const previousPanes = process.env.HYDRA_HERDR_PANES;
+    const previousTimeout = process.env.HYDRA_REVIEW_TIMEOUT_MIN;
+    process.env.HYDRA_HERDR_PANES = '1';
+    process.env.HYDRA_REVIEW_TIMEOUT_MIN = '1';
+
+    // No run.yaml at all — the dispatch must not crash and must capture the
+    // live value (which then gets persisted).
+    rmSync(runYamlPathFor(runId), { force: true });
+
+    const sentinelPath = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions', `${reviewId}.claude.exit`);
+    const { exec, calls } = makeExecReturningWorkspace('ws-live-missing-yaml');
+
+    try {
+      reviewDispatch(
+        runId,
+        reviewId,
+        'claude',
+        writePrompt('missing yaml review'),
+        options({
+          exec,
+          sleep: () => { writeFileSync(sentinelPath, '0', 'utf8'); },
+        }),
+      );
+    } finally {
+      restoreEnv('HYDRA_HERDR_PANES', previousPanes);
+      restoreEnv('HYDRA_REVIEW_TIMEOUT_MIN', previousTimeout);
+    }
+
+    assert.equal(workspaceArg(agentStartCall(calls)), 'ws-live-missing-yaml');
+  });
+
+  it('falls back to the live workspace when run.yaml cannot be read', () => {
+    const runId = 'review-pin-corrupt';
+    const reviewId = 'rev1';
+    const previousPanes = process.env.HYDRA_HERDR_PANES;
+    const previousTimeout = process.env.HYDRA_REVIEW_TIMEOUT_MIN;
+    process.env.HYDRA_HERDR_PANES = '1';
+    process.env.HYDRA_REVIEW_TIMEOUT_MIN = '1';
+
+    // Replace run.yaml with a directory so yamlScalar's readFileSync throws
+    // (EISDIR). The dispatch must not crash and must use the live value.
+    mkdirSync(dirname(runYamlPathFor(runId)), { recursive: true });
+    rmSync(runYamlPathFor(runId), { force: true });
+    mkdirSync(runYamlPathFor(runId), { recursive: true });
+
+    const sentinelPath = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions', `${reviewId}.claude.exit`);
+    const { exec, calls } = makeExecReturningWorkspace('ws-corrupt-fallback');
+
+    try {
+      reviewDispatch(
+        runId,
+        reviewId,
+        'claude',
+        writePrompt('corrupt yaml review'),
+        options({
+          exec,
+          sleep: () => { writeFileSync(sentinelPath, '0', 'utf8'); },
+        }),
+      );
+    } finally {
+      restoreEnv('HYDRA_HERDR_PANES', previousPanes);
+      restoreEnv('HYDRA_REVIEW_TIMEOUT_MIN', previousTimeout);
+    }
+
+    assert.equal(
+      workspaceArg(agentStartCall(calls)),
+      'ws-corrupt-fallback',
+      'an unreadable run.yaml must fall back to a live query',
+    );
+  });
+});

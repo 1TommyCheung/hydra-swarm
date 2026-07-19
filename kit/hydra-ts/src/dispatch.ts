@@ -32,11 +32,14 @@ import {
   codexEventText,
   die,
   herdrState,
+  herdrWorkspacePinEnabled,
   killTree,
   kimiEventText,
   log,
   now,
+  pinnedHerdrWorkspace,
   pollJsonlFile,
+  setPinnedHerdrWorkspace,
   stateRoot,
   type JsonlTailState,
   warn,
@@ -490,6 +493,7 @@ interface WorkerContext {
   sessionsDir: string;
   slotsDir: string;
   taskSpecPath: string;
+  runYamlPath: string;
   adapterPath: string;
   adapterRuntime: AdapterRuntime;
   nodeExecutable: string;
@@ -798,6 +802,36 @@ function safeHerdrLive(herdr: HerdrClient): boolean {
 }
 
 /**
+ * Resolve the lead's herdr workspace id for a pane spawn within this run
+ * (issue #19). The persisted workspace id is read from run.yaml FIRST; only
+ * when no value has been persisted yet (or the pin is disabled, or run.yaml
+ * is missing/corrupt) does this fall back to a live focusedWorkspace() query
+ * — the live query itself is skipped entirely once a pin exists, so a later
+ * pane spawn does not shell out to "what is focused right now" even if the
+ * operator has since moved macOS Spaces/terminal tabs. The FIRST successful
+ * live query in a run is persisted into run.yaml; subsequent spawns reuse
+ * it. HYDRA_HERDR_WORKSPACE_PIN=0 disables the pin and restores the legacy
+ * always-live-query behavior. All persistence errors degrade safely to a
+ * live query and never throw or block a dispatch.
+ */
+function resolvePaneWorkspace(ctx: WorkerContext): string | undefined {
+  if (herdrWorkspacePinEnabled(ctx.env)) {
+    try {
+      const pinned = pinnedHerdrWorkspace(ctx.runYamlPath);
+      if (pinned) return pinned;
+    } catch {
+      // Corrupt/missing run.yaml — fall through to a live query below.
+    }
+  }
+  let live: string | undefined;
+  try { live = ctx.herdr.focusedWorkspace(); } catch { /* launch without workspace affinity */ }
+  if (live && herdrWorkspacePinEnabled(ctx.env)) {
+    try { setPinnedHerdrWorkspace(ctx.runYamlPath, live); } catch { /* best effort */ }
+  }
+  return live;
+}
+
+/**
  * Shrink a freshly started agent pane so the lead console keeps the majority
  * of the terminal height (issue #18). Purely cosmetic: any failure (older
  * herdr without pane.resize, closed pane, mock without paneResize) is ignored.
@@ -891,7 +925,7 @@ function openOpencodeMonitor(ctx: WorkerContext, workerPid: number): WorkerMonit
   let paneId: string | undefined;
   const label = `hydra:${ctx.runId}:${ctx.taskId}:${ctx.vendor}`;
   try {
-    workspace = ctx.herdr.focusedWorkspace();
+    workspace = resolvePaneWorkspace(ctx);
     paneId = ctx.herdr.agentStart({
       label,
       cwd: ctx.worktree,
@@ -1064,7 +1098,7 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
   rmSync(pidfile, { force: true });
 
   let workspace: string | undefined;
-  try { workspace = ctx.herdr.focusedWorkspace(); } catch { /* launch without workspace affinity */ }
+  try { workspace = resolvePaneWorkspace(ctx); } catch { /* launch without workspace affinity */ }
   const label = `hydra:${ctx.runId}:${ctx.taskId}:${ctx.vendor}`;
 
   const bannerPath = writePaneBanner(ctx, vendorLabel(ctx.vendor));
@@ -1420,6 +1454,7 @@ export async function dispatch(
     sessionsDir,
     slotsDir,
     taskSpecPath,
+    runYamlPath: join(runPath, 'run.yaml'),
     adapterPath,
     adapterRuntime,
     nodeExecutable: options.nodeExecutable ?? process.execPath,

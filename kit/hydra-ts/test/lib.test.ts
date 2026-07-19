@@ -21,6 +21,9 @@ import {
   codexEventText,
   kimiEventText,
   pollJsonlFile,
+  herdrWorkspacePinEnabled,
+  pinnedHerdrWorkspace,
+  setPinnedHerdrWorkspace,
   type JsonlTailState,
 } from '../src/lib.ts';
 
@@ -649,5 +652,127 @@ describe('pollJsonlFile', () => {
     const state: JsonlTailState = { offset: 0 };
     assert.doesNotThrow(() => pollJsonlFile(events, output, kimiEventText, state));
     assert.equal(existsSync(output), false);
+  });
+});
+
+describe('herdr workspace pin helpers (issue #19)', () => {
+  const PIN_DIR = join(TEST_TMP, 'workspace-pin');
+
+  before(() => mkdirSync(PIN_DIR, { recursive: true }));
+  after(cleanTmp);
+
+  function writeRunYaml(name: string, content: string): string {
+    const p = join(PIN_DIR, `${name}.yaml`);
+    writeFileSync(p, content, 'utf8');
+    return p;
+  }
+
+  it('herdrWorkspacePinEnabled is true by default and only disabled by exactly "0"', () => {
+    assert.equal(herdrWorkspacePinEnabled(undefined), true);
+    assert.equal(herdrWorkspacePinEnabled({}), true);
+    assert.equal(herdrWorkspacePinEnabled({ HYDRA_HERDR_WORKSPACE_PIN: '' }), true);
+    assert.equal(herdrWorkspacePinEnabled({ HYDRA_HERDR_WORKSPACE_PIN: '1' }), true);
+    assert.equal(herdrWorkspacePinEnabled({ HYDRA_HERDR_WORKSPACE_PIN: 'false' }), true);
+    assert.equal(herdrWorkspacePinEnabled({ HYDRA_HERDR_WORKSPACE_PIN: '0' }), false);
+  });
+
+  it('pinnedHerdrWorkspace returns undefined when run.yaml is missing', () => {
+    const missing = join(PIN_DIR, 'never-written.yaml');
+    assert.equal(pinnedHerdrWorkspace(missing), undefined);
+  });
+
+  it('pinnedHerdrWorkspace returns undefined when the field is absent', () => {
+    const p = writeRunYaml('no-field', 'run_id: "r1"\nbase_commit: abc\n');
+    assert.equal(pinnedHerdrWorkspace(p), undefined);
+  });
+
+  it('pinnedHerdrWorkspace returns undefined when the field is empty', () => {
+    const p = writeRunYaml('empty-field', 'run_id: "r1"\nherdr_workspace:\n');
+    assert.equal(pinnedHerdrWorkspace(p), undefined);
+  });
+
+  it('pinnedHerdrWorkspace reads the persisted value', () => {
+    const p = writeRunYaml('has-field', 'run_id: "r1"\nherdr_workspace: ws-captured\n');
+    assert.equal(pinnedHerdrWorkspace(p), 'ws-captured');
+  });
+
+  it('setPinnedHerdrWorkspace writes a value when none exists', () => {
+    const p = writeRunYaml('set-on-empty', 'run_id: "r1"\nbase_commit: abc\nstate: planning\n');
+    setPinnedHerdrWorkspace(p, 'ws-initial');
+    assert.equal(pinnedHerdrWorkspace(p), 'ws-initial');
+    // The pre-existing fields are preserved.
+    assert.equal(yamlScalar(p, 'run_id'), 'r1');
+    assert.equal(yamlScalar(p, 'base_commit'), 'abc');
+    assert.equal(yamlScalar(p, 'state'), 'planning');
+  });
+
+  it('setPinnedHerdrWorkspace does not overwrite an existing pin (first capture wins)', () => {
+    const p = writeRunYaml('set-twice', 'run_id: "r1"\nherdr_workspace: ws-first\n');
+    setPinnedHerdrWorkspace(p, 'ws-second');
+    assert.equal(pinnedHerdrWorkspace(p), 'ws-first');
+  });
+
+  it('setPinnedHerdrWorkspace creates a minimal file when run.yaml is missing', () => {
+    const p = join(PIN_DIR, 'created-by-set.yaml');
+    rmSync(p, { force: true });
+    setPinnedHerdrWorkspace(p, 'ws-created');
+    assert.equal(existsSync(p), true);
+    assert.equal(pinnedHerdrWorkspace(p), 'ws-created');
+  });
+
+  it('setPinnedHerdrWorkspace ignores an empty workspace value', () => {
+    const p = writeRunYaml('set-empty-value', 'run_id: "r1"\n');
+    setPinnedHerdrWorkspace(p, '');
+    assert.equal(pinnedHerdrWorkspace(p), undefined);
+  });
+
+  it('setPinnedHerdrWorkspace is best-effort when run.yaml is unwritable', () => {
+    // A directory at the run.yaml path makes writeFileSync throw; the helper
+    // must swallow the failure so a dispatch never blocks on pinning.
+    const dirPath = join(PIN_DIR, 'unwritable-dir');
+    mkdirSync(dirPath, { recursive: true });
+    assert.doesNotThrow(() => setPinnedHerdrWorkspace(dirPath, 'ws-attempted'));
+  });
+
+  it('setPinnedHerdrWorkspace terminates a pre-existing file lacking a trailing newline', () => {
+    const p = writeRunYaml('no-trailing-newline', 'run_id: "r1"');
+    setPinnedHerdrWorkspace(p, 'ws-appended');
+    const content = readFileSync(p, 'utf8');
+    assert.match(content, /\nherdr_workspace: ws-appended\n$/);
+    assert.equal(pinnedHerdrWorkspace(p), 'ws-appended');
+  });
+
+  it('setPinnedHerdrWorkspace creates an exclusive lock file on first capture', () => {
+    const p = writeRunYaml('creates-lock', 'run_id: "r1"\n');
+    setPinnedHerdrWorkspace(p, 'ws-locked');
+    assert.equal(pinnedHerdrWorkspace(p), 'ws-locked');
+    assert.equal(existsSync(`${p}.herdr-workspace.lock`), true);
+  });
+
+  it('a losing racer does not write when the lock is already held by a concurrent writer', () => {
+    // Simulates two concurrent dispatches racing to capture the first
+    // workspace: the lock file existing (but no pin written yet) models the
+    // narrow window where the winner has claimed the lock and is about to
+    // write, but hasn't landed the pin field yet. The loser's call must
+    // observe the held lock, decline to write, and leave the pin unset for
+    // the winner to finish writing -- it must NOT write its own (different)
+    // workspace value, which would silently corrupt the "first capture"
+    // guarantee this whole mechanism exists to provide.
+    const p = writeRunYaml('losing-racer', 'run_id: "r1"\n');
+    writeFileSync(`${p}.herdr-workspace.lock`, '999999', { flag: 'wx' });
+    setPinnedHerdrWorkspace(p, 'ws-loser-attempt');
+    assert.equal(pinnedHerdrWorkspace(p), undefined);
+  });
+
+  it('two sequential captures against the same run.yaml preserve the first value, not the second', () => {
+    // A single-threaded stand-in for real concurrency: because the lock is
+    // exclusive-create, the second call's own lock-acquisition attempt fails
+    // regardless of timing once the first call has already created it, so
+    // this deterministically proves the first-write-wins guarantee without
+    // needing real OS thread/process concurrency in the test.
+    const p = writeRunYaml('sequential-first-wins', 'run_id: "r1"\n');
+    setPinnedHerdrWorkspace(p, 'ws-alpha');
+    setPinnedHerdrWorkspace(p, 'ws-beta');
+    assert.equal(pinnedHerdrWorkspace(p), 'ws-alpha');
   });
 });

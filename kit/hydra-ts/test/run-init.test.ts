@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { runInit } from '../src/run-init.ts';
-import { ledger, runDir, yamlScalar } from '../src/lib.ts';
+import { ledger, pinnedHerdrWorkspace, runDir, yamlScalar } from '../src/lib.ts';
 
 const TEST_TMP = join(import.meta.dirname, 'tmp-run-init');
 const STATE_TMP = join(TEST_TMP, 'state');
@@ -158,5 +158,17 @@ describe('runInit', () => {
     } finally {
       process.stdout.write = originalWrite;
     }
+  });
+
+  it('does not pre-populate herdr_workspace (the pin is captured lazily on the first pane spawn, issue #19)', () => {
+    const runId = 'no-workspace-pin-at-init';
+    const dir = runInit(runId, 'no-pin-base');
+    const yamlPath = join(dir, 'run.yaml');
+    assert.ok(existsSync(yamlPath));
+    // herdr_workspace is intentionally NOT a run-init field — it is added by
+    // dispatch.ts/review-dispatch.ts the first time a pane is spawned in the
+    // run. Verifying this keeps the lazy-capture contract explicit.
+    assert.equal(yamlScalar(yamlPath, 'herdr_workspace'), '');
+    assert.equal(pinnedHerdrWorkspace(yamlPath), undefined);
   });
 });

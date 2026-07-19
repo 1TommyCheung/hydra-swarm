@@ -14,13 +14,16 @@ import {
   codexEventText,
   die,
   herdrState,
+  herdrWorkspacePinEnabled,
   killTree,
   kimiEventText,
   ledgerAppend,
   log,
+  pinnedHerdrWorkspace,
   pollJsonlFile,
   repoRoot,
   runDir,
+  setPinnedHerdrWorkspace,
   stateRoot,
   type JsonlTailState,
 } from './lib.ts';
@@ -269,18 +272,49 @@ function findHerdrWorkspace(
   }
 }
 
+/**
+ * Resolve the lead's herdr workspace id for a reviewer pane spawn within this
+ * run (issue #19). The persisted workspace id is read from run.yaml FIRST;
+ * only when no value has been persisted yet (or the pin is disabled, or
+ * run.yaml is missing/corrupt) does this fall back to a live
+ * findHerdrWorkspace() query — the live `herdr pane list` shell-out itself
+ * is skipped entirely once a pin exists, so a later reviewer pane spawn does
+ * not re-query the operator's current terminal focus. The FIRST successful
+ * live query in a run is persisted into run.yaml; subsequent spawns reuse
+ * it. HYDRA_HERDR_WORKSPACE_PIN=0 disables the pin and restores the legacy
+ * always-live-query behavior. All persistence errors degrade safely to a
+ * live query and never throw or block a dispatch.
+ */
+function resolveReviewPaneWorkspace(
+  runYamlPath: string,
+  repoRootPath: string,
+  exec: ExecFn,
+): string | undefined {
+  if (herdrWorkspacePinEnabled(process.env)) {
+    let pinned: string | undefined;
+    try { pinned = pinnedHerdrWorkspace(runYamlPath); } catch { /* not pinned */ }
+    if (pinned) return pinned;
+  }
+  const live = findHerdrWorkspace(repoRootPath, exec);
+  if (live && herdrWorkspacePinEnabled(process.env)) {
+    try { setPinnedHerdrWorkspace(runYamlPath, live); } catch { /* best effort */ }
+  }
+  return live;
+}
+
 function launchInPane(
   runId: string,
   reviewId: string,
   vendor: string,
   repoRootPath: string,
+  runYamlPath: string,
   wrapped: string,
   exec: ExecFn,
 ): { pane?: string } | undefined {
   const status = exec('herdr', ['status'], { cwd: repoRootPath });
   if (status.exitCode !== 0) return undefined;
 
-  const ws = findHerdrWorkspace(repoRootPath, exec);
+  const ws = resolveReviewPaneWorkspace(runYamlPath, repoRootPath, exec);
   const label = `hydra:${runId}:${reviewId}:${vendor}`;
   const args = [
     'agent',
@@ -466,6 +500,7 @@ export function reviewDispatch(
       reviewId,
       vendor,
       repoRootPath,
+      join(rd, 'run.yaml'),
       wrapped,
       exec,
     );

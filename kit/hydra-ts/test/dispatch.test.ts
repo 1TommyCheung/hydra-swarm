@@ -2174,3 +2174,189 @@ describe('dispatch opencode_model pin', () => {
     assert.equal(mock.calls.length, 1);
   });
 });
+
+describe('dispatch herdr workspace pin (issue #19)', () => {
+  before(() => {
+    rmSync(TEST_TMP, { recursive: true, force: true });
+    mkdirSync(TEST_TMP, { recursive: true });
+  });
+
+  after(() => rmSync(TEST_TMP, { recursive: true, force: true }));
+
+  function herdrFixture(): Fixture {
+    const f = fixture(runId());
+    // dispatch reads herdr_workspace from <runDir>/run.yaml — the test fixture
+    // doesn't create one, so simulate a real run-init by writing an empty one
+    // each test can extend.
+    writeFileSync(join(f.runDir, 'run.yaml'), `run_id: "${f.runId}"\nbase_commit: abc\nstate: planning\ntasks: []\n`);
+    return f;
+  }
+
+  async function dispatchHerdrClaude(f: Fixture, workspace: string, env: NodeJS.ProcessEnv = {}): Promise<{ started: { workspace?: string }; runYamlContent: string | undefined }> {
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    herdr.workspace = workspace;
+    const expectedId = `${f.runId}-task-a-v1`;
+    const clock = new StepClock(() => {
+      writeFileSync(join(f.sessionsDir, `${expectedId}.exit`), '0');
+    });
+    await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('plain spawn must not run'); }, {
+      env: { HYDRA_HERDR_PANES: '1', ...env },
+      herdr,
+      clock,
+    }));
+    let runYamlContent: string | undefined;
+    try {
+      runYamlContent = readFileSync(join(f.runDir, 'run.yaml'), 'utf8');
+    } catch {
+      // The corrupt-run.yaml test deliberately makes run.yaml unreadable.
+      runYamlContent = undefined;
+    }
+    return { started: herdr.starts[0], runYamlContent };
+  }
+
+  it('persists the workspace id on the first pane spawn when run.yaml has no pin yet', async () => {
+    const f = herdrFixture();
+    // run.yaml exists but has no herdr_workspace field.
+    const { started, runYamlContent } = await dispatchHerdrClaude(f, 'ws-initial');
+    assert.equal(started.workspace, 'ws-initial');
+    assert.match(runYamlContent ?? '', /^herdr_workspace: ws-initial$/m);
+  });
+
+  it('creates run.yaml with the pin when the file did not exist before the first spawn', async () => {
+    // A run whose run.yaml is missing (e.g. run-init skipped) must still
+    // capture and persist the workspace on the first pane spawn.
+    const f = fixture(runId());
+    rmSync(join(f.runDir, 'run.yaml'), { force: true });
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    herdr.workspace = 'ws-no-preexisting-yaml';
+    const expectedId = `${f.runId}-task-a-v1`;
+    const clock = new StepClock(() => {
+      writeFileSync(join(f.sessionsDir, `${expectedId}.exit`), '0');
+    });
+    await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('plain spawn must not run'); }, {
+      env: { HYDRA_HERDR_PANES: '1' },
+      herdr,
+      clock,
+    }));
+    const runYamlPath = join(f.runDir, 'run.yaml');
+    assert.equal(existsSync(runYamlPath), true, 'run.yaml should be created on first capture');
+    assert.match(readFileSync(runYamlPath, 'utf8'), /^herdr_workspace: ws-no-preexisting-yaml$/m);
+    assert.equal(herdr.starts[0].workspace, 'ws-no-preexisting-yaml');
+  });
+
+  it('reuses the persisted workspace id on a later spawn even when the live focus differs', async () => {
+    const f = herdrFixture();
+    // The first dispatch in this run captured ws-initial.
+    await dispatchHerdrClaude(f, 'ws-initial');
+    // A second task in the same run, with the operator's focus now elsewhere.
+    // Write task-b.yaml under the SAME run so this is genuinely a second
+    // dispatch within the same run, not a re-run of task-a.
+    const taskBSpec = join(f.runDir, 'tasks', 'task-b.yaml');
+    writeFileSync(
+      taskBSpec,
+      readFileSync(f.taskSpecPath, 'utf8').replace('task_id: task-a', 'task_id: task-b'),
+    );
+
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    herdr.workspace = 'ws-focus-moved';
+    const expectedId = `${f.runId}-task-b-v1`;
+    const clock = new StepClock(() => {
+      writeFileSync(join(f.sessionsDir, `${expectedId}.exit`), '0');
+    });
+    await dispatch(f.runId, 'task-b', injectedOptions(f, () => { throw new Error('plain spawn must not run'); }, {
+      env: { HYDRA_HERDR_PANES: '1' },
+      herdr,
+      clock,
+    }));
+    assert.equal(herdr.starts[0].workspace, 'ws-initial', 'second spawn must reuse the pinned value, not the live focus');
+  });
+
+  it('does not invoke focusedWorkspace() at all on a subsequent spawn when a pin exists', async () => {
+    // Spec contract (issue #19, step 2): the persisted workspace id is read
+    // FIRST; the live focusedWorkspace() shell-out is SKIPPED entirely once a
+    // pin exists, not merely have its result discarded. The operator's focus
+    // having moved is one symptom; the more fundamental contract is that the
+    // live query itself must not happen on every pane-spawn call site.
+    const f = herdrFixture();
+    writeFileSync(join(f.runDir, 'run.yaml'), `run_id: "${f.runId}"\nherdr_workspace: ws-pinned\n`);
+
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    herdr.workspace = 'ws-focus-moved';
+    let focusedCalls = 0;
+    const realFocused = herdr.focusedWorkspace.bind(herdr);
+    herdr.focusedWorkspace = (): string | undefined => {
+      focusedCalls += 1;
+      return realFocused();
+    };
+
+    const expectedId = `${f.runId}-task-a-v1`;
+    const clock = new StepClock(() => {
+      writeFileSync(join(f.sessionsDir, `${expectedId}.exit`), '0');
+    });
+    await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('plain spawn must not run'); }, {
+      env: { HYDRA_HERDR_PANES: '1' },
+      herdr,
+      clock,
+    }));
+
+    assert.equal(focusedCalls, 0, 'live focusedWorkspace() must not be called once a pin exists');
+    assert.equal(herdr.starts[0].workspace, 'ws-pinned');
+  });
+
+  it('HYDRA_HERDR_WORKSPACE_PIN=0 disables the pin and restores the live-query behavior', async () => {
+    const f = herdrFixture();
+    // Pre-pin run.yaml with ws-initial so the disabled path has something to skip.
+    writeFileSync(join(f.runDir, 'run.yaml'), `run_id: "${f.runId}"\nherdr_workspace: ws-initial\n`);
+    const { started } = await dispatchHerdrClaude(f, 'ws-focus-live', { HYDRA_HERDR_WORKSPACE_PIN: '0' });
+    assert.equal(started.workspace, 'ws-focus-live', 'escape hatch must live-query rather than reuse the pin');
+  });
+
+  it('falls back to the live workspace when run.yaml cannot be read', async () => {
+    const f = herdrFixture();
+    const yamlPath = join(f.runDir, 'run.yaml');
+    // Replace run.yaml with a directory so yamlScalar's readFileSync throws
+    // (EISDIR). The dispatch must not crash and must use the live value.
+    rmSync(yamlPath, { force: true });
+    mkdirSync(yamlPath, { recursive: true });
+    const { started } = await dispatchHerdrClaude(f, 'ws-corrupt-fallback');
+    assert.equal(started.workspace, 'ws-corrupt-fallback', 'an unreadable run.yaml must fall back to a live query');
+  });
+
+  it('pins the opencode monitor pane to the same workspace as the rest of the run', async () => {
+    // The OpenCode monitor pane is launched through openOpencodeMonitor and
+    // also goes through resolvePaneWorkspace. Verify the pin applies there too:
+    // seed run.yaml with a captured workspace, simulate the operator's focus
+    // having moved, and assert the monitor pane is launched on the pinned one.
+    const f = fixture(runId(), { vendor: 'opencode' });
+    writeFileSync(join(f.runDir, 'run.yaml'), `run_id: "${f.runId}"\nherdr_workspace: ws-opencode-pin\n`);
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    herdr.workspace = 'ws-opencode-live-changed';
+    const mock = fakeSpawn();
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+      env: { HYDRA_HERDR_PANES: '1' },
+      herdr,
+    }));
+    assert.equal(herdr.starts.length, 1);
+    assert.equal(herdr.starts[0].workspace, 'ws-opencode-pin', 'monitor pane must reuse the pinned workspace');
+  });
+
+  it('HYDRA_HERDR_WORKSPACE_PIN=0 lets the opencode monitor pane follow the live focus', async () => {
+    const f = fixture(runId(), { vendor: 'opencode' });
+    writeFileSync(join(f.runDir, 'run.yaml'), `run_id: "${f.runId}"\nherdr_workspace: ws-opencode-pin\n`);
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    herdr.workspace = 'ws-opencode-live';
+    const mock = fakeSpawn();
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+      env: { HYDRA_HERDR_PANES: '1', HYDRA_HERDR_WORKSPACE_PIN: '0' },
+      herdr,
+    }));
+    assert.equal(herdr.starts.length, 1);
+    assert.equal(herdr.starts[0].workspace, 'ws-opencode-live');
+  });
+});

@@ -441,6 +441,91 @@ export function yamlScalar(file: string, key: string): string {
 // Herdr integration.
 // ---------------------------------------------------------------------------
 
+/**
+ * Per-run herdr workspace pinning (issue #19): a herdr pane must stay pinned
+ * to the workspace the run started in, not follow whatever tab/Space the
+ * operator's terminal focus happens to be on at the moment a later pane is
+ * spawned. The lead's workspace id is captured on the first successful
+ * focusedWorkspace() query in a run and persisted into that run's run.yaml;
+ * subsequent pane spawns read the persisted value rather than re-querying the
+ * live focus. HYDRA_HERDR_WORKSPACE_PIN=0 disables the pin and restores the
+ * legacy always-live-query behavior.
+ *
+ * Persistence is best effort: a missing/corrupt run.yaml, or a run.yaml
+ * without the field yet, must fall back to a live query and never throw.
+ */
+export const HERDR_WORKSPACE_PIN_DISABLED = '0';
+
+export function herdrWorkspacePinEnabled(env: NodeJS.ProcessEnv | undefined): boolean {
+  return env?.HYDRA_HERDR_WORKSPACE_PIN !== HERDR_WORKSPACE_PIN_DISABLED;
+}
+
+export function pinnedHerdrWorkspace(runYamlPath: string): string | undefined {
+  try {
+    const value = yamlScalar(runYamlPath, 'herdr_workspace');
+    return value === '' ? undefined : value;
+  } catch {
+    // Missing run.yaml or read failure: not pinned.
+    return undefined;
+  }
+}
+
+/**
+ * A plain check-then-write on run.yaml is not atomic across processes: two
+ * concurrent dispatches could both observe "no pin yet" and the second
+ * writer would still land, clobbering the first-captured workspace. A single
+ * filesystem primitive IS atomic across processes though: exclusive file
+ * creation (O_CREAT | O_EXCL, Node's 'wx' flag) fails with EEXIST if the
+ * file already exists. Use a dedicated lock file next to run.yaml as a
+ * one-shot "first past the post" latch: whichever process creates it wins
+ * the right to write the pin; every later racer's create attempt fails and
+ * that racer must not write, only read back the winner's value. The lock
+ * file is intentionally never deleted — its continued existence for the
+ * life of the run IS the "already captured" signal, not a re-entrant lock.
+ */
+function herdrWorkspaceLockPath(runYamlPath: string): string {
+  return `${runYamlPath}.herdr-workspace.lock`;
+}
+
+export function setPinnedHerdrWorkspace(runYamlPath: string, workspace: string): void {
+  if (!workspace) return;
+  try {
+    // Fast path: already pinned, nothing to do.
+    if (pinnedHerdrWorkspace(runYamlPath) !== undefined) return;
+
+    try {
+      writeFileSync(herdrWorkspaceLockPath(runYamlPath), String(process.pid), { flag: 'wx' });
+    } catch {
+      // Lock already exists: another process won this race (or is mid-write).
+      // Do not write — the winner's value is what subsequent reads must see.
+      return;
+    }
+
+    // Lock acquired: this process won. Defensively re-check (a previous run's
+    // stale lock could in principle coexist with an already-written pin).
+    if (pinnedHerdrWorkspace(runYamlPath) !== undefined) return;
+
+    let content = '';
+    try {
+      content = readFileSync(runYamlPath, 'utf8');
+    } catch {
+      // Missing run.yaml: write a minimal file with just the pin so the next
+      // reader finds it. Real run.yaml fields (run_id/base_commit/...) are
+      // created by run-init and won't be clobbered when the file exists.
+      writeFileSync(runYamlPath, `herdr_workspace: ${workspace}\n`, 'utf8');
+      return;
+    }
+    if (content === '') {
+      writeFileSync(runYamlPath, `herdr_workspace: ${workspace}\n`, 'utf8');
+      return;
+    }
+    const padded = content.endsWith('\n') ? content : `${content}\n`;
+    writeFileSync(runYamlPath, `${padded}herdr_workspace: ${workspace}\n`, 'utf8');
+  } catch {
+    // Pinning must never block a dispatch — callers fall back to a live query.
+  }
+}
+
 export function herdrState(
   pane: string,
   vendor: string,
@@ -591,6 +676,9 @@ export default {
   ledgerAppend,
   deriveDropFromGit,
   herdrState,
+  herdrWorkspacePinEnabled,
+  pinnedHerdrWorkspace,
+  setPinnedHerdrWorkspace,
   killTree,
   withTimeout,
   normalizeRelpath,
