@@ -76,9 +76,16 @@ see `operations.md`).
 | Input modalities | Text + image | Text + image | **Text only** (per Z.AI dev doc) | **Text + image + video** (MoonViT) |
 | Reasoning control | Effort levels | none→max; ultra multi-agent | Thinking modes, `reasoning_effort: max` | **Always-on thinking**; `preserve_thinking` mandatory |
 | Openness | Proprietary | Proprietary | Open weights, MIT | Open weights, Modified MIT |
-| Cost (per 1M in/out) | Subscription/API | $5 / $30 | Free tier + cheap plan | ~$0.95 ($0.19 cached) / $4.00; HighSpeed 180–260 tok/s |
+| Cost (per 1M in/out) — snapshot, see warning below | Subscription/API — [claude.com/pricing](https://claude.com/pricing) · [API pricing](https://platform.claude.com/docs/en/about-claude/pricing) | $5 / $30 — [OpenAI API pricing](https://developers.openai.com/api/docs/pricing) | Free tier + cheap plan — [z.ai GLM Coding Plan](https://z.ai/subscribe) | ~$0.95 ($0.19 cached) / $4.00; HighSpeed 180–260 tok/s — [Moonshot platform pricing](https://platform.moonshot.ai/docs/pricing) |
 | Documented sweet spot | Frontier general + implementation discipline | Hardest reasoning | Project-scale takeover, standards adherence, refactoring (FrontierSWE 74.4; TB2.1 81.0) | Token-efficient agent loops; visual/mobile debugging |
 | Documented gaps | — | Expensive; slower | From-scratch generation; marathon tasks | Smallest context; trails frontier SWE |
+
+> **Pricing warning:** the cost figures above are a point-in-time snapshot and
+> WILL go stale — vendors change rates, add caching/batch discounts, and gate
+> models behind different subscription tiers. Always confirm current
+> subscription and API token pricing against the official vendor pages linked
+> in the table before making cost-based allocation decisions; the seeded
+> `cost_hint` values in `kit/hydra/profiles/*.yaml` inherit the same caveat.
 
 ## 4. Per-vendor adapter notes
 
