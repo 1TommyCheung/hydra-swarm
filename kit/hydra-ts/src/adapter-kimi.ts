@@ -22,9 +22,10 @@ import { prepareWorkerEnv } from './worker-devenv.ts';
 // ---------------------------------------------------------------------------
 // Kimi CLI adapter (TypeScript port of hydra/adapters/kimi.sh).
 //
-// Supports the two verbs from the bash adapter:
+// Supports three verbs:
 //   visual  - read-only multimodal analysis
 //   start   - sandboxed write role
+//   resume  - sandboxed write role continuing a prior Kimi session (-S <id>)
 //
 // External CLIs are injectable via the options bag so tests never invoke real
 // vendor binaries.
@@ -523,18 +524,29 @@ export async function kimiVisual(
 }
 
 /**
+ * Run the Kimi adapter for the given verb (mirrors adapter-claude.ts's
+ * `claude()`):
+ *   start  <task_spec> <worktree> <inbox_dir> <sessions_dir> <agent_run_id>
+ *   resume <task_spec> <worktree> <inbox_dir> <sessions_dir> <agent_run_id> <prior_session_id>
+ *
  * Sandboxed write role. Confines kimi with srt to the worktree,
  * git-common-dir, and a handful of system paths, then bridges the worker's
- * in-worktree result into the inbox.
+ * in-worktree result into the inbox. On `resume` the SAME full worker prompt
+ * is re-sent together with `-S <prior_session_id>` (the Kimi CLI's
+ * `--session` flag): the vendor's own session history provides continuity
+ * while the full boilerplate re-anchors guardrails against context drift —
+ * the same design as adapter-claude.ts's `--resume` path.
  *
  * @returns the agent_run_id
  */
-export async function kimiStart(
+export async function kimi(
+  verb: 'start' | 'resume',
   taskSpec: string,
   worktree: string,
   inbox: string,
   sessions: string,
   agentRunId: string,
+  priorSessionId?: string,
   options: KimiAdapterOptions = {},
 ): Promise<string> {
   const commandExists = options.commandExists ?? defaultCommandExists;
@@ -544,7 +556,10 @@ export async function kimiStart(
   }
 
   if (!taskSpec || !worktree || !inbox || !sessions || !agentRunId) {
-    die('usage: kimiStart(taskSpec, worktree, inbox, sessions, agentRunId)');
+    die('usage: kimi(verb, taskSpec, worktree, inbox, sessions, agentRunId, [priorSessionId])');
+  }
+  if (verb !== 'start' && verb !== 'resume') {
+    die(`kimi: unknown verb '${verb}'`);
   }
 
   const exec = options.exec ?? execFileSync;
@@ -686,15 +701,23 @@ export async function kimiStart(
   const cliJsonl = join(sessionsAbs, `${agentRunId}.cli.jsonl`);
   const stderrPath = join(sessionsAbs, `${agentRunId}.stderr`);
 
-  const kimiCommand = [
-    'kimi',
+  const kimiArgs = [
     '-p',
     prompt,
     '--output-format',
     'stream-json',
-    '--add-dir',
-    worktree,
-  ].map(shellQuote).join(' ');
+  ];
+  if (verb === 'resume' && priorSessionId) {
+    // Kimi's resume flag is `-S, --session <id>` (verified against the
+    // installed CLI's `kimi --help`; docs/vendor-adapters.md §3). Inserted
+    // ahead of --add-dir, exactly where adapter-claude.ts appends --resume.
+    // Each token is individually shell-quoted below, so the srt -c command
+    // string stays valid.
+    kimiArgs.push('-S', priorSessionId);
+    log(`kimi resume from session ${priorSessionId}`);
+  }
+  kimiArgs.push('--add-dir', worktree);
+  const kimiCommand = ['kimi', ...kimiArgs].map(shellQuote).join(' ');
   await runStreaming('srt', ['-s', settingsPath, '-c', kimiCommand], {
     cwd: wtAbs,
     stdoutPath: cliJsonl,
@@ -782,12 +805,44 @@ export async function kimiStart(
   return agentRunId;
 }
 
+/**
+ * Sandboxed write role (the `start` verb). Backwards-compatible wrapper kept
+ * for existing importers; delegates to `kimi('start', ...)`.
+ *
+ * @returns the agent_run_id
+ */
+export async function kimiStart(
+  taskSpec: string,
+  worktree: string,
+  inbox: string,
+  sessions: string,
+  agentRunId: string,
+  options: KimiAdapterOptions = {},
+): Promise<string> {
+  return kimi('start', taskSpec, worktree, inbox, sessions, agentRunId, undefined, options);
+}
+
+/** Convenience wrapper for the `resume` verb (mirrors adapter-claude.ts's `resume()`). */
+export async function resume(
+  taskSpec: string,
+  worktree: string,
+  inbox: string,
+  sessions: string,
+  agentRunId: string,
+  priorSessionId: string,
+  options: KimiAdapterOptions = {},
+): Promise<string> {
+  return kimi('resume', taskSpec, worktree, inbox, sessions, agentRunId, priorSessionId, options);
+}
+
 // Backwards-compatible default export for consumers that import the module.
 export default {
   buildWorkerPrompt,
   makeSrtSettings,
   kimiVisual,
+  kimi,
   kimiStart,
+  resume,
 };
 
 // ---------------------------------------------------------------------------
@@ -815,9 +870,19 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
         args[5],
       );
       process.stdout.write(`${agentRunId}\n`);
+    } else if (verb === 'resume') {
+      const agentRunId = await resume(
+        args[1],
+        args[2],
+        args[3],
+        args[4],
+        args[5],
+        args[6],
+      );
+      process.stdout.write(`${agentRunId}\n`);
     } else {
       requireKimi(defaultCommandExists);
-      die('usage: adapter-kimi.ts visual|start ...');
+      die('usage: adapter-kimi.ts visual|start|resume ...');
     }
     return 0;
   } catch (error) {

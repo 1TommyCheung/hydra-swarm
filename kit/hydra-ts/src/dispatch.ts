@@ -128,14 +128,14 @@ export type AdapterRuntime = 'ts' | 'compiled';
  * binary cannot stat or read an adapter source file, so vendor validity and
  * resume capability are compile-time constants. The key set mirrors cli.ts's
  * `adapter-<vendor>` routes 1:1 (docs/bun-migration-stage1-cli.md);
- * `resume` mirrors each adapter's verb parser (adapter-claude/adapter-stub
- * implement start|resume; adapter-codex/adapter-kimi/adapter-opencode do
+ * `resume` mirrors each adapter's verb parser (adapter-claude/adapter-kimi/
+ * adapter-stub implement start|resume; adapter-codex/adapter-opencode do
  * not). Keep in sync with the routing table and the adapters.
  */
 export const COMPILED_ADAPTERS: Readonly<Record<string, { resume: boolean }>> = {
   claude: { resume: true },
   codex: { resume: false },
-  kimi: { resume: false },
+  kimi: { resume: true },
   opencode: { resume: false },
   stub: { resume: true },
 };

@@ -17,9 +17,11 @@ import type { ChildProcess } from 'node:child_process';
 import type { SpawnOptionsWithoutStdio } from 'node:child_process';
 import {
   buildWorkerPrompt,
+  kimi,
   kimiStart,
   kimiVisual,
   makeSrtSettings,
+  resume,
 } from '../src/adapter-kimi.ts';
 
 const TEST_TMP = join(import.meta.dirname, 'tmp-adapter-kimi');
@@ -986,5 +988,182 @@ describe('kimiStart', () => {
       /failed to build valid srt settings/,
     );
     assert.equal(spawned, false);
+  });
+});
+
+describe('kimi resume', () => {
+  before(() => mkdirSync(TEST_TMP, { recursive: true }));
+  after(cleanTmp);
+
+  it('inserts -S <priorSessionId> ahead of --add-dir in the sandboxed kimi command', async () => {
+    const dir = makeTempDir('resume-flag');
+    const repoRoot = join(dir, 'repo');
+    initGitRepo(repoRoot);
+    const baseCommit = commitFile(repoRoot, 'README.md', '# hi\n');
+
+    const worktree = join(dir, 'worktree');
+    execFileSync('git', ['-C', repoRoot, 'worktree', 'add', '--quiet', worktree, baseCommit], {
+      encoding: 'utf8',
+      stdio: 'ignore',
+    });
+
+    const taskSpec = join(dir, 'task.yaml');
+    writeTaskSpec(taskSpec, { base_commit: baseCommit });
+    const agentRunId = 'agent-resume-flag';
+
+    const recording: SpawnRecording = {};
+    const spawn = fakeSpawn(recording, { stdout: '' });
+
+    const { stderr } = await captureStderr(async () => {
+      const result = await resume(taskSpec, worktree, join(dir, 'inbox'), join(dir, 'sessions'), agentRunId, 'sess-prior-1', {
+        spawn,
+        exec: adapterExec([]),
+        commandExists: commandLookup(),
+        prepareWorkerEnv: stubPrepareWorkerEnv,
+        sandboxDomainsPath: writeBaselineDomains(dir),
+      });
+      assert.equal(result, agentRunId);
+    });
+
+    assert.equal(recording.command, 'srt');
+    const commandString = recording.args?.[recording.args.indexOf('-c') + 1] ?? '';
+    const tokens = commandString.split(' ');
+    // The installed Kimi CLI's resume flag is `-S, --session <id>` (verified
+    // via `kimi --help`; docs/vendor-adapters.md §3) — inserted right before
+    // --add-dir, where adapter-claude.ts appends --resume.
+    const flagIndex = tokens.indexOf("'-S'");
+    assert.notEqual(flagIndex, -1);
+    assert.equal(tokens[flagIndex + 1], `'sess-prior-1'`);
+    assert.ok(flagIndex < tokens.indexOf("'--add-dir'"));
+    assert.equal(tokens[0], `'kimi'`);
+    assert.equal(tokens[1], `'-p'`);
+    assert.match(commandString, /'--output-format' 'stream-json'/);
+    // The resume is logged, like adapter-claude's `claude resume from session ...`.
+    assert.ok(stderr.includes('kimi resume from session sess-prior-1'));
+  });
+
+  it('start leaves the kimi command unchanged — no -S flag without a prior session', async () => {
+    const dir = makeTempDir('start-no-resume-flag');
+    const repoRoot = join(dir, 'repo');
+    initGitRepo(repoRoot);
+    const baseCommit = commitFile(repoRoot, 'README.md', '# hi\n');
+
+    const worktree = join(dir, 'worktree');
+    execFileSync('git', ['-C', repoRoot, 'worktree', 'add', '--quiet', worktree, baseCommit], {
+      encoding: 'utf8',
+      stdio: 'ignore',
+    });
+
+    const taskSpec = join(dir, 'task.yaml');
+    writeTaskSpec(taskSpec, { base_commit: baseCommit });
+    const agentRunId = 'agent-start-no-resume';
+
+    const recording: SpawnRecording = {};
+    const spawn = fakeSpawn(recording, { stdout: '' });
+
+    await captureStderr(async () => {
+      const result = await kimiStart(taskSpec, worktree, join(dir, 'inbox'), join(dir, 'sessions'), agentRunId, {
+        spawn,
+        exec: adapterExec([]),
+        commandExists: commandLookup(),
+        prepareWorkerEnv: stubPrepareWorkerEnv,
+        sandboxDomainsPath: writeBaselineDomains(dir),
+      });
+      assert.equal(result, agentRunId);
+    });
+
+    assert.equal(recording.command, 'srt');
+    const commandString = recording.args?.[recording.args.indexOf('-c') + 1] ?? '';
+    assert.match(commandString, /^'kimi' '-p' /);
+    assert.match(commandString, /'--output-format' 'stream-json'/);
+    assert.match(commandString, /'--add-dir'/);
+    assert.ok(commandString.includes(`'${worktree}'`));
+    // No resume flag and no session id leak onto the cold-start path.
+    assert.ok(!commandString.split(' ').includes("'-S'"));
+    assert.ok(!commandString.includes('sess-prior-1'));
+  });
+
+  it('captures the new session id and bridges the worker result on the resume path', async () => {
+    const dir = makeTempDir('resume-bridge');
+    const repoRoot = join(dir, 'repo');
+    initGitRepo(repoRoot);
+    const baseCommit = commitFile(repoRoot, 'README.md', '# hi\n');
+
+    const worktree = join(dir, 'worktree');
+    execFileSync('git', ['-C', repoRoot, 'worktree', 'add', '--quiet', worktree, baseCommit], {
+      encoding: 'utf8',
+      stdio: 'ignore',
+    });
+
+    const taskSpec = join(dir, 'task.yaml');
+    writeTaskSpec(taskSpec, { base_commit: baseCommit });
+    const inbox = join(dir, 'inbox');
+    const sessions = join(dir, 'sessions');
+    const agentRunId = 'agent-resume-bridge';
+
+    const workerResult = {
+      task_id: 'adapter-kimi',
+      run_id: '0019',
+      spec_version: 1,
+      vendor: 'kimi',
+      status: 'completed',
+      branch: 'hydra/0019/adapter-kimi',
+      base_commit: baseCommit,
+      head_commit: baseCommit,
+      summary: 'resumed and done',
+      files_changed: ['hydra-ts/src/adapter-kimi.ts'],
+      verification_claims: [],
+      risks: [],
+      unresolved_questions: [],
+      suggested_additional_checks: [],
+    };
+    const stdoutLines = [
+      JSON.stringify({ role: 'assistant', content: 'continuing' }),
+      JSON.stringify({ session_id: 'sess-resumed-2' }),
+    ];
+    const recording: SpawnRecording = {};
+    const spawn = fakeSpawn(recording, {
+      stdout: `${stdoutLines.join('\n')}\n`,
+      onSpawn: () => {
+        writeFileSync(join(worktree, '.hydra-result.json'), JSON.stringify(workerResult), 'utf8');
+      },
+    });
+
+    await captureStderr(async () => {
+      const result = await resume(taskSpec, worktree, inbox, sessions, agentRunId, 'sess-prior-1', {
+        spawn,
+        exec: adapterExec([]),
+        commandExists: commandLookup(),
+        prepareWorkerEnv: stubPrepareWorkerEnv,
+        sandboxDomainsPath: writeBaselineDomains(dir),
+      });
+      assert.equal(result, agentRunId);
+    });
+
+    // Session-id capture is identical to the start path: the NEW session id
+    // emitted by this run's stream (not the prior one passed via -S).
+    const sessionJson = JSON.parse(readFileSync(join(sessions, `${agentRunId}.json`), 'utf8'));
+    assert.equal(sessionJson.agent_run_id, agentRunId);
+    assert.equal(sessionJson.vendor, 'kimi');
+    assert.equal(sessionJson.session_id, 'sess-resumed-2');
+
+    const cliJsonl = readFileSync(join(sessions, `${agentRunId}.cli.jsonl`), 'utf8');
+    assert.ok(cliJsonl.includes('sess-resumed-2'));
+
+    // Result bridging is identical to the start path too.
+    const resultDrop = JSON.parse(readFileSync(join(inbox, 'result.json'), 'utf8'));
+    assert.equal(resultDrop.vendor, 'kimi');
+    assert.equal(resultDrop.session_id, 'sess-resumed-2');
+    assert.equal(resultDrop.status, 'completed');
+    assert.equal(resultDrop.summary, 'resumed and done');
+  });
+
+  it('rejects an unknown verb through the shared kimi() entry point', async () => {
+    await assert.rejects(
+      () => kimi('explore' as 'start', 'spec', 'wt', 'inbox', 'sessions', 'agent', undefined, {
+        commandExists: commandLookup(),
+      }),
+      /kimi: unknown verb 'explore'/,
+    );
   });
 });

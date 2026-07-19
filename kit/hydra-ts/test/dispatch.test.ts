@@ -1002,14 +1002,17 @@ describe('dispatch Bash parity', () => {
   });
 
   it('emits a vendor-named loud warning when resume is requested with a session but the adapter lacks resume support (issue #20)', async () => {
-    // Run-0051 scenario: an operator amends a ~40-minute kimi task with
-    // delivery=resume; a session file exists, but adapter-kimi has no resume
-    // verb. The cold restart must be loud and specific about WHY (vendor
-    // adapter lacks resume) and WHAT happens next (full re-run).
-    const f = fixture(runId(), { vendor: 'kimi' });
+    // Run-0051 scenario shape: an operator amends a long-running task with
+    // delivery=resume; a session file exists, but the vendor's adapter has no
+    // resume verb. codex is the fixture vendor here — kimi grew real resume
+    // support in run 0054 (issue #20 tier 2), so codex now exercises the
+    // no-resume-support branch. The cold restart must be loud and specific
+    // about WHY (vendor adapter lacks resume) and WHAT happens next (full
+    // re-run).
+    const f = fixture(runId(), { vendor: 'codex' });
     writeFileSync(
       join(f.sessionsDir, `${f.runId}-task-a-v1.json`),
-      JSON.stringify({ session_id: 'session-kimi' }),
+      JSON.stringify({ session_id: 'session-codex' }),
     );
     const mock = fakeSpawn();
     const { output } = await captureStderr(() =>
@@ -1019,13 +1022,61 @@ describe('dispatch Bash parity', () => {
     );
     // Behavior unchanged: cold restart (verb=start), priorSession forwarded.
     assert.equal(mock.calls[0].args[2], 'start');
-    assert.equal(mock.calls[0].args.at(-1), 'session-kimi');
+    assert.equal(mock.calls[0].args.at(-1), 'session-codex');
     // Message content: explicitly names the vendor and the cold-restart cost.
     assert.match(output, /HYDRA_DELIVERY=resume/i);
-    assert.match(output, /kimi ADAPTER HAS NO REAL RESUME SUPPORT/);
+    assert.match(output, /codex ADAPTER HAS NO REAL RESUME SUPPORT/);
     assert.match(output, /FULL COLD RESTART/);
     assert.match(output, /NOT a quick incremental continuation/);
     assert.match(output, /timeout_minutes=45/);
+  });
+
+  it('returns verb=resume for kimi with a prior session and HYDRA_DELIVERY=resume (issue #20 tier 2)', async () => {
+    // Kimi grew real resume support in run 0054. The ts-runtime detection
+    // greps the REAL adapter-kimi.ts source (same style as the adapter-claude
+    // case in 'detects resume support from TypeScript exports'), so
+    // determineDelivery must now select the resume verb — not the cold-restart
+    // fallback — and forward the prior session id as the 7th adapter arg.
+    const f = fixture(runId(), {
+      vendor: 'kimi',
+      tsAdapterContent: readFileSync(join(import.meta.dirname, '../src/adapter-kimi.ts'), 'utf8'),
+    });
+    writeFileSync(
+      join(f.sessionsDir, `${f.runId}-task-a-v1.json`),
+      JSON.stringify({ session_id: 'session-kimi-prior' }),
+    );
+    const mock = fakeSpawn();
+    const { output } = await captureStderr(() =>
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+        env: { HYDRA_ADAPTER_RUNTIME: 'ts', HYDRA_DELIVERY: 'resume' },
+      })),
+    );
+    assert.equal(mock.calls[0].args[2], 'resume');
+    assert.equal(mock.calls[0].args.at(-1), 'session-kimi-prior');
+    assert.equal(ledger(f)[0].delivery, 'resume');
+    // The cold-restart fallback warnings must NOT fire when resume succeeds.
+    assert.doesNotMatch(output, /FULL COLD RESTART/);
+    assert.doesNotMatch(output, /NO PRIOR SESSION/);
+    assert.doesNotMatch(output, /NO REAL RESUME SUPPORT/);
+  });
+
+  it('compiled runtime takes kimi resume capability from the static registry (issue #20 tier 2)', async () => {
+    // COMPILED_ADAPTERS.kimi.resume is now true, so the compiled runtime —
+    // which cannot grep an adapter source file — also selects the resume verb
+    // for kimi when a prior session exists, via the self-reexec route.
+    const f = fixture(runId(), { vendor: 'kimi' });
+    writeFileSync(
+      join(f.sessionsDir, `${f.runId}-task-a-v1.json`),
+      JSON.stringify({ session_id: 'session-kimi-compiled' }),
+    );
+    const mock = fakeSpawn();
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+      adapterRuntime: 'compiled',
+      env: { HYDRA_DELIVERY: 'resume' },
+    }));
+    assert.equal(mock.calls[0].args[0], 'adapter-kimi');
+    assert.equal(mock.calls[0].args[1], 'resume');
+    assert.equal(mock.calls[0].args.at(-1), 'session-kimi-compiled');
   });
 
   it('stays silent about cold-restart fallback when delivery is not resume (issue #20)', async () => {
