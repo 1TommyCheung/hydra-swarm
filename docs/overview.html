@@ -383,10 +383,10 @@
     <h1 class="wordmark"><span class="h">HYDRA</span>-SWARM<span class="cursor" aria-hidden="true"></span></h1>
     <p class="tagline">One lead plans and judges. Four vendors — Claude, Codex, OpenCode, Kimi — implement in isolated worktrees. Nothing reaches your tree without crossing the trust boundary.</p>
     <div class="hero-meta">
-      <span class="pill">v0.4.0</span>
+      <span class="pill">v0.8.1</span>
       <span class="pill">MIT licensed</span>
-      <span class="pill">TypeScript harness</span>
-      <span class="pill">689 tests passing</span>
+      <span class="pill">compiled binary default</span>
+      <span class="pill">gc + run-log lifecycle</span>
     </div>
   </div>
 </header>
@@ -488,7 +488,7 @@
 <section id="hang-detection">
   <div class="wrap">
     <div class="section-head">
-      <div class="eyebrow">latest addition · task #31</div>
+      <div class="eyebrow">hang detection · task #31</div>
       <h2>An agent that's alive isn't the same as an agent that's working</h2>
       <p class="dim">A worker can stream output forever without producing anything — the same failing command, the same three-step cycle, on repeat. Hydra-Swarm now has an answer to that on both ends: a way to check in, and a way to make sure something is actually watching.</p>
     </div>
@@ -548,8 +548,8 @@
         <div class="stat-label">vendor adapters, one contract</div>
       </div>
       <div>
-        <div class="stat-value">689</div>
-        <div class="stat-label">tests passing on master</div>
+        <div class="stat-value">839</div>
+        <div class="stat-label">tests, concurrent + promote suites (cutover)</div>
       </div>
       <div>
         <div class="stat-value">3</div>
@@ -565,7 +565,7 @@
 
 <footer>
   <div class="wrap" style="display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:12px; width:100%;">
-    <span class="mono">hydra-swarm · MIT · TypeScript-default harness</span>
+    <span class="mono">hydra-swarm · MIT · compiled-binary default runtime</span>
     <span class="mono">plan → dispatch → promote → review → squash → integrate</span>
   </div>
 </footer>

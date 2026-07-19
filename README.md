@@ -1,6 +1,6 @@
 # Hydra-Swarm
 
-**v0.7.2** · A local multi-agent development harness. A lead (Claude Code)
+**v0.8.1** · A local multi-agent development harness. A lead (Claude Code)
 plans, dispatches, and judges; a deterministic harness owns state, process
 launch, and verification. Four vendor heads — **Claude**, **Codex**,
 **OpenCode/GLM**, and **Kimi** — implement tasks in isolated Git worktrees.
@@ -15,11 +15,12 @@ a sandboxed verification run before it counts. Merge, push, and deploy remain
 human-authorized.
 
 > **Status:** Waves 0–2 complete and dogfooded on this repo's own
-> development. Wave 3 (standalone installable packaging) in progress:
-> `/hydra-doctor` preflight, head auto-detection, and the compiled
-> single-binary runtime are done; kit extraction and `hydra-init` scaffolding
-> remain. See [CHANGELOG.md](CHANGELOG.md) for releases and
-> `docs/roadmap.md` for the full narrative history.
+> development. Since Wave 2: head auto-detection, the compiled single-binary
+> runtime with GitHub Releases distribution (`fetch-bin.sh`), and the `hydra
+> gc` + `hydra run-log` worktree-lifecycle pair are done (see
+> [CHANGELOG.md](CHANGELOG.md) for the 0.7.x–0.8.x releases). The remaining
+> packaging work (kit extraction, `hydra-init` scaffolding, global ledger,
+> bundle export/import) is still design-only — see `docs/roadmap.md`.
 
 ## Requirements
 
@@ -63,6 +64,12 @@ manifest). Workers additionally receive `HYDRA_NODE_BIN` pointing at a
 verified Node ≥ 22.6, so login-shell PATH rebuilds inside vendor tool shells
 can't strand them on a stale system node.
 
+At run close, `hydra run-log <run-id>` renders a per-run audit document to
+`docs/hydra-dev-logs/run-<id>.md` (document, then delete) and `hydra gc
+--apply --keep-last 3` reaps worktrees+branches the ledger proves integrated
+— the two together keep worktrees from growing forever. See
+`docs/operations.md` § Worktree retention policy.
+
 ## The loop
 
 1. `run-init` — create run state (and refresh the head snapshot).
@@ -83,6 +90,8 @@ can't strand them on a stale system node.
 8. `integrate` — serialized, dependency-ordered cherry-pick + combined
    verification gate.
 9. Human-authorized merge, push, and deploy.
+10. Run close — `run-log` (audit document) then `gc --apply --keep-last 3`
+    (ledger-proven worktree reaping).
 
 Operational commands while a task runs: `status` (ledger-authoritative state
 + live progress tail), `cancel-task` (the only supported clean cancel), and

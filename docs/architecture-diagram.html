@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Hydra-Swarm — Architecture (v0.7.0)</title>
+<title>Hydra-Swarm — Architecture (v0.8.1)</title>
 <style>
   :root {
     --bg: #0b0d12;
@@ -49,7 +49,7 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>Hydra-Swarm architecture <span class="v">v0.7.0</span></h1>
+  <h1>Hydra-Swarm architecture <span class="v">v0.8.1</span></h1>
   <p class="sub">Deterministic gates decide; probabilistic tools inform. A lead plans and judges,
   four vendor heads implement in isolated worktrees, and nothing a worker claims is real until it
   crosses the trust boundary.</p>
@@ -271,8 +271,15 @@
     <div class="note">
       <h2>Runtime</h2>
       <ul>
-        <li>Default: Bun-compiled single binary (<code>npm run build:bin</code>); source lane falls back automatically.</li>
+        <li>Default: Bun-compiled single binary. <code>fetch-bin.sh</code> downloads the release matching this plugin's version into a version-keyed cache; <code>npm run build:bin</code> builds locally. Source lane falls back automatically.</li>
         <li><code>hydra version</code> reports the version the binary was <em>built</em> from; <code>hydra help</code> lists every subcommand with its arguments.</li>
+      </ul>
+    </div>
+    <div class="note">
+      <h2>Run close (v0.8.0)</h2>
+      <ul>
+        <li><code>hydra run-log &lt;run&gt;</code> renders a per-run audit document to <code>docs/hydra-dev-logs/run-&lt;id&gt;.md</code> from the ledger + authoritative tree (document, then delete).</li>
+        <li><code>hydra gc --apply --keep-last 3</code> reaps worktrees+branches ONLY when the ledger proves integration (authoritative result + recorded integration SHA reachable from the default branch, paired to the tip through the same squash-record evidence chain). Dry-run by default.</li>
       </ul>
     </div>
   </div>

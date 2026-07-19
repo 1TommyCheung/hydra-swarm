@@ -158,10 +158,19 @@ After human approval:
 ```bash
 git switch main
 git merge --no-ff hydra-integration/0042
-git worktree remove ~/worktrees/<repo>/run-0042-*   # each
+# then at run close: document, then reap (see operations.md § Worktree retention policy)
+bash kit/hydra/scripts/run-log.sh 0042            # -> docs/hydra-dev-logs/run-0042.md
+bash kit/hydra/scripts/gc.sh --apply --keep-last 3
 ```
 
-Removing worktrees never deletes commits already on branches. Worktrees are preserved until the integration branch is accepted or the run is explicitly abandoned. Retention of external run state: open decision (roadmap §Open decisions).
+Removing worktrees never deletes commits already on branches. `gc` reaps a
+worktree+branch ONLY when the ledger proves integration (authoritative result
++ recorded integration SHA reachable from the default branch, paired to the
+tip through the same squash-record evidence chain); anything unprovable is
+skipped, including PR-flow worktrees that git cannot tie back to the candidate
+SHA. Full policy and the monthly `git worktree prune` hygiene live in
+`operations.md` § Worktree retention policy (reconciled there, not duplicated
+here).
 
 ## 7. As-built drift notes (audit 2026-07-13)
 
@@ -177,8 +186,15 @@ Removing worktrees never deletes commits already on branches. Worktrees are pres
   be granted it as a writable root (resolved via `pwd -P`, since `sandbox-exec`
   and `git worktree` paths differ by the `/var`→`/private/var` symlink) or
   `git commit` fails in-sandbox.
-- **Retention — still nothing pruned.** 15 runs and their worktrees are retained
-  (open decision #7). No automatic cleanup exists yet.
+- **Retention — gc + run-log landed (v0.8.0).** The "still nothing pruned,
+  15 runs retained" gap noted in the original audit is closed: `run-log.sh`
+  renders the per-run audit document to `docs/hydra-dev-logs/run-<id>.md`
+  (document, then delete) and `gc.sh --apply --keep-last 3` reaps
+  ledger-proven-integrated worktrees+branches. Each removal is a
+  `worktree_reaped`/`worktree_reap_partial` ledger event; PR-flow worktrees
+  (unprovable by design) are removed manually post-merge. Open decision #7
+  resolved; see `operations.md` § Worktree retention policy for the full
+  rules.
 - **Kimi write-role pnpm store (fixed field incident, ws9-import-plan
   2026-07-17).** srt's mandatory git-metadata protection blocks writes to
   `.git/config`/`.git/hooks/*` under ANY nested `.git` dir inside an allowed
