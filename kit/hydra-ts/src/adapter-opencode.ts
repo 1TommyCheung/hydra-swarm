@@ -530,6 +530,13 @@ export async function start(
       '--format',
       'json',
       '--auto',
+      // Global flags: surface the vendor CLI's own diagnostics (e.g. "stream
+      // error" usage-limit records) on stderr, where the .stderr capture file
+      // already tails them for the usage detector. ERROR level keeps the
+      // stream sparse enough to not disturb stall detection.
+      '--print-logs',
+      '--log-level',
+      'ERROR',
       '--dir',
       worktree,
       prompt,

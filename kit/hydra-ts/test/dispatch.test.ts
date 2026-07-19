@@ -2156,6 +2156,85 @@ describe('dispatch Bash parity', () => {
       assert.equal(events.at(-1), 'agent_exited');
     });
   });
+
+  describe('usage detector integration', () => {
+    // The incident line captured verbatim from a genuinely rate-limited
+    // OpenCode/GLM dispatch (run 0055 spec), as it appears in the .stderr
+    // capture once the adapter runs with --print-logs --log-level ERROR.
+    const INCIDENT_LINE = 'timestamp=2026-07-19T18:32:04.123Z level=ERROR run=6f8a1c2d message="stream error" '
+      + 'providerID=zai-coding-plan modelID=glm-5.2 session.id=ses_9f2 small=false agent=build mode=primary '
+      + 'error.error="AI_APICallError: Usage limit reached for 5 hour. Your limit will reset at 2026-07-19 18:37:11"';
+
+    it('records agent_usage_limited (not cancel) and terminates when the opencode .stderr shows the incident line', async () => {
+      const f = fixture(runId(), { vendor: 'opencode', timeoutMinutes: 30 });
+      const mock = fakeSpawn({ autoExit: false });
+      const stderrPath = join(f.sessionsDir, `${f.runId}-task-a-v1.stderr`);
+      const clock = new StepClock((_, count) => {
+        if (count === 2) appendFileSync(stderrPath, `${INCIDENT_LINE}\n`, 'utf8');
+        if (count >= 8) mock.calls[0]?.child.exit(0);
+      });
+      const options = injectedOptions(f, mock.spawn, { clock, pollIntervalMs: 60_000 });
+      await dispatch(f.runId, 'task-a', options);
+
+      const events = ledger(f).map(({ event }) => event);
+      assert.deepEqual(events, ['task_started', 'agent_usage_limited']);
+      const usageEvent = ledger(f).find((e) => e.event === 'agent_usage_limited');
+      assert.ok(usageEvent);
+      assert.equal(usageEvent.vendor, 'opencode');
+      assert.equal(usageEvent.provider, 'zai-coding-plan');
+      assert.equal(usageEvent.model, 'glm-5.2');
+      assert.equal(usageEvent.limit_kind, 'usage_window');
+      assert.equal(usageEvent.source, 'stderr');
+      assert.equal(usageEvent.confidence, 'exact');
+      assert.equal(usageEvent.retryable, 'true');
+      assert.match(usageEvent.retry_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      assert.ok(usageEvent.raw_error.includes('Usage limit reached for 5 hour'));
+      assert.equal(
+        readFileSync(join(f.sessionsDir, `${f.runId}-task-a-v1.exit`), 'utf8'),
+        '125',
+      );
+      // The forever-retrying worker tree is killed alongside the ledger event.
+      assert.deepEqual(options.killed, [mock.calls[0].child.pid]);
+    });
+
+    it('is fully disabled when HYDRA_USAGE_DETECTOR=0', async () => {
+      const f = fixture(runId(), { vendor: 'opencode', timeoutMinutes: 30 });
+      writeFileSync(
+        join(f.sessionsDir, `${f.runId}-task-a-v1.stderr`),
+        `${INCIDENT_LINE}\n`,
+        'utf8',
+      );
+      const mock = fakeSpawn({ autoExit: false });
+      const clock = new StepClock((_, count) => {
+        if (count === 8) mock.calls[0]?.child.exit(0);
+      });
+      const options = injectedOptions(f, mock.spawn, {
+        clock,
+        pollIntervalMs: 60_000,
+        env: { HYDRA_USAGE_DETECTOR: '0' },
+      });
+      await dispatch(f.runId, 'task-a', options);
+      const events = ledger(f).map(({ event }) => event);
+      assert.deepEqual(events, ['task_started', 'agent_exited']);
+    });
+
+    it('does not trigger for a non-opencode vendor with the same incident text in its capture', async () => {
+      const f = fixture(runId(), { vendor: 'codex', timeoutMinutes: 30 });
+      writeFileSync(
+        join(f.sessionsDir, `${f.runId}-task-a-v1.stderr`),
+        `${INCIDENT_LINE}\n`,
+        'utf8',
+      );
+      const mock = fakeSpawn({ autoExit: false });
+      const clock = new StepClock((_, count) => {
+        if (count === 8) mock.calls[0]?.child.exit(0);
+      });
+      const options = injectedOptions(f, mock.spawn, { clock, pollIntervalMs: 60_000 });
+      await dispatch(f.runId, 'task-a', options);
+      const events = ledger(f).map(({ event }) => event);
+      assert.deepEqual(events, ['task_started', 'agent_exited']);
+    });
+  });
 });
 
 describe('dispatch head availability gate', () => {

@@ -604,6 +604,11 @@ acceptance_criteria:
 
     assert.ok(capturedArgs.includes('hydra-implementer'));
     assert.ok(capturedArgs.includes(worktree));
+    // The usage detector reads the vendor CLI's own ERROR-level diagnostics
+    // from the .stderr capture, so start() must opt into print-logs.
+    const printLogsIndex = capturedArgs.indexOf('--print-logs');
+    assert.notEqual(printLogsIndex, -1);
+    assert.deepEqual(capturedArgs.slice(printLogsIndex, printLogsIndex + 3), ['--print-logs', '--log-level', 'ERROR']);
     assert.equal(capturedCwd, undefined);
 
     assert.equal(readFileSync(`${sessions}/${agentRunId}.events.jsonl`, 'utf8'), stdout);

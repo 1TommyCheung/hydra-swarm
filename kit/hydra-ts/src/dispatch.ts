@@ -51,6 +51,11 @@ import {
   loopDetectorTick,
   type LoopDetectorState,
 } from './loop-detector.ts';
+import {
+  createUsageDetectorState,
+  usageDetectorTick,
+  type UsageDetectorState,
+} from './usage-detector.ts';
 import { isCompiledBinary } from './kit-assets.ts';
 import { resolveWorkerNodeBinDir } from './resolve-node.ts';
 
@@ -533,6 +538,7 @@ interface WorkerContext {
   appendLedger: LedgerAppender;
   readLedger: () => LedgerEntry[];
   loopDetectorState: LoopDetectorState;
+  usageDetectorState: UsageDetectorState;
   execFileSync: ExecFileSyncLike;
 }
 
@@ -540,8 +546,8 @@ function releaseSlot(slotsDir: string, agentRunId: string): void {
   rmSync(join(slotsDir, agentRunId), { force: true });
 }
 
-// Exported for tests; production wiring of recordUsageLimited lands with the
-// future usage-limit detector task.
+// Exported for tests; production wiring of recordUsageLimited lives in
+// runUsageDetectorTick below.
 export function makeExitRecorder(ctx: WorkerContext): ExitRecorder {
   let recorded = false;
   let wasCancelled = false;
@@ -849,6 +855,37 @@ function runDetectorTick(ctx: WorkerContext, recorder: ExitRecorder): boolean {
   }
 }
 
+/**
+ * Usage-limit detector tick (OpenCode only in this task). Same fail-open
+ * contract as runDetectorTick: never throws, never blocks worker exit, and
+ * returns true only when the attempt was terminated. On a confirmed match the
+ * attempt is recorded as agent_usage_limited (exit 125) — the vendor CLI
+ * retries usage limits internally forever, so waiting for stall/timeout would
+ * burn the whole window. HYDRA_USAGE_DETECTOR=0 disables the tick entirely.
+ */
+function runUsageDetectorTick(ctx: WorkerContext, recorder: ExitRecorder): boolean {
+  if (ctx.env.HYDRA_USAGE_DETECTOR === '0') return false;
+  if (ctx.vendor !== 'opencode') return false;
+  if (recorder.isRecorded()) return false;
+  try {
+    const { match } = usageDetectorTick(ctx.usageDetectorState, {
+      vendor: ctx.vendor,
+      sessionsDir: ctx.sessionsDir,
+      agentRunId: ctx.agentRunId,
+      env: ctx.env,
+    });
+    if (match) {
+      recorder.recordUsageLimited(match);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    // Detector failures must fail open and never block worker exit.
+    warn(`usage detector tick failed: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
 function safeHerdrLive(herdr: HerdrClient): boolean {
   try {
     return herdr.isLive();
@@ -1125,6 +1162,15 @@ async function runWorkerPlain(
         previousActivity = activity;
         waited = 0;
       }
+      // Usage-limit takes priority over a loop verdict: a usage-limited
+      // process is retrying internally, not looping in any actionable sense.
+      if (runUsageDetectorTick(ctx, recorder)) {
+        // recordUsageLimited only records the ledger event; the vendor CLI
+        // retries internally forever, so the worker tree must be killed here
+        // or it would outlive its terminal ledger event.
+        try { ctx.killTree(workerPid); } catch { /* best effort */ }
+        return;
+      }
       if (runDetectorTick(ctx, recorder)) return;
     }
 
@@ -1305,6 +1351,16 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
     if (activity !== previousActivity) {
       previousActivity = activity;
       waited = 0;
+    }
+    // Usage-limit takes priority over a loop verdict: a usage-limited process
+    // is retrying internally, not looping in any actionable sense.
+    if (runUsageDetectorTick(ctx, recorder)) {
+      // recordUsageLimited only records the ledger event; kill the pane's
+      // worker and close the pane so nothing outlives the terminal event.
+      const pid = readPidfile(pidfile);
+      if (pid) ctx.killTree(pid);
+      await closePane();
+      return true;
     }
     if (runDetectorTick(ctx, recorder)) return true;
     if (await workerDisappeared()) {
@@ -1531,6 +1587,7 @@ export async function dispatch(
     appendLedger,
     readLedger,
     loopDetectorState: createLoopDetectorState(),
+    usageDetectorState: createUsageDetectorState(),
     execFileSync: commandRunner,
   };
   const recorder = makeExitRecorder(ctx);
