@@ -2,7 +2,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { amendTask, rewriteTaskSpec } from '../src/amend-task.ts';
+import { amendTask, main, resolveReason, rewriteTaskSpec } from '../src/amend-task.ts';
 import { ledger, runDir, yamlBlock, yamlScalar } from '../src/lib.ts';
 
 const TEST_TMP = join(import.meta.dirname, 'amend-task-tmp');
@@ -413,5 +413,323 @@ spec_version: 1
 
     assert.notEqual(statSync(specPath).ino, originalInode);
     assert.equal(statSync(specPath).mode & 0o777, 0o600);
+  });
+});
+
+// Captures everything written to process.stderr during `fn` (synchronous) so a
+// test can assert on warn()/log() output. Matches the capture pattern already
+// used in dispatch.test.ts / run-log.test.ts.
+function captureStderr<T>(fn: () => T): { output: string; result: T } {
+  const chunks: string[] = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    chunks.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const result = fn();
+    return { output: chunks.join(''), result };
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+}
+
+async function captureStderrAsync<T>(fn: () => Promise<T>): Promise<{ output: string; result: T }> {
+  const chunks: string[] = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    chunks.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const result = await fn();
+    return { output: chunks.join(''), result };
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+}
+
+describe('amendTask amendment_reason preservation warning', () => {
+  before(() => {
+    cleanTmp();
+    mkdirSync(TEST_TMP, { recursive: true });
+    process.env.HYDRA_STATE_ROOT = TEST_TMP;
+  });
+  after(() => {
+    cleanTmp();
+    delete process.env.HYDRA_STATE_ROOT;
+  });
+
+  it('warns when discarding a non-empty prior amendment_reason that differs from the new reason', async () => {
+    const runId = 'warn-differing';
+    const taskId = 'task-warn-differ';
+    setupRun(runId);
+    // A spec that already carries a hand-edited amendment_reason (the live
+    // run-0051 scenario): a detailed multi-line revise note.
+    writeTaskSpec(runId, taskId, `task_id: ${taskId}
+run_id: run-${runId}
+spec_version: 1
+supersedes: 0
+amendment_reason: |
+  Detailed hand-edited revise note:
+  - src/foo.ts:42 -- fix off-by-one
+  - src/bar.ts:7  -- add null check
+delivered_via: restart
+objective: Do work.
+`);
+
+    const { output } = await captureStderrAsync(() =>
+      amendTask(runId, taskId, 'short CLI summary', 'restart', { dispatch: () => {} }),
+    );
+
+    // Warning fires, names both the discard and the surviving CLI reason, and
+    // surfaces a preview of the clobbered content (recognizable enough that
+    // the operator notices the loss).
+    assert.match(output, /hydra: warn: amend-task: discarding existing amendment_reason/);
+    assert.match(output, /Detailed hand-edited revise note/);
+    assert.match(output, /in favor of the new CLI reason argument/);
+
+    // The amendment itself still proceeds (visibility-only, not blocking):
+    // spec_version bumped, new reason persisted, prior content dropped.
+    const specPath = join(runDir(runId), 'tasks', `${taskId}.yaml`);
+    assert.equal(yamlScalar(specPath, 'spec_version'), '2');
+    assert.equal(yamlScalar(specPath, 'amendment_reason'), 'short CLI summary');
+  });
+
+  it('truncates a long prior amendment_reason to ~80 chars in the warning preview', async () => {
+    const runId = 'warn-truncate';
+    const taskId = 'task-warn-trunc';
+    setupRun(runId);
+    const longReason = 'X'.repeat(200);
+    writeTaskSpec(runId, taskId, `task_id: ${taskId}
+spec_version: 1
+amendment_reason: ${longReason}
+`);
+
+    const { output } = await captureStderrAsync(() =>
+      amendTask(runId, taskId, 'new short reason', 'restart', { dispatch: () => {} }),
+    );
+
+    // Preview shows the first 80 chars + ellipsis, not the whole 200-char blob.
+    assert.match(output, /discarding existing amendment_reason \(X{80}\.\.\.\)/);
+  });
+
+  it('does NOT warn when the new reason matches the prior amendment_reason (idempotent amend)', async () => {
+    const runId = 'warn-idempotent';
+    const taskId = 'task-warn-idem';
+    setupRun(runId);
+    writeTaskSpec(runId, taskId, `task_id: ${taskId}
+spec_version: 1
+amendment_reason: same reason
+`);
+
+    const { output } = await captureStderrAsync(() =>
+      amendTask(runId, taskId, 'same reason', 'restart', { dispatch: () => {} }),
+    );
+
+    assert.doesNotMatch(output, /discarding existing amendment_reason/);
+  });
+
+  it('does NOT warn when there is no prior amendment_reason in the spec', async () => {
+    const runId = 'warn-none';
+    const taskId = 'task-warn-none';
+    setupRun(runId);
+    writeTaskSpec(runId, taskId, `task_id: ${taskId}
+spec_version: 1
+objective: Original objective.
+`);
+
+    const { output } = await captureStderrAsync(() =>
+      amendTask(runId, taskId, 'fresh reason', 'restart', { dispatch: () => {} }),
+    );
+
+    assert.doesNotMatch(output, /discarding existing amendment_reason/);
+  });
+
+  it('warns when the prior reason is a plain scalar (not just when it is a block scalar)', async () => {
+    const runId = 'warn-plain';
+    const taskId = 'task-warn-plain';
+    setupRun(runId);
+    writeTaskSpec(runId, taskId, `task_id: ${taskId}
+spec_version: 1
+amendment_reason: prior plain reason
+`);
+
+    const { output } = await captureStderrAsync(() =>
+      amendTask(runId, taskId, 'new reason', 'restart', { dispatch: () => {} }),
+    );
+
+    assert.match(output, /discarding existing amendment_reason \(prior plain reason\)/);
+  });
+
+  it('prints the warning BEFORE the spec is rewritten (the rewrite still happens)', async () => {
+    // The warning is observability, not a guard. Order matters only in that
+    // the rewrite MUST still proceed -- a regression that turned the warning
+    // into a die() would surface here as a missing spec_version bump.
+    const runId = 'warn-then-rewrite';
+    const taskId = 'task-warn-order';
+    setupRun(runId);
+    writeTaskSpec(runId, taskId, `task_id: ${taskId}
+spec_version: 1
+amendment_reason: old
+`);
+
+    await captureStderrAsync(() =>
+      amendTask(runId, taskId, 'new', 'restart', { dispatch: () => {} }),
+    );
+
+    const specPath = join(runDir(runId), 'tasks', `${taskId}.yaml`);
+    assert.equal(yamlScalar(specPath, 'spec_version'), '2');
+    assert.equal(yamlScalar(specPath, 'amendment_reason'), 'new');
+  });
+});
+
+describe('resolveReason (@file expansion)', () => {
+  before(() => {
+    cleanTmp();
+    mkdirSync(TEST_TMP, { recursive: true });
+  });
+  after(() => {
+    cleanTmp();
+    delete process.env.HYDRA_STATE_ROOT;
+    delete process.env.HYDRA_ADAPTER_RUNTIME;
+  });
+
+  it('returns a literal reason unchanged when it does not start with @', () => {
+    assert.equal(resolveReason('just a reason'), 'just a reason');
+    assert.equal(resolveReason('reason with spaces and # hash'), 'reason with spaces and # hash');
+    // A reason that contains but does not start with @ is literal.
+    assert.equal(resolveReason('cc @alice'), 'cc @alice');
+    // Empty string is literal (not @-prefixed).
+    assert.equal(resolveReason(''), '');
+  });
+
+  it('reads the file contents when the reason starts with @', () => {
+    mkdirSync(TEST_TMP, { recursive: true });
+    const reasonFile = join(TEST_TMP, 'reason.txt');
+    const contents = 'Multi-line\nreason\nfrom a file\n';
+    writeFileSync(reasonFile, contents, 'utf8');
+
+    assert.equal(resolveReason(`@${reasonFile}`), contents);
+  });
+
+  it('dies clearly when the @file path does not exist (does NOT silently use the literal @-string)', () => {
+    const missing = join(TEST_TMP, 'does-not-exist.txt');
+    assert.throws(
+      () => resolveReason(`@${missing}`),
+      // die() prefixes with "hydra: error:"; the message must name the file.
+      /hydra: error: amend-task: reason file not found: /,
+    );
+    // Crucially: the error must NOT pass through as "treat the literal
+    // '@missing/...' string as the reason", which would silently corrupt the
+    // amendment_reason. Asserting the thrown error names the file confirms
+    // the failure path was taken rather than the happy path.
+  });
+
+  it('main() resolves an @file reason and persists its contents as the amendment_reason', async () => {
+    process.env.HYDRA_STATE_ROOT = TEST_TMP;
+    process.env.HYDRA_ADAPTER_RUNTIME = 'ts';
+    try {
+      mkdirSync(TEST_TMP, { recursive: true });
+      const runId = 'main-atfile';
+      setupRun(runId);
+      const taskId = 'task-main-atfile';
+      // assigned_vendor points at an adapter that does not exist, so the
+      // default native dispatch fails AFTER the spec is rewritten -- that
+      // failure is unrelated to @file resolution. We assert on the spec
+      // state below to prove the @file contents were read and persisted
+      // before the dispatch blew up.
+      const specPath = writeTaskSpec(runId, taskId, `task_id: ${taskId}
+assigned_vendor: native-missing
+worktree: ${TEST_TMP}
+spec_version: 1
+objective: Do work.
+`);
+
+      const reasonFile = join(TEST_TMP, 'main-reason.txt');
+      const reasonText = 'Detailed reason\nspanning multiple lines\nfrom a file\n';
+      writeFileSync(reasonFile, reasonText, 'utf8');
+
+      const exitCode = await main([runId, taskId, `@${reasonFile}`, 'restart']);
+      // Dispatch failure (no adapter) -> main() catches it and returns 1.
+      assert.equal(exitCode, 1);
+
+      // The decisive assertion: the @file contents were resolved and written
+      // as the new amendment_reason before dispatch was attempted. If
+      // resolution had failed, exitCode would still be 1 but the spec would
+      // still be at v1 with no amendment_reason at all.
+      assert.equal(yamlScalar(specPath, 'spec_version'), '2');
+      assert.equal(yamlBlock(specPath, 'amendment_reason'), reasonText);
+    } finally {
+      delete process.env.HYDRA_STATE_ROOT;
+      delete process.env.HYDRA_ADAPTER_RUNTIME;
+    }
+  });
+
+  it('main() accepts a literal (non-@) reason exactly as before', async () => {
+    process.env.HYDRA_STATE_ROOT = TEST_TMP;
+    process.env.HYDRA_ADAPTER_RUNTIME = 'ts';
+    try {
+      mkdirSync(TEST_TMP, { recursive: true });
+      const runId = 'main-literal';
+      setupRun(runId);
+      const taskId = 'task-main-literal';
+      const specPath = writeTaskSpec(runId, taskId, `task_id: ${taskId}
+assigned_vendor: native-missing
+worktree: ${TEST_TMP}
+spec_version: 1
+`);
+
+      const exitCode = await main([runId, taskId, 'literal reason', 'restart']);
+      // Same dispatch-failure shape as the @file test above; the spec
+      // mutation is what proves the literal-reason path still works.
+      assert.equal(exitCode, 1);
+
+      assert.equal(yamlScalar(specPath, 'spec_version'), '2');
+      assert.equal(yamlScalar(specPath, 'amendment_reason'), 'literal reason');
+    } finally {
+      delete process.env.HYDRA_STATE_ROOT;
+      delete process.env.HYDRA_ADAPTER_RUNTIME;
+    }
+  });
+
+  it('main() fails with a clear error (exit 1) when the @file is missing', async () => {
+    process.env.HYDRA_STATE_ROOT = TEST_TMP;
+    try {
+      mkdirSync(TEST_TMP, { recursive: true });
+      const runId = 'main-missing-atfile';
+      setupRun(runId);
+      const taskId = 'task-main-missing';
+      const specPath = writeTaskSpec(runId, taskId, `task_id: ${taskId}
+spec_version: 1
+`);
+
+      const missing = join(TEST_TMP, 'absent-reason.txt');
+      const { output, result: exitCode } = await captureStderrAsync(() =>
+        main([runId, taskId, `@${missing}`, 'restart']),
+      );
+
+      assert.equal(exitCode, 1);
+      assert.match(output, /amend-task: reason file not found: /);
+      // The spec was NOT mutated -- amendTask() never ran.
+      assert.equal(yamlScalar(specPath, 'spec_version'), '1');
+    } finally {
+      delete process.env.HYDRA_STATE_ROOT;
+    }
+  });
+
+  it('main() usage text mentions the @reason-file form', async () => {
+    process.env.HYDRA_STATE_ROOT = TEST_TMP;
+    try {
+      mkdirSync(TEST_TMP, { recursive: true });
+      // No taskId supplied -> usage path.
+      const { output, result: exitCode } = await captureStderrAsync(() =>
+        main(['only-run-id']),
+      );
+      assert.equal(exitCode, 1);
+      assert.match(output, /usage: amend-task\.sh <run_id> <task_id> <reason\|@reason-file> \[resume\|restart\]/);
+    } finally {
+      delete process.env.HYDRA_STATE_ROOT;
+    }
   });
 });

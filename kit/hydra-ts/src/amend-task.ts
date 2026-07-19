@@ -10,7 +10,7 @@ import {
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { dispatch } from './dispatch.ts';
-import { die, ledgerAppend, log, runDir, YAML_BLOCK_HEADER, yamlScalar } from './lib.ts';
+import { die, ledgerAppend, log, runDir, warn, YAML_BLOCK_HEADER, yamlBlock, yamlScalar } from './lib.ts';
 import { isCompiledBinary } from './kit-assets.ts';
 
 // ---------------------------------------------------------------------------
@@ -188,6 +188,18 @@ export function rewriteTaskSpec(
   return out.join('\n') + '\n';
 }
 
+// Render a one-line, length-limited preview of an existing amendment_reason
+// value for the discard warning. yamlBlock can return a multi-line value;
+// flattening whitespace keeps the warning on a single line, and the ~80-char
+// cap keeps it readable. This is presentation-only -- it never feeds back
+// into what gets persisted.
+function previewAmendmentReason(value: string): string {
+  const LIMIT = 80;
+  const oneLine = value.replace(/\s+/g, ' ').trim();
+  if (oneLine.length <= LIMIT) return oneLine;
+  return `${oneLine.slice(0, LIMIT)}...`;
+}
+
 /**
  * Amend a task spec: bump its version, stamp amendment metadata, record a
  * task_spec_amended ledger event, log, and re-dispatch the task.
@@ -239,6 +251,22 @@ export async function amendTask(
   }
 
   const content = readFileSync(taskSpec, 'utf8');
+
+  // The lead often hand-edits the spec file's amendment_reason with detailed
+  // revise instructions (file:line notes, multi-line context) BEFORE invoking
+  // amend-task with a short CLI summary. rewriteTaskSpec() below drops the
+  // prior value unconditionally and persists the new CLI reason in its place
+  // -- surface what is about to be lost here. This is visibility-only: it
+  // must not block, alter, or short-circuit the rewrite. It fires only when
+  // the prior value is non-empty AND differs from the incoming reason, so a
+  // repeated/idempotent amend call (same reason) stays silent.
+  const priorReason = yamlBlock(taskSpec, 'amendment_reason');
+  if (priorReason && priorReason !== reason) {
+    warn(
+      `amend-task: discarding existing amendment_reason (${previewAmendmentReason(priorReason)}) in favor of the new CLI reason argument -- if you edited the spec file directly, that edit is now lost.`,
+    );
+  }
+
   const rewritten = rewriteTaskSpec(content, fromVStr, toV, reason, delivery);
   replaceFileAtomically(taskSpec, rewritten);
 
@@ -290,13 +318,29 @@ export async function amendTask(
 // Backwards-compatible default export for consumers that import the module.
 export default { amendTask, rewriteTaskSpec };
 
+// Treat a reason argument of the form `@<path>` as a reference to a UTF-8 file
+// whose full contents are the actual reason text. This sidesteps shell-quoting
+// pain for multi-line, detailed amendment reasons (file:line revise notes,
+// pasted context). amendTask() itself still takes a plain reason string; the
+// @file expansion is a main()-level CLI affordance only, applied before the
+// call. A literal reason without a leading `@` is returned unchanged.
+export function resolveReason(reason: string): string {
+  if (!reason.startsWith('@')) return reason;
+  const filePath = reason.slice(1);
+  if (!existsSync(filePath)) {
+    die(`amend-task: reason file not found: ${filePath}`);
+  }
+  return readFileSync(filePath, 'utf8');
+}
+
 export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
   try {
-    const [runId, taskId, reason, delivery = 'restart'] = args;
+    const [runId, taskId, rawReason, delivery = 'restart'] = args;
     if (!runId || !taskId) {
-      die('usage: amend-task.sh <run_id> <task_id> <reason> [resume|restart]');
+      die('usage: amend-task.sh <run_id> <task_id> <reason|@reason-file> [resume|restart]');
     }
-    if (!reason) die('amendment_reason required');
+    if (!rawReason) die('amendment_reason required');
+    const reason = resolveReason(rawReason);
     await amendTask(runId, taskId, reason, delivery);
     return 0;
   } catch (error) {
