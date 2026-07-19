@@ -1,6 +1,6 @@
 # Hydra-Swarm
 
-**v0.8.1** · A local multi-agent development harness. A lead (Claude Code)
+**v0.6.8** · A local multi-agent development harness. A lead (Claude Code)
 plans, dispatches, and judges; a deterministic harness owns state, process
 launch, and verification. Four vendor heads — **Claude**, **Codex**,
 **OpenCode/GLM**, and **Kimi** — implement tasks in isolated Git worktrees.
@@ -18,7 +18,7 @@ human-authorized.
 > development. Since Wave 2: head auto-detection, the compiled single-binary
 > runtime with GitHub Releases distribution (`fetch-bin.sh`), and the `hydra
 > gc` + `hydra run-log` worktree-lifecycle pair are done (see
-> [CHANGELOG.md](CHANGELOG.md) for the 0.7.x–0.8.x releases). The remaining
+> [CHANGELOG.md](CHANGELOG.md) for the 0.6.x releases). The remaining
 > packaging work (kit extraction, `hydra-init` scaffolding, global ledger,
 > bundle export/import) is still design-only — see `docs/roadmap.md`.
 
