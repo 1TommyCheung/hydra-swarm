@@ -742,6 +742,9 @@ describe('reviewDispatch', () => {
           exitCode: 0,
         };
       }
+      if (args[0] === 'pane' && args[1] === 'resize') {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
       if (args[0] === 'pane' && args[1] === 'close') {
         return { stdout: '', stderr: '', exitCode: 0 };
       }
@@ -794,7 +797,15 @@ describe('reviewDispatch', () => {
     assert.match(command, /TPID=/);
     assert.match(command, /kill \$TPID/);
 
+    const resize = calls.find((call) => call.args[0] === 'pane' && call.args[1] === 'resize');
+    assert.deepEqual(
+      resize?.args,
+      ['pane', 'resize', '--direction', 'down', '--amount', '0.25', '--pane', 'pane-codex'],
+      'reviewer pane is shrunk toward the lead console after agent start',
+    );
+
     const progress = readFileSync(progressPath, 'utf8');
+    assert.match(progress, /\[hydra\] codex started — waiting for output\.\.\./);
     assert.match(progress, /Analyzing the codebase/);
     assert.match(progress, /\[cmd\] npm run test/);
     assert.match(progress, /\[edit\] foo\.ts/);
@@ -839,7 +850,7 @@ describe('reviewDispatch', () => {
           exitCode: 0,
         };
       }
-      if (args[0] === 'pane' && args[1] === 'close') {
+      if (args[0] === 'pane' && (args[1] === 'resize' || args[1] === 'close')) {
         return { stdout: '', stderr: '', exitCode: 0 };
       }
       throw new Error(`unexpected exec: ${file} ${args.join(' ')}`);
@@ -934,10 +945,11 @@ describe('reviewDispatch', () => {
     }
   });
 
-  it('does not create a live progress tail for claude reviewer panes', () => {
-    const runId = 'pane-claude-no-live-run';
+  it('keeps claude reviewer panes live with a supervisor heartbeat on every poll', () => {
+    const runId = 'pane-claude-heartbeat-run';
     const reviewId = 'rev1';
     const sessionDir = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions');
+    const rawPath = join(sessionDir, `${reviewId}.claude.raw`);
     const progressPath = join(sessionDir, `${reviewId}.claude.pane-progress.txt`);
     const sentinelPath = join(sessionDir, `${reviewId}.claude.exit`);
     const calls: Call[] = [];
@@ -965,14 +977,18 @@ describe('reviewDispatch', () => {
           exitCode: 0,
         };
       }
+      if (args[0] === 'pane' && args[1] === 'resize') {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
       if (args[0] === 'pane' && args[1] === 'close') {
         return { stdout: '', stderr: '', exitCode: 0 };
       }
       throw new Error(`unexpected exec: ${file} ${args.join(' ')}`);
     };
 
+    let mdPath: string;
     try {
-      reviewDispatch(
+      mdPath = reviewDispatch(
         runId,
         reviewId,
         'claude',
@@ -980,6 +996,7 @@ describe('reviewDispatch', () => {
         options({
           exec,
           sleep: () => {
+            writeFileSync(rawPath, JSON.stringify({ result: 'heartbeat ok' }));
             writeFileSync(sentinelPath, '0', 'utf8');
           },
         }),
@@ -992,18 +1009,107 @@ describe('reviewDispatch', () => {
     const agentStart = calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'start');
     assert.ok(agentStart);
     const command = agentStart!.args[agentStart!.args.length - 1];
-    assert.doesNotMatch(command, /tail -n \+1 -f/);
-    assert.doesNotMatch(command, /TPID/);
-    assert.equal(existsSync(progressPath), false);
+    assert.match(command, /tail -n \+1 -f/, 'claude pane tails the progress file');
+    assert.match(command, /TPID=/);
+    assert.match(command, /kill \$TPID/);
+
+    const resize = calls.find((call) => call.args[0] === 'pane' && call.args[1] === 'resize');
+    assert.deepEqual(
+      resize?.args,
+      ['pane', 'resize', '--direction', 'down', '--amount', '0.25', '--pane', 'pane-claude'],
+      'reviewer pane is shrunk toward the lead console after agent start',
+    );
+
+    const progress = readFileSync(progressPath, 'utf8');
+    assert.match(progress, /\[hydra\] claude started — waiting for output\.\.\./, 'seed line shows within the first poll interval');
+    assert.match(progress, /\[hydra\] claude working\.\.\. elapsed \d+s/, 'heartbeat line is refreshed on each supervisor poll');
+    assert.equal(readFileSync(mdPath!, 'utf8').trim(), 'heartbeat ok');
   });
 
-  it('does not create a live progress tail for opencode reviewer panes', () => {
-    const runId = 'pane-opencode-no-live-run';
+  it('seeds the progress file BEFORE agent start, so an instantly exiting vendor never blanks the pane', () => {
+    const runId = 'pane-seed-before-launch-run';
     const reviewId = 'rev1';
     const sessionDir = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions');
+    const progressPath = join(sessionDir, `${reviewId}.codex.pane-progress.txt`);
+    const sentinelPath = join(sessionDir, `${reviewId}.codex.exit`);
+    const previousPanes = process.env.HYDRA_HERDR_PANES;
+    const previousTimeout = process.env.HYDRA_REVIEW_TIMEOUT_MIN;
+    process.env.HYDRA_HERDR_PANES = '1';
+    process.env.HYDRA_REVIEW_TIMEOUT_MIN = '1';
+
+    let seededAtAgentStart: string | undefined;
+    const exec: ExecFn = (file, args) => {
+      if (args[0] === 'status') {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      if (args[0] === 'pane' && args[1] === 'list') {
+        return {
+          stdout: JSON.stringify({ result: { panes: [{ agent: {}, cwd: TEST_TMP, workspace_id: 'workspace-1' }] } }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'agent' && args[1] === 'start') {
+        // The seed line must already be on disk when the pane is launched;
+        // otherwise a vendor that exits before this call returns can end the
+        // pane's tail before any content is ever written (spec v4 fix 2).
+        seededAtAgentStart = existsSync(progressPath)
+          ? readFileSync(progressPath, 'utf8')
+          : undefined;
+        return {
+          stdout: JSON.stringify({ result: { agent: { pane_id: 'pane-codex-fast' } } }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'pane' && (args[1] === 'resize' || args[1] === 'close')) {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(' ')}`);
+    };
+
+    try {
+      reviewDispatch(
+        runId,
+        reviewId,
+        'codex',
+        writePrompt('instant-exit review'),
+        options({
+          exec,
+          // The vendor exits immediately: the sentinel appears on the very
+          // first supervisor poll, before any vendor event could stream.
+          sleep: () => {
+            writeFileSync(sentinelPath, '0', 'utf8');
+          },
+        }),
+      );
+    } finally {
+      restoreEnv('HYDRA_HERDR_PANES', previousPanes);
+      restoreEnv('HYDRA_REVIEW_TIMEOUT_MIN', previousTimeout);
+    }
+
+    assert.match(
+      seededAtAgentStart ?? '',
+      /\[hydra\] codex started — waiting for output\.\.\./,
+      'seed line must exist before herdr agent start launches the pane',
+    );
+    const progress = readFileSync(progressPath, 'utf8');
+    assert.match(
+      progress,
+      /\[hydra\] codex started — waiting for output\.\.\./,
+      'pane content survives an instantly exiting vendor',
+    );
+  });
+
+  it('live-tails opencode progress events from the raw file into the pane', () => {
+    const runId = 'pane-opencode-live-run';
+    const reviewId = 'rev1';
+    const sessionDir = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions');
+    const rawPath = join(sessionDir, `${reviewId}.opencode.raw`);
     const progressPath = join(sessionDir, `${reviewId}.opencode.pane-progress.txt`);
     const sentinelPath = join(sessionDir, `${reviewId}.opencode.exit`);
     const calls: Call[] = [];
+    let sleeps = 0;
     const previousPanes = process.env.HYDRA_HERDR_PANES;
     const previousTimeout = process.env.HYDRA_REVIEW_TIMEOUT_MIN;
     process.env.HYDRA_HERDR_PANES = '1';
@@ -1028,22 +1134,46 @@ describe('reviewDispatch', () => {
           exitCode: 0,
         };
       }
+      if (args[0] === 'pane' && args[1] === 'resize') {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
       if (args[0] === 'pane' && args[1] === 'close') {
         return { stdout: '', stderr: '', exitCode: 0 };
       }
       throw new Error(`unexpected exec: ${file} ${args.join(' ')}`);
     };
 
+    let mdPath: string;
     try {
-      reviewDispatch(
+      mdPath = reviewDispatch(
         runId,
         reviewId,
         'opencode',
         writePrompt('opencode pane review'),
         options({
           exec,
-          sleep: () => {
-            writeFileSync(sentinelPath, '0', 'utf8');
+          sleep: (ms) => {
+            assert.equal(ms, 3000);
+            sleeps += 1;
+            if (sleeps === 1) {
+              writeFileSync(
+                rawPath,
+                [
+                  JSON.stringify({ type: 'step_start' }),
+                  JSON.stringify({ part: { type: 'text', text: 'Reviewing the diff' } }),
+                  JSON.stringify({ part: { type: 'tool', tool: 'read', state: { title: 'Inspect dispatch' } } }),
+                ].join('\n') + '\n',
+                'utf8',
+              );
+            } else {
+              // Trailing event written just before the sentinel; final poll must catch it.
+              appendFileSync(
+                rawPath,
+                `${JSON.stringify({ part: { type: 'text', text: 'Review complete' } })}\n`,
+                'utf8',
+              );
+              writeFileSync(sentinelPath, '0', 'utf8');
+            }
           },
         }),
       );
@@ -1055,9 +1185,89 @@ describe('reviewDispatch', () => {
     const agentStart = calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'start');
     assert.ok(agentStart);
     const command = agentStart!.args[agentStart!.args.length - 1];
-    assert.doesNotMatch(command, /tail -n \+1 -f/);
-    assert.doesNotMatch(command, /TPID/);
-    assert.equal(existsSync(progressPath), false);
+    assert.match(command, /tail -n \+1 -f/, 'opencode review pane tails the progress file');
+    assert.match(command, /TPID=/);
+    assert.match(command, /kill \$TPID/);
+
+    const resize = calls.find((call) => call.args[0] === 'pane' && call.args[1] === 'resize');
+    assert.deepEqual(
+      resize?.args,
+      ['pane', 'resize', '--direction', 'down', '--amount', '0.25', '--pane', 'pane-opencode'],
+      'reviewer pane is shrunk toward the lead console after agent start',
+    );
+
+    const progress = readFileSync(progressPath, 'utf8');
+    assert.match(progress, /\[hydra\] opencode started — waiting for output\.\.\./);
+    assert.match(progress, /Reviewing the diff/);
+    assert.match(progress, /\[tool\] read: Inspect dispatch/);
+    assert.match(progress, /Review complete/);
+    assert.doesNotMatch(progress, /step_start/);
+    assert.equal(readFileSync(mdPath!, 'utf8').trim(), 'Review complete');
+  });
+
+  it('honors HYDRA_HERDR_PANE_RATIO when shrinking the reviewer pane', () => {
+    const runId = 'pane-ratio-run';
+    const reviewId = 'rev1';
+    const sessionDir = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions');
+    const sentinelPath = join(sessionDir, `${reviewId}.codex.exit`);
+    const calls: Call[] = [];
+    const previousPanes = process.env.HYDRA_HERDR_PANES;
+    const previousTimeout = process.env.HYDRA_REVIEW_TIMEOUT_MIN;
+    const previousRatio = process.env.HYDRA_HERDR_PANE_RATIO;
+    process.env.HYDRA_HERDR_PANES = '1';
+    process.env.HYDRA_REVIEW_TIMEOUT_MIN = '1';
+    process.env.HYDRA_HERDR_PANE_RATIO = '0.35';
+
+    const exec: ExecFn = (file, args, opts) => {
+      calls.push({ file, args, cwd: opts?.cwd });
+      if (args[0] === 'status') {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      if (args[0] === 'pane' && args[1] === 'list') {
+        return {
+          stdout: JSON.stringify({ result: { panes: [{ agent: {}, cwd: TEST_TMP, workspace_id: 'workspace-1' }] } }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'agent' && args[1] === 'start') {
+        return {
+          stdout: JSON.stringify({ result: { agent: { pane_id: 'pane-ratio' } } }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'pane' && (args[1] === 'resize' || args[1] === 'close')) {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(' ')}`);
+    };
+
+    try {
+      reviewDispatch(
+        runId,
+        reviewId,
+        'codex',
+        writePrompt('ratio review'),
+        options({
+          exec,
+          sleep: () => {
+            writeFileSync(sentinelPath, '0', 'utf8');
+          },
+        }),
+      );
+    } finally {
+      restoreEnv('HYDRA_HERDR_PANES', previousPanes);
+      restoreEnv('HYDRA_REVIEW_TIMEOUT_MIN', previousTimeout);
+      restoreEnv('HYDRA_HERDR_PANE_RATIO', previousRatio);
+    }
+
+    const resize = calls.find((call) => call.args[0] === 'pane' && call.args[1] === 'resize');
+    assert.deepEqual(
+      resize?.args,
+      ['pane', 'resize', '--direction', 'down', '--amount', '0.35', '--pane', 'pane-ratio'],
+      'HYDRA_HERDR_PANE_RATIO overrides the default 0.25 agent-pane ratio',
+    );
   });
 });
 

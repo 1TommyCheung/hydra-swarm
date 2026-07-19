@@ -17,6 +17,7 @@ import { after, before, describe, it } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   dispatch,
+  herdrAgentPaneRatio,
   kimiEventText,
   resolveAdapterRuntime,
   type ChildProcessLike,
@@ -179,6 +180,7 @@ class FakeHerdr implements HerdrClient {
   paneId: string | undefined = 'pane-1';
   starts: Array<{ label: string; cwd: string; workspace?: string; command: string }> = [];
   closes: string[] = [];
+  resizes: Array<{ paneId: string; direction: string; amount: number }> = [];
   onClose?: (paneId: string) => boolean | Promise<boolean>;
 
   isLive(): boolean { return this.live; }
@@ -190,6 +192,10 @@ class FakeHerdr implements HerdrClient {
   paneClose(paneId: string): boolean | Promise<boolean> {
     this.closes.push(paneId);
     return this.onClose?.(paneId) ?? true;
+  }
+  paneResize(paneId: string, direction: 'left' | 'right' | 'up' | 'down', amount: number): boolean | Promise<boolean> {
+    this.resizes.push({ paneId, direction, amount });
+    return true;
   }
 }
 
@@ -990,7 +996,8 @@ describe('dispatch Bash parity', () => {
 
     assert.equal(herdr.starts.length, 1);
     assert.equal(herdr.starts[0].workspace, 'workspace-1');
-    assert.match(herdr.starts[0].command, /printf '%s' \$\?/);
+    assert.match(herdr.starts[0].command, /printf '%s' \$(\?|RC)/);
+    assert.deepEqual(herdr.resizes, [{ paneId: 'pane-1', direction: 'down', amount: 0.25 }]);
     assert.deepEqual(herdr.closes, ['pane-1']);
     assert.deepEqual(states, [
       ['pane-1', 'claude', 'working'],
@@ -1061,6 +1068,7 @@ describe('dispatch Bash parity', () => {
     assert.match(mock.calls[0].args.join(' '), /adapter-opencode\.ts/);
     assert.equal(herdr.starts.length, 1);
     assert.equal(herdr.starts[0].workspace, 'workspace-monitor');
+    assert.deepEqual(herdr.resizes, [{ paneId: 'pane-1', direction: 'down', amount: 0.25 }]);
     assert.match(herdr.starts[0].command, /tail -n \+1 -f/);
     assert.doesNotMatch(herdr.starts[0].command, /opencode\.sh/);
     assert.equal(exitWasRecordedAtClose, true);
@@ -1371,7 +1379,7 @@ describe('dispatch Bash parity', () => {
     assert.equal(kimiEventText('true'), undefined);
   });
 
-  it('does not create a live progress tail for claude panes', async () => {
+  it('keeps claude panes live with a supervisor heartbeat on every poll', async () => {
     const f = fixture(runId(), { vendor: 'claude' });
     const herdr = new FakeHerdr();
     herdr.live = true;
@@ -1386,10 +1394,87 @@ describe('dispatch Bash parity', () => {
       buildWorkerPrompt: () => 'prompt',
     }));
 
+    const command = herdr.starts[0].command;
+    assert.match(command, /tail -n \+1 -f/, 'claude pane tails the progress file');
+    assert.match(command, /TPID=/);
+    assert.match(command, /kill \$TPID/);
+
     const progressPath = join(f.sessionsDir, `${expectedId}.pane-progress.txt`);
-    assert.equal(existsSync(progressPath), false, 'claude should not have a progress file');
-    assert.doesNotMatch(herdr.starts[0].command, /tail -n \+1 -f/);
-    assert.doesNotMatch(herdr.starts[0].command, /TPID/);
+    const progress = readFileSync(progressPath, 'utf8');
+    assert.match(progress, /\[hydra\] claude started — waiting for output\.\.\./, 'seed line shows within the first poll interval');
+    assert.match(progress, /\[hydra\] claude working\.\.\. elapsed \d+s/, 'heartbeat line is refreshed on each supervisor poll');
+  });
+
+  it('shrinks agent panes to HYDRA_HERDR_PANE_RATIO and defaults to 0.25', async () => {
+    const cases: Array<[string | undefined, number]> = [
+      ['0.4', 0.4],
+      ['0.30', 0.3],
+      ['bogus', 0.25],
+      ['0', 0.25],
+      ['1.5', 0.25],
+      [undefined, 0.25],
+    ];
+    for (const [raw, expected] of cases) {
+      const f = fixture(runId(), { vendor: 'claude' });
+      const herdr = new FakeHerdr();
+      herdr.live = true;
+      const expectedId = `${f.runId}-task-a-v1`;
+      const clock = new StepClock(() => {
+        writeFileSync(join(f.sessionsDir, `${expectedId}.exit`), '0');
+      });
+      const env: NodeJS.ProcessEnv = { HYDRA_HERDR_PANES: '1' };
+      if (raw !== undefined) env.HYDRA_HERDR_PANE_RATIO = raw;
+      await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('no spawn'); }, {
+        env,
+        herdr,
+        clock,
+      }));
+      assert.deepEqual(
+        herdr.resizes,
+        [{ paneId: 'pane-1', direction: 'down', amount: expected }],
+        `HYDRA_HERDR_PANE_RATIO=${raw} must resize to ${expected}`,
+      );
+    }
+  });
+
+  it('herdrAgentPaneRatio rejects non-finite and out-of-range values', () => {
+    assert.equal(herdrAgentPaneRatio(undefined), 0.25);
+    assert.equal(herdrAgentPaneRatio(''), 0.25);
+    assert.equal(herdrAgentPaneRatio('  '), 0.25);
+    assert.equal(herdrAgentPaneRatio('abc'), 0.25);
+    assert.equal(herdrAgentPaneRatio('NaN'), 0.25);
+    assert.equal(herdrAgentPaneRatio('-0.5'), 0.25);
+    assert.equal(herdrAgentPaneRatio('0'), 0.25);
+    assert.equal(herdrAgentPaneRatio('1'), 0.25);
+    assert.equal(herdrAgentPaneRatio('0.25'), 0.25);
+    assert.equal(herdrAgentPaneRatio('0.3'), 0.3);
+  });
+
+  it('swallows an async paneResize rejection without failing the worker', async () => {
+    const f = fixture(runId(), { vendor: 'claude' });
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    herdr.paneResize = () => Promise.reject(new Error('resize boom'));
+    const expectedId = `${f.runId}-task-a-v1`;
+    const clock = new StepClock(() => {
+      writeFileSync(join(f.sessionsDir, `${expectedId}.exit`), '0');
+    });
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => { rejections.push(reason); };
+    process.on('unhandledRejection', onRejection);
+    try {
+      await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('no spawn'); }, {
+        env: { HYDRA_HERDR_PANES: '1' },
+        herdr,
+        clock,
+      }));
+      // Flush the microtask queue so a stray fire-and-forget rejection would
+      // surface on the listener before we detach it.
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      process.removeListener('unhandledRejection', onRejection);
+    }
+    assert.deepEqual(rejections, [], 'a rejected paneResize promise must not become an unhandled rejection');
   });
 
   it('records a hosted worker exit even when the banner prompt build fails', async () => {

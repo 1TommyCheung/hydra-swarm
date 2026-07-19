@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -23,6 +24,7 @@ import {
   stateRoot,
   type JsonlTailState,
 } from './lib.ts';
+import { herdrAgentPaneRatio, monitorEventText } from './dispatch.ts';
 import { isCompiledBinary } from './kit-assets.ts';
 
 // ---------------------------------------------------------------------------
@@ -319,6 +321,30 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
+/**
+ * Shrink a freshly started reviewer pane so the lead console keeps the
+ * majority of the terminal height (issue #18). The pane was split `down`
+ * from the lead console, so `pane resize --direction down` moves the divider
+ * toward the reviewer pane, leaving it at roughly HYDRA_HERDR_PANE_RATIO of
+ * the height. Purely cosmetic: any failure is ignored.
+ */
+function shrinkAgentPane(exec: ExecFn, repoRootPath: string, pane: string): void {
+  try {
+    exec('herdr', [
+      'pane',
+      'resize',
+      '--direction',
+      'down',
+      '--amount',
+      String(herdrAgentPaneRatio(process.env.HYDRA_HERDR_PANE_RATIO)),
+      '--pane',
+      pane,
+    ], { cwd: repoRootPath });
+  } catch {
+    // Pane sizing is best effort and must never fail the review.
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point.
 // ---------------------------------------------------------------------------
@@ -361,27 +387,49 @@ export function reviewDispatch(
   const prompt = readFileSync(promptFile, 'utf8');
   const { file, args } = vendorCommand(vendor, prompt, repoRootPath, options.image);
 
-  const usesLiveProgressPane = vendor === 'codex' || vendor === 'kimi';
+  // Live pane feedback (issue #18): codex/kimi/opencode stream NDJSON that
+  // pollJsonlFile re-parses into event text for the pane's `tail -f` progress
+  // file (opencode reuses the worker lane's monitorEventText parser from
+  // dispatch.ts). Claude emits a single JSON document at exit
+  // (`--output-format json`), so its pane gets a supervisor-written heartbeat
+  // on every poll instead — either way no vendor shows a blank pane while
+  // the reviewer is running.
+  const streamsVendorEvents = vendor === 'codex' || vendor === 'kimi' || vendor === 'opencode';
+  const usesHeartbeat = vendor === 'claude';
+  const usesLiveProgressPane = streamsVendorEvents || usesHeartbeat;
   const liveProgressTailState: JsonlTailState = { offset: 0 };
-  const parseLiveProgress = vendor === 'kimi' ? kimiEventText : codexEventText;
+  const parseLiveProgress =
+    vendor === 'kimi' ? kimiEventText :
+    vendor === 'opencode' ? monitorEventText :
+    codexEventText;
+  let paneStartedAt = 0;
   const pollLiveProgress = (final = false): void => {
-    if (!usesLiveProgressPane) return;
-    pollJsonlFile(raw, progressPath, parseLiveProgress, liveProgressTailState, final);
+    if (streamsVendorEvents) {
+      pollJsonlFile(raw, progressPath, parseLiveProgress, liveProgressTailState, final);
+      return;
+    }
+    if (usesHeartbeat && !final && paneStartedAt > 0) {
+      const elapsedSec = Math.floor((Date.now() - paneStartedAt) / 1000);
+      try {
+        appendFileSync(progressPath, `[hydra] claude working... elapsed ${elapsedSec}s\n`, 'utf8');
+      } catch { /* best effort — the heartbeat is cosmetic */ }
+    }
   };
 
   // The plain wrapper writes its own pid, runs the vendor, and records the
   // exit code -- no live tail. This is what the inline/fallback path always
   // uses (herdr disabled, or pane launch fails): nothing polls the progress
   // file in that path (the supervisor's poll loop only runs while a pane is
-  // actually hosting the run), so giving codex/kimi the live wrapper there
-  // would spawn a pointless background tail process for no observer.
+  // actually hosting the run), so giving a live-feedback vendor the live
+  // wrapper there would spawn a pointless background tail process for no
+  // observer.
   const plainWrapped = `echo $$ > '${pidfile}'; ${file} ${args
     .map((a) => `'${a.replace(/'/g, "'\\''")}'`)
     .join(' ')} > '${raw}' 2>&1; printf '%s' $? > '${sentinel}'`;
 
   // The live wrapper additionally tails a progress file into the pane's own
-  // terminal while the vendor command runs, for codex/kimi specifically --
-  // used ONLY for an actual pane-launch attempt.
+  // terminal while the vendor command runs (streamed vendor events, or the
+  // claude heartbeat) -- used ONLY for an actual pane-launch attempt.
   let wrapped = plainWrapped;
   if (usesLiveProgressPane) {
     const inner = `${shellQuote(file)} ${args.map(shellQuote).join(' ')} > ${shellQuote(raw)} 2>&1`;
@@ -403,6 +451,16 @@ export function reviewDispatch(
   let pane: string | undefined;
 
   if (process.env.HYDRA_HERDR_PANES !== '0') {
+    // Seed the progress file BEFORE launching the pane, matching the worker
+    // lane in dispatch.ts: a fast-exiting vendor can end the pane's
+    // `tail -f` before a post-launch write ever lands, leaving a blank pane
+    // -- exactly the failure this file's live feedback exists to prevent
+    // (cross-vendor review, spec v4 fix 2).
+    if (usesLiveProgressPane) {
+      try {
+        writeFileSync(progressPath, `[hydra] ${vendor} started — waiting for output...\n`, 'utf8');
+      } catch { /* best effort — pane uses touch */ }
+    }
     const launched = launchInPane(
       runId,
       reviewId,
@@ -414,9 +472,7 @@ export function reviewDispatch(
     if (launched) {
       launchedInPane = true;
       pane = launched.pane;
-      if (usesLiveProgressPane) {
-        try { writeFileSync(progressPath, '', 'utf8'); } catch { /* best effort — pane uses touch */ }
-      }
+      paneStartedAt = Date.now();
       appendLedger(
         stateRootPath,
         runId,
@@ -431,6 +487,7 @@ export function reviewDispatch(
         pane ?? '?',
       );
       log(`reviewer hosted in herdr pane ${pane ?? '?'}: hydra:${runId}:${reviewId}:${vendor}`);
+      if (pane) shrinkAgentPane(exec, repoRootPath, pane);
       if (pane) reportHerdrState(pane, vendor, 'working');
 
       const limitMinutes = Number(

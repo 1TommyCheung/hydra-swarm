@@ -80,6 +80,24 @@ export interface HerdrClient {
     command: string;
   }): string | undefined;
   paneClose(paneId: string): boolean | Promise<boolean>;
+  /** Best-effort pane sizing (issue #18); optional so existing mocks stay valid. */
+  paneResize?(paneId: string, direction: 'left' | 'right' | 'up' | 'down', amount: number): boolean | Promise<boolean>;
+}
+
+/**
+ * Agent-pane height ratio relative to the lead console (issue #18). Agent
+ * panes are split `down` from the lead console, so after `agent start` the
+ * pane is shrunk with `herdr pane resize --direction down --amount <ratio>`
+ * (resize adjusts the parent split's ratio; down moves the divider toward the
+ * agent pane, shrinking it). HYDRA_HERDR_PANE_RATIO overrides the default
+ * 0.25 (agent ~= 25% of the height, lead console >= 60%); anything that is
+ * not a finite number strictly between 0 and 1 falls back to the default.
+ */
+export function herdrAgentPaneRatio(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return 0.25;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed >= 1) return 0.25;
+  return parsed;
 }
 
 export interface Clock {
@@ -278,6 +296,19 @@ class RealHerdrClient implements HerdrClient {
   paneClose(paneId: string): boolean {
     try {
       this.run('herdr', ['pane', 'close', paneId], {
+        encoding: 'utf8',
+        stdio: 'ignore',
+        env: { ...process.env, BUN_BE_BUN: undefined },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  paneResize(paneId: string, direction: 'left' | 'right' | 'up' | 'down', amount: number): boolean {
+    try {
+      this.run('herdr', ['pane', 'resize', '--direction', direction, '--amount', String(amount), '--pane', paneId], {
         encoding: 'utf8',
         stdio: 'ignore',
         env: { ...process.env, BUN_BE_BUN: undefined },
@@ -766,6 +797,25 @@ function safeHerdrLive(herdr: HerdrClient): boolean {
   }
 }
 
+/**
+ * Shrink a freshly started agent pane so the lead console keeps the majority
+ * of the terminal height (issue #18). Purely cosmetic: any failure (older
+ * herdr without pane.resize, closed pane, mock without paneResize) is ignored.
+ */
+function shrinkAgentPane(ctx: WorkerContext, paneId: string): void {
+  try {
+    // Fire-and-forget, but rejection-safe: a synchronous try/catch cannot
+    // capture a rejected promise, so route the result through
+    // Promise.resolve().catch() — a sync throw AND an async rejection are
+    // both swallowed (cross-vendor review, spec v4 fix 1).
+    void Promise.resolve(
+      ctx.herdr.paneResize?.(paneId, 'down', herdrAgentPaneRatio(ctx.env.HYDRA_HERDR_PANE_RATIO)),
+    ).catch(() => undefined);
+  } catch {
+    // Pane sizing is best effort and must never affect the worker lifecycle.
+  }
+}
+
 function vendorLabel(vendor: string): string {
   switch (vendor) {
     case 'codex': return 'Codex';
@@ -806,7 +856,12 @@ function writePaneBanner(ctx: WorkerContext, label: string): string {
 
 export { codexEventText, kimiEventText, type JsonlTailState, pollJsonlFile } from './lib.ts';
 
-function monitorEventText(line: string): string | undefined {
+/**
+ * Parses one opencode NDJSON event line into display text for a live-progress
+ * pane. Shared with review-dispatch.ts (the review lane reuses the worker
+ * lane's event-line parsing for its in-pane `tail -f` progress file).
+ */
+export function monitorEventText(line: string): string | undefined {
   let event: { part?: { type?: unknown; text?: unknown; tool?: unknown; state?: { title?: unknown } } };
   try {
     event = JSON.parse(line) as typeof event;
@@ -858,6 +913,7 @@ function openOpencodeMonitor(ctx: WorkerContext, workerPid: number): WorkerMonit
     'mode', 'monitor_only',
   );
   log(`opencode monitor pane ${paneId}: ${label} (worker pid ${workerPid}, lead workspace ${workspace ?? '?'})`);
+  shrinkAgentPane(ctx, paneId);
   try { ctx.herdrState(paneId, ctx.vendor, 'working'); } catch { /* best effort */ }
 
   const tailState: JsonlTailState = { offset: 0 };
@@ -1013,17 +1069,36 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
 
   const bannerPath = writePaneBanner(ctx, vendorLabel(ctx.vendor));
 
-  const usesLiveProgressPane = ctx.vendor === 'codex' || ctx.vendor === 'kimi';
+  // Codex and kimi stream NDJSON that pollJsonlFile re-parses into event
+  // text; claude emits one JSON document at exit (`--output-format json`), so
+  // its pane gets a supervisor-written heartbeat on every poll instead
+  // (issue #18) — either way the pane is never silent while the head runs.
+  // The heartbeat lands in pane-progress.txt, which herdrActivity does NOT
+  // watch, so heartbeats never reset the stall detector's activity signature.
+  const streamsVendorEvents = ctx.vendor === 'codex' || ctx.vendor === 'kimi';
+  const usesHeartbeat = ctx.vendor === 'claude';
+  const usesLiveProgressPane = streamsVendorEvents || usesHeartbeat;
   const progressPath = join(ctx.sessionsDir, `${ctx.agentRunId}.pane-progress.txt`);
   const cliJsonlPath = join(ctx.sessionsDir, `${ctx.agentRunId}.cli.jsonl`);
   if (usesLiveProgressPane) {
-    try { writeFileSync(progressPath, '', 'utf8'); } catch { /* best effort — pane uses touch */ }
+    try {
+      writeFileSync(progressPath, `[hydra] ${ctx.vendor} started — waiting for output...\n`, 'utf8');
+    } catch { /* best effort — pane uses touch */ }
   }
   const liveProgressTailState: JsonlTailState = { offset: 0 };
   const parseLiveProgress = ctx.vendor === 'kimi' ? kimiEventText : codexEventText;
+  const paneStartedAt = ctx.clock.now();
   const pollLiveProgress = (final = false): void => {
-    if (!usesLiveProgressPane) return;
-    pollJsonlFile(cliJsonlPath, progressPath, parseLiveProgress, liveProgressTailState, final);
+    if (streamsVendorEvents) {
+      pollJsonlFile(cliJsonlPath, progressPath, parseLiveProgress, liveProgressTailState, final);
+      return;
+    }
+    if (usesHeartbeat && !final) {
+      const elapsedSec = Math.floor((ctx.clock.now() - paneStartedAt) / 1000);
+      try {
+        appendFileSync(progressPath, `[hydra] claude working... elapsed ${elapsedSec}s\n`, 'utf8');
+      } catch { /* best effort — the heartbeat is cosmetic */ }
+    }
   };
 
   // 'compiled' substitutes the self-reexec form `<self> adapter-<vendor>` for
@@ -1085,6 +1160,7 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
     'pane', paneId,
   );
   log(`worker hosted in herdr pane ${paneId}: ${label} (lead workspace ${workspace ?? '?'})`);
+  shrinkAgentPane(ctx, paneId);
   try { ctx.herdrState(paneId, ctx.vendor, 'working'); } catch { /* best effort */ }
 
   const closePane = async (): Promise<void> => {
