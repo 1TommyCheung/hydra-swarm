@@ -5,6 +5,11 @@ All notable changes to Hydra-Swarm. The format follows
 `.claude-plugin/plugin.json`. Deeper narrative history (design rationale,
 run-by-run evidence) lives in `docs/roadmap.md`.
 
+> **Versioning policy (2026-07-19):** versions move SLOWLY. Notable features
+> bump the third segment (0.6.8 → 0.6.9); minor fixes, docs, and small
+> hardening go to a fourth segment (0.6.8 → 0.6.8.1). No minor-version bump
+> without operator sign-off.
+>
 > **Renumbering note (2026-07-19):** the releases originally published as
 > 0.7.0/0.7.1/0.7.2/0.8.0/0.8.1 were re-aligned to 0.6.4–0.6.8 — the pace of
 > minor bumps overstated the changes. Content is identical; the superseded
