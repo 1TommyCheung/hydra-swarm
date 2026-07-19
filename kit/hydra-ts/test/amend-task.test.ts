@@ -2,8 +2,8 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { amendTask, main, resolveReason, rewriteTaskSpec } from '../src/amend-task.ts';
-import { ledger, runDir, yamlBlock, yamlScalar } from '../src/lib.ts';
+import { amendTask, main, resolveAmendmentCheck, resolveReason, rewriteTaskSpec } from '../src/amend-task.ts';
+import { ledger, runDir, yamlBlock, yamlList, yamlScalar } from '../src/lib.ts';
 
 const TEST_TMP = join(import.meta.dirname, 'amend-task-tmp');
 
@@ -148,6 +148,99 @@ objective: >
     assert.doesNotMatch(secondPass, /and a third/);
     assert.match(secondPass, /^amendment_reason: second reason$/m);
     assert.match(secondPass, /^supersedes: 2$/m);
+  });
+
+  it('emits an amendment_check list when a non-empty amendmentCheck is supplied', () => {
+    const content = 'task_id: t1\nspec_version: 1\n';
+    const out = rewriteTaskSpec(
+      content,
+      1,
+      2,
+      'r',
+      'restart',
+      ['grep -n "flag: wx" src/lib.ts', 'grep -rn concurrent test/lib.test.ts'],
+    );
+    // Written as a YAML list under amendment_check:, mirroring writable_paths,
+    // but double-quoted with internal quotes escaped -- an unquoted item
+    // containing ': ' would be misparsed as a YAML mapping by yamlList, and
+    // one containing ' #' would be truncated as a stripped comment.
+    assert.match(out, /^amendment_check:$/m);
+    assert.match(out, /^ {2}- "grep -n \\"flag: wx\\" src\/lib\.ts"$/m);
+    assert.match(out, /^ {2}- "grep -rn concurrent test\/lib\.test\.ts"$/m);
+    // The list is appended AFTER delivered_via, so the rest of the spec
+    // remains intact.
+    assert.match(out, /delivered_via: restart\namendment_check:\n {2}- "grep/);
+  });
+
+  it('round-trips amendment_check items containing YAML-hostile characters exactly', () => {
+    // ': ' is misparsed as a YAML mapping key/value split when unquoted;
+    // ' #' is stripped as a trailing comment when unquoted; a literal
+    // double-quote or backslash must survive the write+read round trip
+    // byte-for-byte, not just "look reasonable" in the serialized text.
+    const cases = [
+      'grep -n "flag: wx" src/lib.ts', // colon-space inside the command
+      'echo hello # not a real comment', // space-hash
+      'grep -n "say \\"hi\\"" file.ts', // literal double quotes
+      'printf "back\\\\slash"', // literal backslash
+      'echo foo\\', // ends in a backslash -- stresses the closing-quote boundary
+      'grep -n "flag: wx" a.ts && echo done # combined: colon, hash, quote', // all hazards at once
+    ];
+    const out = rewriteTaskSpec('task_id: t1\nspec_version: 1\n', 1, 2, 'r', 'restart', cases);
+    mkdirSync(TEST_TMP, { recursive: true });
+    const specPath = join(TEST_TMP, 'amendment-check-roundtrip.yaml');
+    writeFileSync(specPath, out, 'utf8');
+    assert.deepEqual(yamlList(specPath, 'amendment_check'), cases);
+  });
+
+  it('rejects an amendment_check item containing a literal newline rather than silently corrupting it', () => {
+    // The @file input path (resolveAmendmentCheck) splits on '\n' so it can
+    // never produce a multi-line item, but a literal (non-@file) CLI
+    // argument could contain one verbatim (e.g. a caller passing
+    // $'line1\nline2'). Writing it as-is would split the YAML list across
+    // physical lines and silently lose everything after the first line on
+    // read-back -- fail loudly instead.
+    assert.throws(
+      () => rewriteTaskSpec('task_id: t1\nspec_version: 1\n', 1, 2, 'r', 'restart', ['line1\nline2']),
+      /amendment_check items must be single-line/,
+    );
+    assert.throws(
+      () => rewriteTaskSpec('task_id: t1\nspec_version: 1\n', 1, 2, 'r', 'restart', ['carriage\rreturn']),
+      /amendment_check items must be single-line/,
+    );
+  });
+
+  it('does NOT emit an amendment_check field when the list is empty (backward compatible)', () => {
+    // The default 4-arg amend invocation: no amendmentCheck argument at all,
+    // so the field is omitted entirely and the spec is byte-for-byte identical
+    // to the pre-fix output. (Verbatim equality with the historical 4-arg
+    // output is the strongest possible backward-compat guarantee.)
+    const content = 'task_id: t1\nspec_version: 1\n';
+    const withoutCheck = rewriteTaskSpec(content, 1, 2, 'r', 'restart');
+    const withoutCheckExplicitEmpty = rewriteTaskSpec(content, 1, 2, 'r', 'restart', []);
+
+    assert.equal(withoutCheck, withoutCheckExplicitEmpty);
+    assert.doesNotMatch(withoutCheck, /amendment_check/);
+    assert.match(withoutCheck, /delivered_via: restart\n$/);
+  });
+
+  it('drops a prior amendment_check list when re-amending without a new check list', () => {
+    // Re-amending an amended spec that carried amendment_check must drop the
+    // prior list along with the other amendment metadata, or a re-amend
+    // without a fresh check would leave stale assertions targeting the OLD
+    // amendment's defect, gateing the NEW one on no-longer-relevant commands.
+    const firstPass = rewriteTaskSpec(
+      'task_id: t1\nspec_version: 1\n',
+      1,
+      2,
+      'first reason',
+      'restart',
+      ['grep "old-flag" src/lib.ts'],
+    );
+    assert.match(firstPass, /amendment_check:/);
+
+    const secondPass = rewriteTaskSpec(firstPass, 2, 3, 'second reason', 'resume');
+    assert.doesNotMatch(secondPass, /amendment_check/);
+    assert.doesNotMatch(secondPass, /old-flag/);
   });
 });
 
@@ -727,9 +820,214 @@ spec_version: 1
         main(['only-run-id']),
       );
       assert.equal(exitCode, 1);
-      assert.match(output, /usage: amend-task\.sh <run_id> <task_id> <reason\|@reason-file> \[resume\|restart\]/);
+      assert.match(output, /usage: amend-task\.sh <run_id> <task_id> <reason\|@reason-file> \[resume\|restart\] \[amendment_check\|@amendment-check-file\]/);
     } finally {
       delete process.env.HYDRA_STATE_ROOT;
     }
+  });
+});
+
+describe('resolveAmendmentCheck (@file and literal expansion)', () => {
+  before(() => {
+    cleanTmp();
+    mkdirSync(TEST_TMP, { recursive: true });
+  });
+  after(() => {
+    cleanTmp();
+    delete process.env.HYDRA_STATE_ROOT;
+    delete process.env.HYDRA_ADAPTER_RUNTIME;
+  });
+
+  it('wraps a literal command into a single-element list', () => {
+    assert.deepEqual(
+      resolveAmendmentCheck('grep -n "flag: wx" src/lib.ts'),
+      ['grep -n "flag: wx" src/lib.ts'],
+    );
+    // A literal that contains but does not start with @ is still literal.
+    assert.deepEqual(
+      resolveAmendmentCheck('cc @alice'),
+      ['cc @alice'],
+    );
+  });
+
+  it('reads one assertion per non-blank line when the arg starts with @', () => {
+    const file = join(TEST_TMP, 'checks.txt');
+    writeFileSync(file, 'grep -n "flag: wx" src/lib.ts\n\ngrep -rn concurrent test/\n\n', 'utf8');
+    assert.deepEqual(
+      resolveAmendmentCheck(`@${file}`),
+      ['grep -n "flag: wx" src/lib.ts', 'grep -rn concurrent test/'],
+    );
+  });
+
+  it('dies clearly when the @amendment-check file does not exist', () => {
+    const missing = join(TEST_TMP, 'absent-checks.txt');
+    assert.throws(
+      () => resolveAmendmentCheck(`@${missing}`),
+      /hydra: error: amend-task: amendment_check file not found: /,
+    );
+  });
+});
+
+describe('amendTask + main() amendment_check wiring', () => {
+  before(() => {
+    cleanTmp();
+    mkdirSync(TEST_TMP, { recursive: true });
+    process.env.HYDRA_STATE_ROOT = TEST_TMP;
+  });
+  after(() => {
+    cleanTmp();
+    delete process.env.HYDRA_STATE_ROOT;
+    delete process.env.HYDRA_ADAPTER_RUNTIME;
+  });
+
+  it('amendTask() persists amendment_check as a YAML list when supplied programmatically', async () => {
+    const runId = 'prog-check';
+    const taskId = 'task-prog-check';
+    setupRun(runId);
+    const specPath = writeTaskSpec(runId, taskId, `task_id: ${taskId}
+run_id: run-${runId}
+spec_version: 1
+objective: Do work.
+`);
+
+    await amendTask(runId, taskId, 'reason', 'restart', { dispatch: () => {} }, [
+      'grep -n "flag: wx" src/lib.ts',
+      'grep -rn concurrent test/lib.test.ts',
+    ]);
+
+    assert.equal(yamlScalar(specPath, 'spec_version'), '2');
+    assert.equal(yamlScalar(specPath, 'amendment_reason'), 'reason');
+    assert.deepEqual(yamlList(specPath, 'amendment_check'), [
+      'grep -n "flag: wx" src/lib.ts',
+      'grep -rn concurrent test/lib.test.ts',
+    ]);
+  });
+
+  it('amendTask() omits amendment_check entirely when none is supplied (backward compatible)', async () => {
+    const runId = 'prog-no-check';
+    const taskId = 'task-prog-no-check';
+    setupRun(runId);
+    const specPath = writeTaskSpec(runId, taskId, `task_id: ${taskId}
+spec_version: 1
+`);
+
+    await amendTask(runId, taskId, 'reason', 'restart', { dispatch: () => {} });
+
+    const content = readFileSync(specPath, 'utf8');
+    assert.equal(yamlScalar(specPath, 'spec_version'), '2');
+    assert.doesNotMatch(content, /amendment_check/);
+  });
+
+  it('main() accepts a literal amendment_check as the 5th positional arg', async () => {
+    process.env.HYDRA_ADAPTER_RUNTIME = 'ts';
+    try {
+      const runId = 'main-literal-check';
+      const taskId = 'task-main-literal-check';
+      setupRun(runId);
+      const specPath = writeTaskSpec(runId, taskId, `task_id: ${taskId}
+assigned_vendor: native-missing
+worktree: ${TEST_TMP}
+spec_version: 1
+`);
+
+      // The default native dispatch fails AFTER the spec is rewritten
+      // (assigned_vendor has no adapter); the spec mutation is what proves
+      // the literal amendment_check was parsed and persisted.
+      const exitCode = await main([
+        runId,
+        taskId,
+        'reason',
+        'restart',
+        'grep -n "flag" src/lib.ts',
+      ]);
+      assert.equal(exitCode, 1);
+
+      assert.equal(yamlScalar(specPath, 'spec_version'), '2');
+      assert.deepEqual(yamlList(specPath, 'amendment_check'), [
+        'grep -n "flag" src/lib.ts',
+      ]);
+    } finally {
+      delete process.env.HYDRA_ADAPTER_RUNTIME;
+    }
+  });
+
+  it('main() accepts an @file amendment_check as the 5th positional arg (one assertion per non-blank line)', async () => {
+    process.env.HYDRA_ADAPTER_RUNTIME = 'ts';
+    try {
+      const runId = 'main-atfile-check';
+      const taskId = 'task-main-atfile-check';
+      setupRun(runId);
+      const specPath = writeTaskSpec(runId, taskId, `task_id: ${taskId}
+assigned_vendor: native-missing
+worktree: ${TEST_TMP}
+spec_version: 1
+`);
+
+      const checksFile = join(TEST_TMP, 'main-checks.txt');
+      writeFileSync(
+        checksFile,
+        'grep -n "flag: wx" src/lib.ts\n\ngrep -rn concurrent test/lib.test.ts\n',
+        'utf8',
+      );
+
+      const exitCode = await main([
+        runId,
+        taskId,
+        'reason',
+        'restart',
+        `@${checksFile}`,
+      ]);
+      assert.equal(exitCode, 1);
+
+      assert.equal(yamlScalar(specPath, 'spec_version'), '2');
+      assert.deepEqual(yamlList(specPath, 'amendment_check'), [
+        'grep -n "flag: wx" src/lib.ts',
+        'grep -rn concurrent test/lib.test.ts',
+      ]);
+    } finally {
+      delete process.env.HYDRA_ADAPTER_RUNTIME;
+    }
+  });
+
+  it('main() omits amendment_check entirely when the 5th positional arg is absent (backward compatible)', async () => {
+    process.env.HYDRA_ADAPTER_RUNTIME = 'ts';
+    try {
+      const runId = 'main-no-check';
+      const taskId = 'task-main-no-check';
+      setupRun(runId);
+      const specPath = writeTaskSpec(runId, taskId, `task_id: ${taskId}
+assigned_vendor: native-missing
+worktree: ${TEST_TMP}
+spec_version: 1
+`);
+
+      const exitCode = await main([runId, taskId, 'reason', 'restart']);
+      assert.equal(exitCode, 1);
+
+      assert.equal(yamlScalar(specPath, 'spec_version'), '2');
+      const content = readFileSync(specPath, 'utf8');
+      assert.doesNotMatch(content, /amendment_check/);
+    } finally {
+      delete process.env.HYDRA_ADAPTER_RUNTIME;
+    }
+  });
+
+  it('main() dies with a clear error when the @amendment-check file is missing', async () => {
+    const runId = 'main-missing-check-file';
+    const taskId = 'task-main-missing-check-file';
+    setupRun(runId);
+    const specPath = writeTaskSpec(runId, taskId, `task_id: ${taskId}
+spec_version: 1
+`);
+
+    const missing = join(TEST_TMP, 'absent-amendment-check.txt');
+    const { output, result: exitCode } = await captureStderrAsync(() =>
+      main([runId, taskId, 'reason', 'restart', `@${missing}`]),
+    );
+
+    assert.equal(exitCode, 1);
+    assert.match(output, /amendment_check file not found: /);
+    // The spec was NOT mutated -- amendTask() never ran.
+    assert.equal(yamlScalar(specPath, 'spec_version'), '1');
   });
 });

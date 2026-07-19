@@ -62,6 +62,13 @@ export function buildWorkerPrompt(
   const acceptance = yamlList(specPath, 'acceptance_criteria')
     .map((p) => `  - ${p}`)
     .join('\n');
+  // amendment_check is OPTIONAL and only meaningful on an amended spec. When
+  // absent (or empty), amendmentCheckBlock is '' and the rendered prompt is
+  // byte-for-byte identical to the pre-fix output -- strictly additive.
+  const amendmentCheck = yamlList(specPath, 'amendment_check');
+  const amendmentCheckBlock = amendmentReason && amendmentCheck.length > 0
+    ? `\n\n## Amendment verification gate (MANDATORY)\nBefore you may write status: "completed" in your result JSON, run\nEACH of the following commands yourself and include their exact\noutput in your reasoning:\n${amendmentCheck.map((cmd) => `  ${cmd}`).join('\n')}\nEvery command must produce non-empty output (exit 0, some stdout).\nIf ANY of them produces no output, the amendment described above is\nNOT YET FIXED, no matter what the existing test suite reports --\nkeep working. "There is already work on this branch and the\nexisting tests pass" is NOT evidence this amendment is satisfied;\nthe amendment exists precisely because the existing tests did not\ncatch the described defect.`
+    : '';
 
   const resultFile = '.hydra-result.json';
   const version = specVersion ? Number(specVersion) : 1;
@@ -101,7 +108,7 @@ ${amendmentReason
 *** THIS TASK WAS AMENDED. The amendment reason below is a REQUIRED FIX
 on top of your own prior work already committed on this branch -- read
 it first and follow it. ***
-Amendment reason: ${amendmentReason}
+Amendment reason: ${amendmentReason}${amendmentCheckBlock}
 
 Objective: ${objective}`
     : `## Task ${taskId} (run ${runId}, spec v${specVersion})

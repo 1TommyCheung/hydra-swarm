@@ -139,9 +139,46 @@ function yamlKeyValue(key: string, value: string): string {
   return [`${key}: |2`, ...indented].join('\n');
 }
 
+// Escape a scalar for embedding inside a YAML double-quoted string, matching
+// EXACTLY what lib.ts's unescapeYamlDoubleQuoted() un-escapes on read
+// (`\"` -> `"` and `\\` -> `\`, nothing else). Order matters: backslashes
+// must be escaped before quotes, or a backslash that was itself escaping a
+// quote would be double-escaped.
+function escapeYamlDoubleQuoted(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+// Render a YAML list field as `key:` followed by one `  - "item"` line per
+// entry. Mirrors the existing writable_paths/read_only_paths list-field
+// style used in task specs, but double-quotes each item (escaped per
+// escapeYamlDoubleQuoted) rather than emitting a bare scalar: an
+// amendment_check entry is an arbitrary shell command, and an unquoted
+// scalar containing ': ' is misparsed as a YAML mapping by this file's own
+// yamlList reader, while one containing ' #' gets truncated as a stripped
+// comment — both would silently corrupt the very command shown to the
+// worker as a mandatory check. A check command is a single shell one-liner
+// by contract (free-prose fields like amendment_reason use the separate
+// block-scalar path above for multi-line content) -- an item containing a
+// literal newline would split across physical YAML lines and silently lose
+// everything after the first line on read-back. The @file input path
+// (resolveAmendmentCheck) already splits on '\n' so it can never produce
+// one, but a literal (non-@file) CLI argument could contain one verbatim
+// (e.g. a caller passing $'line1\nline2'); fail loudly here rather than
+// let that corrupt silently.
+function yamlListField(key: string, items: string[]): string {
+  for (const item of items) {
+    if (/[\r\n]/.test(item)) {
+      die(`amend-task: amendment_check items must be single-line shell commands, got a newline in: ${item}`);
+    }
+  }
+  const body = items.map((item) => `  - "${escapeYamlDoubleQuoted(item)}"`).join('\n');
+  return `${key}:\n${body}`;
+}
+
 /**
  * Rewrite a task-spec YAML body: bump spec_version, drop any prior amendment
- * metadata, and append fresh supersedes / amendment_reason / delivered_via keys.
+ * metadata, and append fresh supersedes / amendment_reason / delivered_via
+ * keys (plus an optional amendment_check list when supplied).
  */
 export function rewriteTaskSpec(
   content: string,
@@ -149,6 +186,7 @@ export function rewriteTaskSpec(
   toV: string | number,
   reason: string,
   delivery: string,
+  amendmentCheck: string[] = [],
 ): string {
   let lines = content.split('\n');
   // Drop the trailing empty segment produced by a terminal newline, matching
@@ -158,7 +196,14 @@ export function rewriteTaskSpec(
   }
 
   const out: string[] = [];
-  const dropKeys = /^(supersedes|amendment_reason|delivered_via):/;
+  // amendment_check is dropped alongside the other amendment metadata so a
+  // re-amend with a fresh check list (or no check list at all) does not leave
+  // a stale prior check behind. Like amendment_reason, it may be a literal
+  // block scalar in pathological cases, but its normal shape is a YAML list
+  // (`amendment_check:` header + `  - cmd` continuation lines) -- both are
+  // indented continuation lines and the existing skippingBlock logic drops
+  // them on the first dedented line.
+  const dropKeys = /^(supersedes|amendment_reason|delivered_via|amendment_check):/;
   // A dropped key's value may be a literal block scalar (`key: |` followed by
   // indented continuation lines, as yamlKeyValue emits for a multi-line
   // reason) rather than a plain single-line value. When re-amending an
@@ -185,6 +230,13 @@ export function rewriteTaskSpec(
   out.push(`supersedes: ${fromV}`);
   out.push(yamlKeyValue('amendment_reason', awkAssignmentValue(reason)));
   out.push(yamlKeyValue('delivered_via', awkAssignmentValue(delivery)));
+  // Only persist amendment_check when a non-empty list was supplied -- an
+  // amendment without a check is still valid (strictly additive), and
+  // omitting the field entirely keeps the spec byte-for-byte identical to
+  // the pre-fix output for every existing 4-arg invocation.
+  if (amendmentCheck.length > 0) {
+    out.push(yamlListField('amendment_check', amendmentCheck));
+  }
   return out.join('\n') + '\n';
 }
 
@@ -205,7 +257,7 @@ function previewAmendmentReason(value: string): string {
  * task_spec_amended ledger event, log, and re-dispatch the task.
  *
  * Usage mirrors amend-task.sh:
- *   amendTask(runId, taskId, reason, delivery = 'restart')
+ *   amendTask(runId, taskId, reason, delivery = 'restart', amendmentCheck = [])
  */
 export async function amendTask(
   runId: string,
@@ -213,9 +265,10 @@ export async function amendTask(
   reason: string,
   delivery = 'restart',
   options: AmendTaskOptions = {},
+  amendmentCheck: string[] = [],
 ): Promise<string> {
-  if (!runId) die('usage: amend-task.ts <run_id> <task_id> <reason> [resume|restart]');
-  if (!taskId) die('usage: amend-task.ts <run_id> <task_id> <reason> [resume|restart]');
+  if (!runId) die('usage: amend-task.ts <run_id> <task_id> <reason> [resume|restart] [amendment_check]');
+  if (!taskId) die('usage: amend-task.ts <run_id> <task_id> <reason> [resume|restart] [amendment_check]');
   if (!reason) die('amendment_reason required');
 
   const taskSpec = join(runDir(runId), 'tasks', `${taskId}.yaml`);
@@ -267,7 +320,7 @@ export async function amendTask(
     );
   }
 
-  const rewritten = rewriteTaskSpec(content, fromVStr, toV, reason, delivery);
+  const rewritten = rewriteTaskSpec(content, fromVStr, toV, reason, delivery, amendmentCheck);
   replaceFileAtomically(taskSpec, rewritten);
 
   // The worktree's own .hydra-task.yaml (written once by create-worktree.ts,
@@ -333,15 +386,34 @@ export function resolveReason(reason: string): string {
   return readFileSync(filePath, 'utf8');
 }
 
+// Resolve the optional `amendment_check` CLI argument into a list of shell
+// command assertions. A literal argument (anything that does not start with
+// `@`) becomes a single-element list. An `@<path>` argument reads the file
+// and treats each non-blank line as one assertion -- blank lines are
+// stripped so a trailing newline or spacing between commands does not
+// produce empty list items that would always satisfy "non-empty stdout".
+// The same `@file` convention as resolveReason() keeps multi-command input
+// out of shell-quoting pain.
+export function resolveAmendmentCheck(arg: string): string[] {
+  if (!arg.startsWith('@')) return [arg];
+  const filePath = arg.slice(1);
+  if (!existsSync(filePath)) {
+    die(`amend-task: amendment_check file not found: ${filePath}`);
+  }
+  const contents = readFileSync(filePath, 'utf8');
+  return contents.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
+}
+
 export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
   try {
-    const [runId, taskId, rawReason, delivery = 'restart'] = args;
+    const [runId, taskId, rawReason, delivery = 'restart', rawAmendmentCheck] = args;
     if (!runId || !taskId) {
-      die('usage: amend-task.sh <run_id> <task_id> <reason|@reason-file> [resume|restart]');
+      die('usage: amend-task.sh <run_id> <task_id> <reason|@reason-file> [resume|restart] [amendment_check|@amendment-check-file]');
     }
     if (!rawReason) die('amendment_reason required');
     const reason = resolveReason(rawReason);
-    await amendTask(runId, taskId, reason, delivery);
+    const amendmentCheck = rawAmendmentCheck ? resolveAmendmentCheck(rawAmendmentCheck) : [];
+    await amendTask(runId, taskId, reason, delivery, {}, amendmentCheck);
     return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
