@@ -1,5 +1,8 @@
 # Hydra-Swarm — Documentation Set
 
+> **Dev notes:** vendor design/review/spike artifacts referenced below (`bun-migration-*`, `*-design-*`, `*-review-*`, `license-research-*`, `doc-audit-*`) live in the machine-local, gitignored `docs/dev-notes/` — production users do not need them; recover from git history pre-split if absent.
+
+
 **Date:** 2026-07-16 · **Status:** **Wave 2 operational** (all four heads). Waves 0–2 delivered; the compiled Bun binary is the operational default (Node/`ts` is the automatic fallback when no binary is provisioned yet); front of the roadmap is packaging + the hardening daemon.
 **Supersedes:** the single-document specs v1–v3. This document set is self-contained; no prior version is a normative dependency.
 **Evidence:** per-wave completion reports and the Wave 2 exit snapshot lived in the pre-extraction tree (`../hydra-reports/`); they were not carried into this standalone repo. Day-to-day operation is documented in `operations.md`.
