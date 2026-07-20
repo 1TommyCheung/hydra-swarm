@@ -484,6 +484,33 @@ describe('adapter-claude', () => {
     );
   });
 
+  it('suppresses worker and Git-derived completed drops for a structured Claude error', () => {
+    const { taskSpec, worktree, inbox, sessions } = setupFixture();
+    commitFile(worktree, 'src/old-head.txt', 'pre-existing head');
+    const { runner } = makeRunner({
+      stdout: JSON.stringify({
+        type: 'result', subtype: 'success', is_error: true,
+        api_error_status: 429,
+        result: 'API Error: Usage credits required ...',
+        total_cost_usd: 0,
+        usage: { input_tokens: 0, output_tokens: 0 },
+      }),
+      sideEffect: (cwd) => writeFileSync(
+        join(cwd, '.hydra-result.json'),
+        JSON.stringify({ status: 'completed', summary: 'stale result' }),
+      ),
+    });
+
+    start(taskSpec, worktree, inbox, sessions, 'aid-quota', { exec: runner });
+
+    const result = JSON.parse(readFileSync(join(inbox, 'result.json'), 'utf8'));
+    assert.equal(result.status, 'failed');
+    assert.match(result.summary, /Claude API error/);
+    assert.deepEqual(result.files_changed, []);
+    const outcome = JSON.parse(readFileSync(join(sessions, 'aid-quota.outcome.json'), 'utf8'));
+    assert.equal(outcome.kind, 'usage_limited');
+  });
+
   it('synthesizes a failed drop when there is no result and no git advance', () => {
     const { taskSpec, worktree, inbox, sessions } = setupFixture();
 
@@ -496,7 +523,7 @@ describe('adapter-claude', () => {
     );
     assert.equal(result.vendor, 'claude');
     assert.equal(result.status, 'failed');
-    assert.equal(result.summary, 'worker produced no result drop');
+    assert.equal(result.summary, 'Claude API error: malformed Claude JSON result envelope');
     assert.deepEqual(result.files_changed, []);
     assert.ok(result.risks.includes('adapter synthesized a failed drop'));
   });

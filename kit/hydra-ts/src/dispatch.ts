@@ -64,6 +64,7 @@ import {
 } from './vendor-cooldown.ts';
 import { isCompiledBinary } from './kit-assets.ts';
 import { resolveWorkerNodeBinDir } from './resolve-node.ts';
+import { readAdapterOutcome } from './adapter-outcome.ts';
 
 export type ExecFileSyncLike = (
   file: string,
@@ -908,13 +909,43 @@ function runDetectorTick(ctx: WorkerContext, recorder: ExitRecorder): boolean {
   }
 }
 
+function recordUsageLimitedAndCooldown(
+  ctx: WorkerContext,
+  recorder: ExitRecorder,
+  details: UsageLimitDetails,
+): void {
+  recorder.recordUsageLimited(details);
+  try {
+    recordCooldown(details, cooldownStoreOptions(ctx.env, ctx.cooldownFile));
+  } catch (error) {
+    warn(`failed to record vendor cooldown: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function applyAdapterOutcome(ctx: WorkerContext, recorder: ExitRecorder): boolean {
+  const outcome = readAdapterOutcome(ctx.sessionsDir, ctx.agentRunId);
+  if (!outcome) return false;
+  if (outcome.vendor !== ctx.vendor) {
+    recorder.recordExit('agent_exited', '1', 'reason', 'adapter_outcome_vendor_mismatch');
+    return true;
+  }
+  if (outcome.kind === 'success') return false;
+  if (outcome.kind === 'usage_limited') {
+    recordUsageLimitedAndCooldown(ctx, recorder, outcome.details);
+    return true;
+  }
+  recorder.recordExit(
+    'agent_exited',
+    '1',
+    'reason', ctx.vendor === 'claude' ? 'claude_api_error' : 'adapter_terminal_failure',
+  );
+  return true;
+}
+
 /**
- * Usage-limit detector tick (OpenCode only in this task). Same fail-open
- * contract as runDetectorTick: never throws, never blocks worker exit, and
- * returns true only when the attempt was terminated. On a confirmed match the
- * attempt is recorded as agent_usage_limited (exit 125) — the vendor CLI
- * retries usage limits internally forever, so waiting for stall/timeout would
- * burn the whole window. HYDRA_USAGE_DETECTOR=0 disables the tick entirely.
+ * Usage-limit detector tick (OpenCode only). Same fail-open contract as
+ * runDetectorTick. Claude's post-exit structured outcome uses the shared
+ * recordUsageLimitedAndCooldown path above instead of weakening this detector.
  */
 function runUsageDetectorTick(ctx: WorkerContext, recorder: ExitRecorder): boolean {
   if (ctx.env.HYDRA_USAGE_DETECTOR === '0') return false;
@@ -928,17 +959,12 @@ function runUsageDetectorTick(ctx: WorkerContext, recorder: ExitRecorder): boole
       env: ctx.env,
     });
     if (match) {
-      recorder.recordUsageLimited(match);
+      recordUsageLimitedAndCooldown(ctx, recorder, match);
       // Machine-global cooldown side-channel (run 0055, task 3): record the
       // exhaustion so a later dispatch to this vendor refuses at the
       // enforceVendorCooldown gate instead of hanging again. Best-effort —
       // recordUsageLimited above is the correctness-critical write; a
       // cooldown-write failure must never affect it.
-      try {
-        recordCooldown(match, cooldownStoreOptions(ctx.env, ctx.cooldownFile));
-      } catch (error) {
-        warn(`failed to record vendor cooldown: ${error instanceof Error ? error.message : String(error)}`);
-      }
       return true;
     }
     return false;
@@ -1243,7 +1269,9 @@ async function runWorkerPlain(
       recorder.recordTimeout(timeout);
       return;
     }
-    recorder.recordExit('agent_exited', exitSignal ? signalExitCode(exitSignal) : String(exitCode ?? 0));
+    if (!applyAdapterOutcome(ctx, recorder)) {
+      recorder.recordExit('agent_exited', exitSignal ? signalExitCode(exitSignal) : String(exitCode ?? 0));
+    }
   } catch (error) {
     recorder.cancel();
     throw error;
@@ -1452,7 +1480,7 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
 
   let exitCode = '0';
   try { exitCode = readFileSync(sentinel, 'utf8').trim(); } catch { /* sentinel exists but unreadable; use conservative fallback */ }
-  recorder.recordExit('agent_exited', exitCode);
+  if (!applyAdapterOutcome(ctx, recorder)) recorder.recordExit('agent_exited', exitCode);
   await closePane();
   return true;
 }

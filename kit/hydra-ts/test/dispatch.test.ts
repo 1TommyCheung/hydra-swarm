@@ -388,6 +388,56 @@ describe('dispatch Bash parity', () => {
     assert.deepEqual(options.usage, [[f.runId, 'task-a', 'claude', value.agentRunId]]);
   });
 
+  it('turns a Claude structured 429 outcome into usage-limited exit 125 and cooldown', async () => {
+    const f = fixture(runId());
+    const agentRunId = `${f.runId}-task-a-v1`;
+    const cooldownFile = join(f.runDir, 'vendor-cooldowns.json');
+    const mock = fakeSpawn({ onSpawn: () => {
+      writeFileSync(join(f.sessionsDir, `${agentRunId}.outcome.json`), JSON.stringify({
+        version: 1,
+        vendor: 'claude',
+        kind: 'usage_limited',
+        details: {
+          vendor: 'claude', limitKind: 'rate_limit', retryable: true,
+          source: 'structured_event', confidence: 'exact',
+          rawError: 'API Error: Usage credits required ...',
+        },
+      }));
+    } });
+    const options = injectedOptions(f, mock.spawn, { cooldownFile });
+
+    await dispatch(f.runId, 'task-a', options);
+
+    assert.deepEqual(ledger(f).map(({ event }) => event), ['task_started', 'agent_usage_limited']);
+    assert.equal(ledger(f).at(-1)?.exit_code, undefined);
+    assert.equal(readFileSync(join(f.sessionsDir, `${agentRunId}.exit`), 'utf8'), '125');
+    assert.ok(activeCooldown('claude', undefined, undefined, { env: { HYDRA_COOLDOWN_FILE: cooldownFile } }));
+    const next = fakeSpawn();
+    await assert.rejects(
+      dispatch(f.runId, 'task-a', injectedOptions(f, next.spawn, { cooldownFile })),
+      /assigned vendor 'claude' is in a usage-limit cooldown/,
+    );
+    assert.equal(next.calls.length, 0);
+  });
+
+  it('turns a Claude structured non-quota error into a loud nonzero terminal exit', async () => {
+    const f = fixture(runId());
+    const agentRunId = `${f.runId}-task-a-v1`;
+    const mock = fakeSpawn({ onSpawn: () => {
+      writeFileSync(join(f.sessionsDir, `${agentRunId}.outcome.json`), JSON.stringify({
+        version: 1, vendor: 'claude', kind: 'terminal_failure',
+        reason: 'Claude API error (HTTP 500)', rawError: 'API Error: Internal server error',
+      }));
+    } });
+
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn));
+
+    const events = ledger(f);
+    assert.deepEqual(events.map(({ event }) => event), ['task_started', 'agent_exited']);
+    assert.equal(events.at(-1)?.exit_code, '1');
+    assert.equal(events.at(-1)?.reason, 'claude_api_error');
+  });
+
   it('defaults to the TypeScript adapter when no runtime is configured', async () => {
     const f = fixture(runId());
     const mock = fakeSpawn();

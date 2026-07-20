@@ -18,6 +18,11 @@ import {
   yamlScalar,
 } from './lib.ts';
 import { isCompiledBinary } from './kit-assets.ts';
+import {
+  adapterOutcomePath,
+  classifyClaudeOutcome,
+  writeAdapterOutcome,
+} from './adapter-outcome.ts';
 
 // ---------------------------------------------------------------------------
 // Claude Code worker adapter — TypeScript port of hydra/adapters/claude.sh.
@@ -178,6 +183,7 @@ function synthesizeFailedDrop(
   taskSpec: string,
   sessionId: string,
   resultPath: string,
+  summary = 'worker produced no result drop',
 ): void {
   const taskId = yamlScalar(taskSpec, 'task_id');
   const runId = yamlScalar(taskSpec, 'run_id');
@@ -195,7 +201,7 @@ function synthesizeFailedDrop(
     branch,
     base_commit: baseCommit,
     head_commit: baseCommit,
-    summary: 'worker produced no result drop',
+    summary,
     files_changed: [],
     verification_claims: [],
     risks: ['adapter synthesized a failed drop'],
@@ -250,6 +256,7 @@ export function claude(
   mkdirSync(inboxAbs, { recursive: true });
   mkdirSync(sessionsAbs, { recursive: true });
   rmSync(workerResult, { force: true });
+  rmSync(adapterOutcomePath(sessionsAbs, agentRunId), { force: true });
 
   const prompt = buildWorkerPrompt(taskSpec);
 
@@ -275,6 +282,9 @@ export function claude(
   writeFileSync(join(sessionsAbs, `${agentRunId}.stderr`), stderr);
   writeFileSync(join(sessionsAbs, `${agentRunId}.cli.json`), raw);
 
+  const adapterOutcome = classifyClaudeOutcome(raw);
+  if (adapterOutcome) writeAdapterOutcome(sessionsAbs, agentRunId, adapterOutcome);
+
   let sessionId = '';
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
@@ -299,8 +309,15 @@ export function claude(
   // Bridge the worker's in-worktree result into the inbox (workers never touch
   // the state store). Stamp the captured session id + vendor. If absent,
   // synthesize a failed drop so promotion can reject cleanly.
-  const worker = readWorkerResult(workerResult);
-  if (worker) {
+  const structuredError = adapterOutcome?.kind === 'usage_limited'
+    || adapterOutcome?.kind === 'terminal_failure';
+  const worker = structuredError ? null : readWorkerResult(workerResult);
+  if (structuredError) {
+    const error = adapterOutcome.kind === 'usage_limited'
+      ? adapterOutcome.details.rawError
+      : adapterOutcome.rawError;
+    synthesizeFailedDrop(taskSpec, sessionId, resultPath, `Claude API error: ${error}`);
+  } else if (worker) {
     worker.vendor = 'claude';
     if (worker.session_id === null || worker.session_id === undefined) {
       worker.session_id = sessionId;

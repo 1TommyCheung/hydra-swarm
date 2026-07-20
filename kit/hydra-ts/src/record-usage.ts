@@ -50,11 +50,16 @@ function readUsageClaude(cliPath: string): Usage | null {
   const usage = typeof obj.usage === 'object' && obj.usage !== null
     ? obj.usage as Record<string, unknown>
     : {};
-  return {
+  const result = {
     cost_usd: toNumber(obj.total_cost_usd ?? obj.cost_usd ?? 0),
     tokens_in: toNumber(usage.input_tokens ?? 0),
     tokens_out: toNumber(usage.output_tokens ?? 0),
   };
+  const structuredError = obj.is_error === true || typeof obj.api_error_status === 'number';
+  if (structuredError && result.cost_usd === 0 && result.tokens_in === 0 && result.tokens_out === 0) {
+    return null;
+  }
+  return result;
 }
 
 function collectTokens(obj: unknown, key: string): number[] {

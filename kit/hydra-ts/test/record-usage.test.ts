@@ -92,6 +92,18 @@ describe('readVendorUsage', () => {
     });
   });
 
+  it('omits zero-token zero-cost structured Claude non-runs', () => {
+    const stateRoot = setupStateRoot();
+    const sessions = join(stateRoot, 'runs', 'run-r1', 'sessions');
+    mkdirSync(sessions, { recursive: true });
+    writeFileSync(join(sessions, 'abc.cli.json'), JSON.stringify({
+      type: 'result', subtype: 'success', is_error: true, api_error_status: 429,
+      result: 'API Error: Usage credits required ...', total_cost_usd: 0,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    }));
+    assert.equal(readVendorUsage('claude', sessions, 'abc'), null);
+  });
+
   it('takes the last token_count values from codex cli.jsonl', () => {
     const stateRoot = setupStateRoot();
     const sessions = join(stateRoot, 'runs', 'run-r1', 'sessions');
@@ -223,6 +235,24 @@ describe('recordUsage', () => {
       existsSync(join(stateRoot, 'runs', 'run-r2', 'authoritative', 'ledger', 'events.jsonl')),
       false,
     );
+  });
+
+  it('does not write agent_usage for a zero-token zero-cost Claude non-run', () => {
+    const stateRoot = setupStateRoot();
+    createRun(stateRoot, 'non-run');
+    const sessions = join(stateRoot, 'runs', 'run-non-run', 'sessions');
+    writeFileSync(join(sessions, 'agent-1.cli.json'), JSON.stringify({
+      type: 'result', subtype: 'success', is_error: true, api_error_status: 429,
+      result: 'API Error: Usage credits required ...', total_cost_usd: 0,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    }));
+
+    recordUsage('non-run', 'task-a', 'claude', 'agent-1');
+
+    assert.equal(existsSync(join(stateRoot, 'agents', 'usage.jsonl')), false);
+    assert.deepEqual(readJsonl(join(
+      stateRoot, 'runs', 'run-non-run', 'authoritative', 'ledger', 'events.jsonl',
+    )), []);
   });
 
   it('records a zero-cost dispatch for an unknown vendor', () => {
