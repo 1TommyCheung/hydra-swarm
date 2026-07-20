@@ -1,18 +1,20 @@
 import { createHash, randomBytes } from 'node:crypto';
 import {
   closeSync,
+  existsSync,
   fsyncSync,
   linkSync,
   mkdirSync,
   openSync,
   readFileSync,
   readdirSync,
-  renameSync,
+  rmdirSync,
   statSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 
 // ---------------------------------------------------------------------------
 // Append-only, ledger-correlatable review verdict storage.
@@ -164,7 +166,7 @@ const LOCK_TIMEOUT_MS = 5000;
  */
 const STALE_LOCK_AGE_MS = 30_000;
 
-/** Ownership record written into the lock file. The pid is diagnostic only. */
+/** Ownership record written into an immutable generation owner file. */
 interface LockRecord {
   pid: number;
   token: string;
@@ -177,196 +179,40 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(sab), 0, 0, ms);
 }
 
-function lockPathFor(dir: string): string {
-  return join(dir, '.publish.lock');
-}
-
-function readLockRecord(lockPath: string): LockRecord | undefined {
-  let raw: string;
+/**
+ * fsync an opened directory so that a newly created entry in it (a task
+ * directory, a lock file, a linked verdict) is durable before the caller
+ * relies on it.
+ */
+function fsyncDirectorySync(dirPath: string, closeFaultStage?: string): void {
+  const fd = openSync(dirPath, 'r');
+  let primary: unknown;
   try {
-    raw = readFileSync(lockPath, 'utf8');
+    fsyncSync(fd);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    primary = err;
     throw err;
-  }
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (parsed !== null && typeof parsed === 'object') {
-      const record = parsed as Partial<LockRecord>;
-      if (
-        typeof record.pid === 'number'
-        && typeof record.token === 'string'
-        && typeof record.acquired === 'number'
-      ) {
-        return record as LockRecord;
-      }
+  } finally {
+    try {
+      closeSync(fd);
+      if (closeFaultStage !== undefined) maybeInjectFault(closeFaultStage);
+    } catch (err) {
+      if (primary === undefined) throw err;
     }
-  } catch {
-    // Unparseable: fall through.
   }
-  return undefined;
-}
-
-/** A lock judged stale: the exact content of the lock file at judgment time. */
-interface StaleLock {
-  content: string;
 }
 
 /**
- * Return the raw content of the lock file if — and only if — it is provably
- * stale (older than STALE_LOCK_AGE_MS), else undefined. The age comes from
- * the ownership record's acquisition time when one is readable, falling back
- * to the file mtime for unparseable leftovers, so a corrupted lock cannot
- * deadlock every future publish either. A young or missing lock is NOT stale.
+ * writeSync(2) may short-write; loop until the complete byte sequence has
+ * been written through the descriptor.
  */
-function readStaleLock(lockPath: string): StaleLock | undefined {
-  let content: string;
-  try {
-    content = readFileSync(lockPath, 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw err;
-  }
-  let acquired: number | undefined;
-  try {
-    const parsed: unknown = JSON.parse(content);
-    if (parsed !== null && typeof parsed === 'object') {
-      const record = parsed as Partial<LockRecord>;
-      if (typeof record.acquired === 'number') acquired = record.acquired;
-    }
-  } catch {
-    // Unparseable: fall back to the file mtime below.
-  }
-  if (acquired === undefined) {
-    try {
-      acquired = statSync(lockPath).mtimeMs;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-      throw err;
-    }
-  }
-  if (Date.now() - acquired < STALE_LOCK_AGE_MS) return undefined;
-  return { content };
-}
-
-/**
- * Attempt to reclaim a PROVABLY stale lock — atomically with respect to the
- * lock IDENTITY, never the pathname. Unlinking a lock pathname based on a
- * prior read is the ABA race this must not commit: two waiters can both judge
- * the same stale lock, and the second unlinkSync then deletes the FIRST
- * reclaimer's freshly acquired lock, admitting two publishers into the
- * critical section at once.
- *
- * Instead the stale lock is claimed by RENAMING it to a unique path. rename(2)
- * atomically hands the claimant whatever file currently lives at lockPath,
- * and only ONE claimant's rename of the same stale file can win — the loser's
- * fails with ENOENT. The winner re-reads the CLAIMED file and proceeds only
- * when its content is byte-identical to the record it judged stale. If the
- * rename captured a DIFFERENT lock (between the staleness read and the rename
- * the dead lock was legitimately replaced by a live one), the captured lock is
- * handed back with an atomic no-replace link(2) and the claimant backs off.
- *
- * Returns true only when this caller genuinely reclaimed the stale lock and
- * lockPath is free for its next exclusive-create attempt.
- */
-function tryReclaimStaleLock(dir: string, lockPath: string): boolean {
-  const stale = readStaleLock(lockPath);
-  if (stale === undefined) return false;
-
-  const claimPath = join(
-    dir,
-    `.publish.lock.reclaim-${process.pid}-${randomBytes(6).toString('hex')}`,
-  );
-  try {
-    renameSync(lockPath, claimPath);
-  } catch (err) {
-    // ENOENT: another claimant moved the stale lock first, or it was released
-    // — either way WE did not win the claim, so just keep waiting.
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    throw err;
-  }
-
-  const claimed = readFileSync(claimPath, 'utf8');
-  if (claimed === stale.content) {
-    // Genuine reclaim: the claimed file IS the dead lock we judged. Dispose
-    // of it; the caller's next exclusive create wins the freed pathname.
-    try {
-      unlinkSync(claimPath);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-    }
-    return true;
-  }
-
-  // The claim captured a different lock than the one judged stale: hand it
-  // back atomically. link(2) fails with EEXIST rather than displacing yet
-  // another lock if one appeared while the captured lock was held aside, so
-  // this restore can never overwrite a live lock.
-  try {
-    linkSync(claimPath, lockPath);
-  } catch (err) {
-    // Best-effort cleanup of our claim copy before backing off or throwing.
-    try {
-      unlinkSync(claimPath);
-    } catch {
-      // The claim copy is uniquely named and junk-only; nothing to preserve.
-    }
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
-    throw err;
-  }
-  unlinkSync(claimPath);
-  return false;
-}
-
-/**
- * Allocating a sequence number from a directory listing is racy: two
- * reviewers publishing at once can observe the same "next seq" and, because
- * different reviewed_heads yield different filenames at the same seq,
- * O_EXCL on the final filename alone would not catch the collision. Guard
- * the whole allocate -> write -> publish -> hash critical section with an
- * exclusive-create lock file, following the O_EXCL latch idiom in lib.ts —
- * except this lock must be released (it guards a repeatable critical
- * section, not a one-shot "first past the post" pin), and it must survive a
- * crashed owner: the lock file carries an ownership record (pid, token,
- * acquisition time) so a later publisher can reclaim it once it is provably
- * stale, via the atomic rename-to-claim in tryReclaimStaleLock. Returns the
- * ownership token, which releaseLock requires as proof.
- */
-function acquireLock(dir: string, lockPath: string): string {
-  const record: LockRecord = {
-    pid: process.pid,
-    token: randomBytes(8).toString('hex'),
-    acquired: Date.now(),
-  };
-  let waited = 0;
-  for (;;) {
-    try {
-      writeFileSync(lockPath, JSON.stringify(record), { flag: 'wx' });
-      return record.token;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      if (tryReclaimStaleLock(dir, lockPath)) {
-        // We genuinely reclaimed the stale lock — retry the create at once.
-        continue;
-      }
-      if (waited >= LOCK_TIMEOUT_MS) {
-        throw new Error(`timed out waiting for review publish lock: ${lockPath}`);
-      }
-      sleepSync(LOCK_RETRY_DELAY_MS);
-      waited += LOCK_RETRY_DELAY_MS;
-    }
-  }
-}
-
-function releaseLock(lockPath: string, token: string): void {
-  // Release only a lock we still own: if ours was reclaimed as stale and
-  // another publisher has since taken it, unlinking would drop THEIR lock.
-  const record = readLockRecord(lockPath);
-  if (record === undefined || record.token !== token) return;
-  try {
-    unlinkSync(lockPath);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+function writeAllSync(fd: number, bytes: Buffer): void {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const requested = faultEnabled('lock-write-short') ? 1 : bytes.length - offset;
+    const written = faultEnabled('lock-write-zero') ? 0 : writeSync(fd, bytes, offset, requested);
+    if (written <= 0) throw new Error('review publish lock write made zero progress');
+    offset += written;
   }
 }
 
@@ -377,23 +223,19 @@ function releaseLock(lockPath: string, token: string): void {
 const PUBLISHED_NAME_RE = /^(\d+)-[0-9a-f]{40}\.json$/;
 
 /**
- * Sequence claim marker: `.seq-0001.claimed`. Claiming a seq by
- * exclusive-creating its marker is the ATOMIC allocation fence. The publish
- * lock serializes publishers in the normal case, but POSIX offers no
- * conditional unlink, so stale-lock reclamation can — in a vanishingly rare
- * multi-preemption corner — admit two publishers at once. The marker makes a
- * duplicate seq impossible even then: exactly one publisher can claim a given
- * seq and the loser rescans, and link(2) still guarantees no overwrite of the
- * verdict file itself. A marker is removed once the verdict carrying its seq
- * is durably linked (the filename then records the seq), so markers do not
- * accumulate; a marker left behind by a crash is a harmless, semantically
- * valid reservation of its seq.
+ * A `.seq-0001.claimed` DIRECTORY is both the atomic sequence reservation and
+ * the ordered lock generation. Its immutable `.owner-<random>` child is the
+ * ownership identity. mkdir(2) chooses exactly one owner for a sequence; later
+ * generations wait for every lower live generation before entering.
  */
 const MARKER_NAME_RE = /^\.seq-(\d+)\.claimed$/;
+const OWNER_NAME_RE = /^\.owner-([0-9a-f]{32})$/;
 
 function markerPathFor(dir: string, seq: number): string {
   return join(dir, `.seq-${String(seq).padStart(4, '0')}.claimed`);
 }
+
+interface LockClaim { seq: number; claimPath: string; ownerPath: string }
 
 /**
  * Documented safe upper bound on a single task's review rounds. 9999 rounds
@@ -408,7 +250,7 @@ const MAX_PUBLISHED_SEQ = 9999;
  * over BOTH published verdicts and outstanding claims; on a claim collision
  * the loser rescans and retries with the next candidate.
  */
-function allocateSeq(dir: string, taskId: string): number {
+function allocateSeq(dir: string, taskId: string): LockClaim {
   for (;;) {
     let entries: string[];
     try {
@@ -431,8 +273,31 @@ function allocateSeq(dir: string, taskId: string): number {
       );
     }
     try {
-      writeFileSync(markerPathFor(dir, candidate), '', { flag: 'wx' });
-      return candidate;
+      const claimPath = markerPathFor(dir, candidate);
+      mkdirSync(claimPath);
+      const token = randomBytes(16).toString('hex');
+      const ownerPath = join(claimPath, `.owner-${token}`);
+      const record: LockRecord = { pid: process.pid, token, acquired: Date.now() };
+      const fd = openSync(ownerPath, 'wx');
+      let closed = false;
+      try {
+        maybeInjectFault('lock-write');
+        writeAllSync(fd, Buffer.from(JSON.stringify(record)));
+        maybeInjectFault('lock-fsync');
+        fsyncSync(fd);
+        closeSync(fd);
+        closed = true;
+        maybeInjectFault('lock-close');
+        maybeInjectFault('lock-dir-fsync');
+        fsyncDirectorySync(claimPath, 'lock-dir-close');
+        fsyncDirectorySync(dir, 'lock-parent-dir-close');
+      } catch (err) {
+        if (!closed) { try { closeSync(fd); } catch {} }
+        try { maybeInjectFault('lock-cleanup-owner'); unlinkSync(ownerPath); } catch {}
+        try { maybeInjectFault('lock-cleanup-claim'); rmdirSync(claimPath); } catch {}
+        throw err;
+      }
+      return { seq: candidate, claimPath, ownerPath };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
       // Another publisher claimed this seq first — rescan and retry.
@@ -440,15 +305,185 @@ function allocateSeq(dir: string, taskId: string): number {
   }
 }
 
+function ownerAgeMs(ownerPath: string): number {
+  maybeInjectFault('stale-read');
+  try {
+    const parsed = JSON.parse(readFileSync(ownerPath, 'utf8')) as Partial<LockRecord>;
+    if (typeof parsed.acquired === 'number') return Date.now() - parsed.acquired;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return -1;
+  }
+  try { return Date.now() - statSync(ownerPath).mtimeMs; }
+  catch (err) { if ((err as NodeJS.ErrnoException).code === 'ENOENT') return -1; throw err; }
+}
+
 /**
- * Test-only fault injection: when HYDRA_REVIEW_STORE_FAULT names a publish
- * stage, throw a synthetic error at that stage. Nothing in production sets
- * the variable; it exists so the temp-leak regression tests can reach every
- * failure path of the temp-file lifecycle deterministically.
+ * Ownership invariant: every acquisition has a never-reused claim generation
+ * and a random, immutable owner pathname inside it. Publishers wait behind all
+ * lower generations. Release and stale recovery destroy only that immutable
+ * owner pathname; they never inspect a shared pathname and later unlink/move
+ * whatever has replaced it. A replacement therefore has a different pathname
+ * and cannot be captured or removed by a paused predecessor. Empty-generation
+ * removal is safe because generations are never reused while any later claim
+ * or published verdict records progress; ENOTEMPTY is an ambiguous replacement
+ * and is deliberately left in place (fail closed).
  */
+function waitForTurn(dir: string, claim: LockClaim): void {
+  let waited = 0;
+  for (;;) {
+    let blocked = false;
+    const entries = readdirSync(dir);
+    for (const name of entries) {
+      const match = MARKER_NAME_RE.exec(name);
+      if (match === null || Number(match[1]) >= claim.seq) continue;
+      const lowerPath = join(dir, name);
+      let owners: string[];
+      try { owners = readdirSync(lowerPath).filter((entry) => OWNER_NAME_RE.test(entry)); }
+      catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw err;
+      }
+      if (owners.length === 0) {
+        let age: number;
+        try { age = Date.now() - statSync(lowerPath).mtimeMs; }
+        catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          throw err;
+        }
+        if (age >= STALE_LOCK_AGE_MS) {
+          testHookPoint('stale-observed');
+          try { maybeInjectFault('stale-cleanup'); rmdirSync(lowerPath); }
+          catch (err) {
+            const code = (err as NodeJS.ErrnoException).code;
+            if (code !== 'ENOENT' && code !== 'ENOTEMPTY') throw err;
+            if (code === 'ENOTEMPTY') {
+              testHookPoint('stale-replacement-preserved');
+              blocked = true;
+            }
+          }
+        } else blocked = true;
+        continue;
+      }
+      for (const owner of owners) {
+        const ownerPath = join(lowerPath, owner);
+        const age = ownerAgeMs(ownerPath);
+        if (age < 0) continue;
+        if (age < STALE_LOCK_AGE_MS) { blocked = true; continue; }
+        testHookPoint('stale-observed');
+        try {
+          maybeInjectFault('stale-owner-unlink');
+          unlinkSync(ownerPath);
+          testHookPoint('stale-claimed');
+        }
+        catch (err) { if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err; }
+      }
+      try { maybeInjectFault('stale-cleanup'); rmdirSync(lowerPath); }
+      catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT' && code !== 'ENOTEMPTY') throw err;
+        if (code === 'ENOTEMPTY') {
+          // No restore is needed: the live replacement was never moved. The
+          // non-empty generation itself keeps every later owner blocked.
+          testHookPoint('stale-replacement-preserved');
+          blocked = true;
+        }
+      }
+    }
+    if (!existsSync(claim.ownerPath)) {
+      throw new Error(`review publish ownership was lost before acquisition: ${claim.ownerPath}`);
+    }
+    const ownOthers = readdirSync(claim.claimPath)
+      .filter((entry) => OWNER_NAME_RE.test(entry) && join(claim.claimPath, entry) !== claim.ownerPath);
+    if (ownOthers.length !== 0) {
+      throw new Error(`ambiguous review publish ownership in ${claim.claimPath}`);
+    }
+    if (!blocked) return;
+    testHookPoint('blocked');
+    if (waited >= LOCK_TIMEOUT_MS) throw new Error(`timed out waiting for review publish claim: ${claim.claimPath}`);
+    sleepSync(LOCK_RETRY_DELAY_MS);
+    waited += LOCK_RETRY_DELAY_MS;
+  }
+}
+
+function releaseClaim(claim: LockClaim): void {
+  testHookPoint('release-before-owner-unlink');
+  try { maybeInjectFault('release-owner-unlink'); unlinkSync(claim.ownerPath); }
+  catch (err) { if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err; }
+  testHookPoint('release-after-owner-unlink');
+  try { maybeInjectFault('release-claim-rmdir'); rmdirSync(claim.claimPath); }
+  catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'ENOTEMPTY') throw err;
+    if (code === 'ENOTEMPTY') throw new Error(`ambiguous review publish release preserved: ${claim.claimPath}`);
+  }
+}
+
+/**
+ * Fault injection is inert unless the caller also proves possession of the
+ * validated hook-directory capability. A fault tag or path alone is never an
+ * activation mechanism.
+ */
+function faultEnabled(stage: string): boolean {
+  return hookConfig() !== undefined && (process.env.HYDRA_REVIEW_STORE_FAULT ?? '').split(',').includes(stage);
+}
+
 function maybeInjectFault(stage: string): void {
-  if (process.env.HYDRA_REVIEW_STORE_FAULT === stage) {
+  if (faultEnabled(stage)) {
     throw new Error(`injected fault at review-store publish stage: ${stage}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Test-only contention barrier.
+//
+// Hooks require a random capability in BOTH the environment and the contained
+// `.hydra-review-store.capability` file. Paths and tags are validated before a
+// barrier is constructed. A comma-separated pause list can park only after a
+// named real transition (including genuine acquisition); it cannot bypass the
+// ordered ownership algorithm. Every pause is bounded.
+// ---------------------------------------------------------------------------
+
+/** Bounded so a test that never releases the hold fails instead of hanging. */
+const HOOK_RELEASE_TIMEOUT_MS = 10_000;
+
+interface HookConfig { dir: string; tag: string }
+const HOOK_TAG_RE = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
+const HOOK_CAP_RE = /^[0-9a-f]{32,128}$/;
+
+function hookConfig(): HookConfig | undefined {
+  const hookDir = process.env.HYDRA_REVIEW_STORE_HOOK_DIR;
+  if (hookDir === undefined || hookDir === '') return undefined;
+  const capability = process.env.HYDRA_REVIEW_STORE_HOOK_CAPABILITY;
+  const tag = process.env.HYDRA_REVIEW_STORE_HOOK_TAG ?? `pid-${process.pid}`;
+  const resolvedDir = resolve(hookDir);
+  if (hookDir !== resolvedDir || !resolvedDir.startsWith(sep)) return undefined;
+  if (capability === undefined || !HOOK_CAP_RE.test(capability) || !HOOK_TAG_RE.test(tag)) return undefined;
+  try {
+    const capabilityPath = resolve(resolvedDir, '.hydra-review-store.capability');
+    if (!capabilityPath.startsWith(resolvedDir + sep)) return undefined;
+    if (readFileSync(capabilityPath, 'utf8') !== capability) return undefined;
+  } catch { return undefined; }
+  return { dir: resolvedDir, tag };
+}
+
+function testHookPoint(name: string): void {
+  const config = hookConfig();
+  if (config === undefined || !HOOK_TAG_RE.test(name)) return;
+  const barrier = join(config.dir, `${config.tag}.${name}`);
+  try {
+    writeFileSync(barrier, String(Date.now()), { flag: 'wx' });
+  } catch {}
+  const pauses = (process.env.HYDRA_REVIEW_STORE_HOOK_PAUSE ?? '').split(',');
+  if (!pauses.includes(name)) return;
+  const releaseBarrier = join(config.dir, `${config.tag}.${name}.release`);
+  const deadline = Date.now() + HOOK_RELEASE_TIMEOUT_MS;
+  while (!existsSync(releaseBarrier)) {
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `review-store test hook: timed out waiting for release barrier ${releaseBarrier}`,
+      );
+    }
+    sleepSync(10);
   }
 }
 
@@ -460,13 +495,24 @@ export function publishVerdict(
 ): PublishedVerdict {
   const head = assertGitObjectId(reviewedHead, 'reviewedHead');
   const dir = reviewDirFor(runDirPath, taskId);
+  const taskDirExisted = existsSync(dir);
   mkdirSync(dir, { recursive: true });
-  const lockPath = lockPathFor(dir);
-
-  const lockToken = acquireLock(dir, lockPath);
+  if (!taskDirExisted) {
+    // First publish for this task: the recursive mkdir created the per-task
+    // reviews directory, but that new directory ENTRY is only durable once
+    // its parent — the reviews root — has been fsynced. Do it before
+    // proceeding so a crash cannot lose the directory the verdict (and the
+    // ledger event referencing it) is about to land in. An existing directory
+    // needs no such fsync: no new entry was created.
+    maybeInjectFault('reviews-dir-fsync');
+    fsyncDirectorySync(dirname(dir), 'reviews-dir-close');
+  }
+  const claim = allocateSeq(dir, taskId);
+  let primary: unknown;
   try {
-    const seq = allocateSeq(dir, taskId);
-    const markerPath = markerPathFor(dir, seq);
+    waitForTurn(dir, claim);
+    testHookPoint('acquired');
+    const seq = claim.seq;
     const fileName = reviewFileName(seq, head);
     const finalPath = join(dir, fileName);
     const tmpPath = join(dir, `.${fileName}.tmp-${process.pid}`);
@@ -484,70 +530,57 @@ export function publishVerdict(
     // into the reviews directory, where the discovery scan would have to
     // ignore them forever.
     let published = false;
+    maybeInjectFault('open');
+    const fd = openSync(tmpPath, 'w');
+    let filePrimary: unknown;
     try {
-      maybeInjectFault('open');
-      const fd = openSync(tmpPath, 'w');
       try {
-        try {
-          maybeInjectFault('write');
-          writeFileSync(fd, verdictBytes);
-          maybeInjectFault('fsync-file');
-          fsyncSync(fd);
-        } finally {
-          closeSync(fd);
-        }
-        maybeInjectFault('link');
-        linkSync(tmpPath, finalPath);
-        maybeInjectFault('unlink-tmp');
-        unlinkSync(tmpPath);
-        published = true;
-        maybeInjectFault('dir-fsync');
-        const dirFd = openSync(dir, 'r');
-        try {
-          fsyncSync(dirFd);
-        } finally {
-          closeSync(dirFd);
-        }
+        maybeInjectFault('write');
+        writeFileSync(fd, verdictBytes);
+        maybeInjectFault('fsync-file');
+        fsyncSync(fd);
+      } catch (err) {
+        filePrimary = err;
+        throw err;
       } finally {
-        if (!published) {
-          // A failure left the temp behind: remove it. The PRIMARY error
-          // must win — published === false means one is already in flight —
-          // so a cleanup failure is swallowed rather than allowed to mask
-          // it; ENOENT simply means the temp never got created or is
-          // already gone.
-          try {
-            unlinkSync(tmpPath);
-          } catch {
-            // Deliberately swallowed (see above).
-          }
+        try {
+          closeSync(fd);
+          maybeInjectFault('file-close');
+        } catch (err) {
+          if (filePrimary === undefined) throw err;
         }
       }
+      maybeInjectFault('link');
+      linkSync(tmpPath, finalPath);
+      maybeInjectFault('unlink-tmp');
+      unlinkSync(tmpPath);
+      published = true;
+      maybeInjectFault('dir-fsync');
+      fsyncDirectorySync(dir, 'dir-close');
     } finally {
       if (!published) {
-        // The seq claim went unfulfilled (no verdict carries it): release
-        // it so the next publish can reuse the seq. Same primary-error
-        // preservation as above.
+        // A failure left the temp behind: remove it. The PRIMARY error
+        // must win — published === false means one is already in flight —
+        // so a cleanup failure is swallowed rather than allowed to mask
+        // it; ENOENT simply means the temp never got created or is
+        // already gone.
         try {
-          unlinkSync(markerPath);
+          maybeInjectFault('temp-cleanup');
+          unlinkSync(tmpPath);
         } catch {
           // Deliberately swallowed (see above).
         }
       }
     }
 
-    // The verdict carrying this seq is now durably linked and discoverable,
-    // so the claim marker is redundant — drop it. A failure here leaves only
-    // a harmless seq reservation behind, so it must not fail the publish.
-    try {
-      unlinkSync(markerPath);
-    } catch {
-      // Leftover marker: harmless (see MARKER_NAME_RE comment).
-    }
-
     const sha256 = createHash('sha256').update(verdictBytes).digest('hex');
     return { seq, path: finalPath, sha256 };
+  } catch (err) {
+    primary = err;
+    throw err;
   } finally {
-    releaseLock(lockPath, lockToken);
+    try { releaseClaim(claim); }
+    catch (err) { if (primary === undefined) throw err; }
   }
 }
 
