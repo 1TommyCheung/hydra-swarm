@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
 import {
   appendFileSync,
   chmodSync,
@@ -8,6 +9,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -31,6 +33,7 @@ import {
   type UsageLimitDetails,
 } from '../src/dispatch.ts';
 import type { HeadsSnapshot } from '../src/detect-heads.ts';
+import { buildWorkerPrompt } from '../src/build-worker-prompt.ts';
 import { activeCooldown, recordCooldown } from '../src/vendor-cooldown.ts';
 
 function headsSnapshot(
@@ -858,7 +861,7 @@ describe('dispatch Bash parity', () => {
     const capable = fixture(runId(), { vendor: 'claude' });
     writeFileSync(
       join(capable.sessionsDir, `${capable.runId}-task-a-v1.json`),
-      JSON.stringify({ session_id: 'session-compiled' }),
+      JSON.stringify({ vendor: 'claude', session_id: 'session-compiled' }),
     );
     const capableMock = fakeSpawn();
     await dispatch(capable.runId, 'task-a', injectedOptions(capable, capableMock.spawn, {
@@ -874,7 +877,7 @@ describe('dispatch Bash parity', () => {
     const incapable = fixture(runId(), { vendor: 'codex' });
     writeFileSync(
       join(incapable.sessionsDir, `${incapable.runId}-task-a-v1.json`),
-      JSON.stringify({ session_id: 'session-compiled' }),
+      JSON.stringify({ vendor: 'codex', session_id: 'session-compiled' }),
     );
     const incapableMock = fakeSpawn();
     await dispatch(incapable.runId, 'task-a', injectedOptions(incapable, incapableMock.spawn, {
@@ -1132,8 +1135,8 @@ describe('dispatch Bash parity', () => {
     const f = fixture(runId(), { tsAdapterContent: 'export function start(): void {}\nexport function resume(): void {}\n' });
     const oldPath = join(f.sessionsDir, `${f.runId}-task-a-v1.json`);
     const newEmptyPath = join(f.sessionsDir, `${f.runId}-task-a-v2.json`);
-    writeFileSync(oldPath, JSON.stringify({ session_id: 'session-old' }));
-    writeFileSync(newEmptyPath, JSON.stringify({ session_id: '' }));
+    writeFileSync(oldPath, JSON.stringify({ vendor: 'claude', session_id: 'session-old' }));
+    writeFileSync(newEmptyPath, JSON.stringify({ vendor: 'claude', session_id: '' }));
     const old = new Date(1_000_000);
     const recent = new Date(2_000_000);
     utimesSync(oldPath, old, old);
@@ -1151,7 +1154,7 @@ describe('dispatch Bash parity', () => {
 
   it('cold-restarts while preserving a discovered prior session when a TypeScript adapter lacks resume', async () => {
     const f = fixture(runId(), { vendor: 'codex' });
-    writeFileSync(join(f.sessionsDir, `${f.runId}-task-a-v1.json`), JSON.stringify({ session_id: 'session-1' }));
+    writeFileSync(join(f.sessionsDir, `${f.runId}-task-a-v1.json`), JSON.stringify({ vendor: 'codex', session_id: 'session-1' }));
     const mock = fakeSpawn();
     await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
       env: { HYDRA_DELIVERY: 'resume' },
@@ -1167,7 +1170,7 @@ describe('dispatch Bash parity', () => {
     });
     writeFileSync(
       join(supported.sessionsDir, `${supported.runId}-task-a-v1.json`),
-      JSON.stringify({ session_id: 'session-ts' }),
+      JSON.stringify({ vendor: 'claude', session_id: 'session-ts' }),
     );
     const supportedMock = fakeSpawn();
     await dispatch(supported.runId, 'task-a', injectedOptions(supported, supportedMock.spawn, {
@@ -1182,7 +1185,7 @@ describe('dispatch Bash parity', () => {
     });
     writeFileSync(
       join(unsupported.sessionsDir, `${unsupported.runId}-task-a-v1.json`),
-      JSON.stringify({ session_id: 'session-ts' }),
+      JSON.stringify({ vendor: 'codex', session_id: 'session-ts' }),
     );
     const unsupportedMock = fakeSpawn();
     await dispatch(unsupported.runId, 'task-a', injectedOptions(unsupported, unsupportedMock.spawn, {
@@ -1230,7 +1233,7 @@ describe('dispatch Bash parity', () => {
     const f = fixture(runId(), { vendor: 'codex' });
     writeFileSync(
       join(f.sessionsDir, `${f.runId}-task-a-v1.json`),
-      JSON.stringify({ session_id: 'session-codex' }),
+      JSON.stringify({ vendor: 'codex', session_id: 'session-codex' }),
     );
     const mock = fakeSpawn();
     const { output } = await captureStderr(() =>
@@ -1261,7 +1264,7 @@ describe('dispatch Bash parity', () => {
     });
     writeFileSync(
       join(f.sessionsDir, `${f.runId}-task-a-v1.json`),
-      JSON.stringify({ session_id: 'session-kimi-prior' }),
+      JSON.stringify({ vendor: 'kimi', session_id: 'session-kimi-prior' }),
     );
     const mock = fakeSpawn();
     const { output } = await captureStderr(() =>
@@ -1285,7 +1288,7 @@ describe('dispatch Bash parity', () => {
     const f = fixture(runId(), { vendor: 'kimi' });
     writeFileSync(
       join(f.sessionsDir, `${f.runId}-task-a-v1.json`),
-      JSON.stringify({ session_id: 'session-kimi-compiled' }),
+      JSON.stringify({ vendor: 'kimi', session_id: 'session-kimi-compiled' }),
     );
     const mock = fakeSpawn();
     await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
@@ -1323,7 +1326,7 @@ describe('dispatch Bash parity', () => {
     });
     writeFileSync(
       join(f.sessionsDir, `${f.runId}-task-a-v1.json`),
-      JSON.stringify({ session_id: 'session-claude' }),
+      JSON.stringify({ vendor: 'claude', session_id: 'session-claude' }),
     );
     const mock = fakeSpawn();
     const { output } = await captureStderr(() =>
@@ -3066,5 +3069,245 @@ describe('exit recorder', () => {
     assert.equal('model' in entries[0], false);
     assert.equal('scope' in entries[0], false);
     assert.equal('retry_at' in entries[0], false);
+  });
+});
+
+describe('file-first revision evidence at dispatch (issue #26)', () => {
+  before(() => mkdirSync(TEST_TMP, { recursive: true }));
+  after(() => rmSync(TEST_TMP, { recursive: true, force: true }));
+
+  function amendSpec(f: Fixture, extraLines: string[] = []): void {
+    appendFileSync(f.taskSpecPath, [
+      'supersedes: 1',
+      'amendment_reason: Fix the blocking findings from the recorded verdicts.',
+      ...extraLines,
+      '',
+    ].join('\n'));
+  }
+
+  function writeVerdictFile(f: Fixture, seq: number, body: Record<string, unknown>): string {
+    const head = String(seq).padStart(2, '0').repeat(20).slice(0, 40);
+    const dir = join(f.runDir, 'authoritative', 'reviews', 'task-a');
+    mkdirSync(dir, { recursive: true });
+    const ref = `${String(seq).padStart(4, '0')}-${head}.json`;
+    const bytes = JSON.stringify({ reviewed_base: '0'.repeat(40), reviewed_head: head, ...body });
+    writeFileSync(join(dir, ref), bytes);
+    mkdirSync(join(f.runDir, 'authoritative', 'ledger'), { recursive: true });
+    appendFileSync(join(f.runDir, 'authoritative', 'ledger', 'events.jsonl'), `${JSON.stringify({
+      event: 'review_verdict', task_id: 'task-a', seq: String(seq), reviewed_head: head,
+      content_sha256: createHash('sha256').update(bytes).digest('hex'),
+    })}\n`);
+    return ref;
+  }
+
+  it('materializes the bundle before the worker starts and records a durable ledger event', async () => {
+    const f = fixture(runId());
+    amendSpec(f);
+    const ref = writeVerdictFile(f, 1, {
+      task_id: 'task-a',
+      verdict: 'revise',
+      reviewer: 'codex-reviewer',
+      risk: 'high',
+      blocking_findings: ['DISPATCH-EVIDENCE-MARKER in src/x.ts:5'],
+    });
+    let bundleAtSpawn = false;
+    const mock = fakeSpawn({ onSpawn: () => {
+      bundleAtSpawn = existsSync(join(f.worktree, '.hydra-context', 'revision-evidence', 'manifest.json'));
+    } });
+    const options = injectedOptions(f, mock.spawn, { adapterRuntime: 'ts' });
+    await captureStdout(() => dispatch(f.runId, 'task-a', options));
+
+    assert.equal(bundleAtSpawn, true, 'bundle must exist before the adapter spawns');
+    const manifest = JSON.parse(readFileSync(
+      join(f.worktree, '.hydra-context', 'revision-evidence', 'manifest.json'), 'utf8',
+    )) as Record<string, unknown>;
+    assert.equal(manifest.latest_verdict_ref, ref);
+
+    const events = ledger(f);
+    const materialized = events.find((entry) => entry.event === 'revision_evidence_materialized');
+    assert.ok(materialized, 'revision_evidence_materialized ledger event');
+    assert.equal(materialized.task_id, 'task-a');
+    assert.match(materialized.manifest_sha256, /^[0-9a-f]{64}$/);
+    assert.equal(materialized.unresolved_findings, '1');
+    assert.equal(materialized.latest_verdict_ref, ref);
+
+    // The worker prompt (shared builder, all four adapters) carries the
+    // compact summary only — never the verdict body.
+    const prompt = buildWorkerPrompt(f.taskSpecPath);
+    assert.match(prompt, /## Revision evidence bundle/);
+    assert.ok(!prompt.includes('DISPATCH-EVIDENCE-MARKER'), 'verdict body must not be inlined');
+  });
+
+  it('records revision_evidence_skipped when an amended task has no recorded verdicts', async () => {
+    const f = fixture(runId());
+    amendSpec(f);
+    const mock = fakeSpawn();
+    const options = injectedOptions(f, mock.spawn, { adapterRuntime: 'ts' });
+    await captureStdout(() => dispatch(f.runId, 'task-a', options));
+    const skipped = ledger(f).find((entry) => entry.event === 'revision_evidence_skipped');
+    assert.ok(skipped);
+    assert.equal(skipped.reason, 'no_recorded_verdicts');
+    assert.equal(existsSync(join(f.worktree, '.hydra-context')), false);
+  });
+
+  it('does not touch evidence or emit evidence events for a non-amended dispatch', async () => {
+    const f = fixture(runId());
+    writeVerdictFile(f, 1, {
+      task_id: 'task-a', verdict: 'revise', reviewer: 'r', risk: 'high', blocking_findings: ['x'],
+    });
+    const mock = fakeSpawn();
+    const options = injectedOptions(f, mock.spawn, { adapterRuntime: 'ts' });
+    await captureStdout(() => dispatch(f.runId, 'task-a', options));
+    assert.ok(ledger(f).every((entry) => !entry.event.startsWith('revision_evidence')));
+    assert.equal(existsSync(join(f.worktree, '.hydra-context')), false);
+  });
+
+  it('stops worker start when stale context cannot be safely cleared for a revise verdict', async () => {
+    const f = fixture(runId());
+    amendSpec(f);
+    writeVerdictFile(f, 1, {
+      task_id: 'task-a', verdict: 'revise', reviewer: 'r', risk: 'high', blocking_findings: ['x'],
+    });
+    const outside = join(TEST_TMP, `${f.runId}-outside`);
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'marker'), 'unchanged');
+    mkdirSync(join(f.worktree, '.hydra-context'));
+    symlinkSync(outside, join(f.worktree, '.hydra-context', 'revision-evidence'));
+    const mock = fakeSpawn();
+    await assert.rejects(
+      captureStdout(() => dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { adapterRuntime: 'ts' }))),
+      /mandatory revision evidence unavailable/,
+    );
+    assert.equal(mock.calls.length, 0);
+    assert.equal(readFileSync(join(outside, 'marker'), 'utf8'), 'unchanged');
+    assert.ok(ledger(f).some((entry) => entry.event === 'revision_evidence_failed'));
+  });
+});
+
+describe('resume vendor ownership and downgrade ledger events (issue #26)', () => {
+  before(() => mkdirSync(TEST_TMP, { recursive: true }));
+  after(() => rmSync(TEST_TMP, { recursive: true, force: true }));
+
+  const RESUME_ADAPTER = 'export function start(): void {}\nexport function resume(): void {}\n';
+
+  it('never passes a session recorded for a different vendor to the new adapter', async () => {
+    const f = fixture(runId(), { tsAdapterContent: RESUME_ADAPTER });
+    writeFileSync(
+      join(f.sessionsDir, `${f.runId}-task-a-v1.json`),
+      JSON.stringify({ agent_run_id: `${f.runId}-task-a-v1`, vendor: 'kimi', session_id: 'session-from-kimi' }),
+    );
+    const mock = fakeSpawn();
+    const options = injectedOptions(f, mock.spawn, {
+      adapterRuntime: 'ts',
+      env: { HYDRA_DELIVERY: 'resume' },
+    });
+    const { output } = await captureStderr(() => captureStdout(() => dispatch(f.runId, 'task-a', options)));
+
+    // Cold start, and the mismatched session id is NOT forwarded.
+    assert.equal(mock.calls[0].args[2], 'start');
+    assert.equal(mock.calls[0].args.at(-1), '');
+    assert.match(output, /DIFFERENT VENDOR/);
+    assert.match(output, /kimi/);
+
+    const downgraded = ledger(f).find((entry) => entry.event === 'delivery_downgraded');
+    assert.ok(downgraded, 'durable delivery_downgraded ledger event');
+    assert.equal(downgraded.task_id, 'task-a');
+    assert.equal(downgraded.vendor, 'claude');
+    assert.equal(downgraded.requested_delivery, 'resume');
+    assert.equal(downgraded.effective_delivery, 'start');
+    assert.equal(downgraded.reason, 'session_vendor_mismatch');
+    assert.equal(downgraded.session_vendor, 'kimi');
+  });
+
+  it('emits a durable no_prior_session downgrade event when resume finds nothing', async () => {
+    const f = fixture(runId(), { tsAdapterContent: RESUME_ADAPTER });
+    const mock = fakeSpawn();
+    const options = injectedOptions(f, mock.spawn, {
+      adapterRuntime: 'ts',
+      env: { HYDRA_DELIVERY: 'resume' },
+    });
+    await captureStderr(() => captureStdout(() => dispatch(f.runId, 'task-a', options)));
+    const downgraded = ledger(f).find((entry) => entry.event === 'delivery_downgraded');
+    assert.ok(downgraded);
+    assert.equal(downgraded.reason, 'no_prior_session');
+    assert.equal(downgraded.effective_delivery, 'start');
+    assert.equal('session_vendor' in downgraded, false);
+  });
+
+  it('emits a durable adapter_resume_unsupported downgrade event for a no-resume adapter', async () => {
+    const f = fixture(runId(), { vendor: 'codex' });
+    writeFileSync(
+      join(f.sessionsDir, `${f.runId}-task-a-v1.json`),
+      JSON.stringify({ vendor: 'codex', session_id: 'session-codex' }),
+    );
+    const mock = fakeSpawn();
+    const options = injectedOptions(f, mock.spawn, {
+      adapterRuntime: 'ts',
+      env: { HYDRA_DELIVERY: 'resume' },
+    });
+    await captureStderr(() => captureStdout(() => dispatch(f.runId, 'task-a', options)));
+    // Same-vendor session is still forwarded on the cold restart.
+    assert.equal(mock.calls[0].args[2], 'start');
+    assert.equal(mock.calls[0].args.at(-1), 'session-codex');
+    const downgraded = ledger(f).find((entry) => entry.event === 'delivery_downgraded');
+    assert.ok(downgraded);
+    assert.equal(downgraded.reason, 'adapter_resume_unsupported');
+  });
+
+  it('emits no downgrade event when resume succeeds or was never requested', async () => {
+    const succeeded = fixture(runId(), { tsAdapterContent: RESUME_ADAPTER });
+    writeFileSync(
+      join(succeeded.sessionsDir, `${succeeded.runId}-task-a-v1.json`),
+      JSON.stringify({ vendor: 'claude', session_id: 'session-claude' }),
+    );
+    const resumedMock = fakeSpawn();
+    await captureStdout(() => dispatch(succeeded.runId, 'task-a', injectedOptions(succeeded, resumedMock.spawn, {
+      adapterRuntime: 'ts',
+      env: { HYDRA_DELIVERY: 'resume' },
+    })));
+    assert.equal(resumedMock.calls[0].args[2], 'resume');
+    assert.equal(resumedMock.calls[0].args.at(-1), 'session-claude');
+    assert.ok(ledger(succeeded).every((entry) => entry.event !== 'delivery_downgraded'));
+
+    const plain = fixture(runId());
+    const plainMock = fakeSpawn();
+    await captureStdout(() => dispatch(plain.runId, 'task-a', injectedOptions(plain, plainMock.spawn, {
+      adapterRuntime: 'ts',
+    })));
+    assert.ok(ledger(plain).every((entry) => entry.event !== 'delivery_downgraded'));
+  });
+
+  it('vendorless legacy sessions cold-start without forwarding an unowned id', async () => {
+    const f = fixture(runId(), { tsAdapterContent: RESUME_ADAPTER });
+    writeFileSync(
+      join(f.sessionsDir, `${f.runId}-task-a-v1.json`),
+      JSON.stringify({ session_id: 'session-legacy' }),
+    );
+    const mock = fakeSpawn();
+    await captureStdout(() => dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+      adapterRuntime: 'ts',
+      env: { HYDRA_DELIVERY: 'resume' },
+    })));
+    assert.equal(mock.calls[0].args[2], 'start');
+    assert.equal(mock.calls[0].args.at(-1), '');
+    const downgraded = ledger(f).find((entry) => entry.event === 'delivery_downgraded');
+    assert.equal(downgraded?.reason, 'session_vendor_unknown');
+  });
+
+  it('invalid-vendor sessions are unowned and never resumed or forwarded', async () => {
+    const f = fixture(runId(), { tsAdapterContent: RESUME_ADAPTER });
+    writeFileSync(
+      join(f.sessionsDir, `${f.runId}-task-a-v1.json`),
+      JSON.stringify({ vendor: '../../claude', session_id: 'hostile-session' }),
+    );
+    const mock = fakeSpawn();
+    await captureStderr(() => captureStdout(() => dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+      adapterRuntime: 'ts', env: { HYDRA_DELIVERY: 'resume' },
+    }))));
+    assert.equal(mock.calls[0].args[2], 'start');
+    assert.equal(mock.calls[0].args.at(-1), '');
+    const downgraded = ledger(f).find((entry) => entry.event === 'delivery_downgraded');
+    assert.equal(downgraded?.reason, 'session_vendor_unknown');
+    assert.equal(downgraded?.task_id, 'task-a');
   });
 });

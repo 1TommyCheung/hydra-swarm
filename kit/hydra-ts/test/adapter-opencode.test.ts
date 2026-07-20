@@ -913,3 +913,77 @@ ${extraSpecLines}`,
     assert.equal(capturedModel, 'override/model');
   });
 });
+
+describe('worker prompt parity (issue #26)', () => {
+  it('renders the shared amendment + revision-evidence contract byte-for-byte', async () => {
+    const { mkdtempSync, mkdirSync: makeDir, writeFileSync: writeF, rmSync: removeR } = await import('node:fs');
+    const { tmpdir: osTmpdir } = await import('node:os');
+    const { join: joinPath } = await import('node:path');
+    const { resolveRevisionEvidence, materializeRevisionEvidence } = await import('../src/revision-evidence.ts');
+    const { buildWorkerPrompt: buildSharedPrompt } = await import('../src/build-worker-prompt.ts');
+    const { buildWorkerPrompt: adapterPrompt } = await import('../src/adapter-opencode.ts');
+
+    const dir = mkdtempSync(joinPath(osTmpdir(), 'hydra-parity-opencode-'));
+    try {
+      const worktree = joinPath(dir, 'wt');
+      makeDir(worktree, { recursive: true });
+      const runDir = joinPath(dir, 'run');
+      const head = 'a'.repeat(40);
+      const reviews = joinPath(runDir, 'authoritative', 'reviews', 'task-parity');
+      makeDir(reviews, { recursive: true });
+      const verdictBytes = JSON.stringify({
+        task_id: 'task-parity',
+        verdict: 'revise',
+        reviewed_base: head,
+        reviewed_head: head,
+        reviewer: 'codex-reviewer',
+        risk: 'high',
+        blocking_findings: ['PARITY-VERDICT-MARKER in src/x.ts:5'],
+      });
+      writeF(joinPath(reviews, `0001-${head}.json`), verdictBytes);
+      const ledgerDir = joinPath(runDir, 'authoritative', 'ledger');
+      makeDir(ledgerDir, { recursive: true });
+      const { createHash } = await import('node:crypto');
+      writeF(joinPath(ledgerDir, 'events.jsonl'), JSON.stringify({
+        event: 'review_verdict', task_id: 'task-parity', seq: '1', reviewed_head: head,
+        content_sha256: createHash('sha256').update(verdictBytes).digest('hex'),
+      }) + '\n');
+      materializeRevisionEvidence(worktree, resolveRevisionEvidence(runDir, 'task-parity'), {
+        taskId: 'task-parity', runId: '0062', specVersion: '2',
+      });
+      const spec = joinPath(dir, 'task.yaml');
+      writeF(spec, [
+        'task_id: task-parity',
+        'run_id: "0062"',
+        'spec_version: 2',
+        'branch: hydra/0062/task-parity',
+        `base_commit: ${head}`,
+        `worktree: ${worktree}`,
+        'objective: Do the thing.',
+        'writable_paths:',
+        '  - src/**',
+        'read_only_paths: []',
+        'acceptance_criteria:',
+        '  - done',
+        'supersedes: 1',
+        'amendment_reason: Fix the blocking findings.',
+        'amendment_check:',
+        '  - "grep -n fixed src/x.ts"',
+        '',
+      ].join('\n'));
+
+      const prompt = adapterPrompt(spec);
+      // Byte-for-byte parity with the shared builder: every vendor delivers
+      // one consistent amendment/evidence contract.
+      assert.equal(prompt, buildSharedPrompt(spec));
+      assert.match(prompt, /THIS TASK WAS AMENDED/);
+      assert.match(prompt, /## Amendment verification gate \(MANDATORY\)/);
+      assert.ok(prompt.includes('grep -n fixed src/x.ts'));
+      assert.match(prompt, /## Revision evidence bundle/);
+      assert.ok(prompt.includes('.hydra-context/revision-evidence/manifest.json'));
+      assert.ok(!prompt.includes('PARITY-VERDICT-MARKER'), 'verdict body must not be inlined');
+    } finally {
+      removeR(dir, { recursive: true, force: true });
+    }
+  });
+});

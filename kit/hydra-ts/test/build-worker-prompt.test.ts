@@ -1,14 +1,17 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { buildWorkerPrompt } from '../src/build-worker-prompt.ts';
 import { rewriteTaskSpec } from '../src/amend-task.ts';
+import { materializeRevisionEvidence, readEvidenceManifest, resolveRevisionEvidence } from '../src/revision-evidence.ts';
 
 const TEST_TMP = join(import.meta.dirname, 'tmp-build-worker-prompt');
 
@@ -637,5 +640,122 @@ acceptance_criteria:
     assert.ok(prompt.includes('The flag MUST be wx.'));
     assert.match(prompt, /## Amendment verification gate \(MANDATORY\)/);
     assert.ok(prompt.includes("grep -n \"flag:'wx'\" src/lib.ts"));
+  });
+
+  // -------------------------------------------------------------------------
+  // File-first revision evidence (issue #26).
+  // -------------------------------------------------------------------------
+
+  function evidenceFixture(withBundle: boolean): { spec: string; worktree: string; verdictRef: string } {
+    const base = join(TEST_TMP, makeRunId());
+    const worktree = join(base, 'worktree');
+    const runDir = join(base, 'run');
+    mkdirSync(worktree, { recursive: true });
+    const head = 'a'.repeat(40);
+    const verdictRef = `0001-${head}.json`;
+    const reviewsDir = join(runDir, 'authoritative', 'reviews', 'task-evd');
+    mkdirSync(reviewsDir, { recursive: true });
+    const verdictBytes = JSON.stringify({
+      task_id: 'task-evd',
+      verdict: 'revise',
+      reviewed_base: head,
+      reviewed_head: head,
+      reviewer: 'codex-reviewer',
+      risk: 'high',
+      blocking_findings: ['SECRET-VERDICT-BODY-MARKER in src/thing.ts:44'],
+    });
+    writeFileSync(join(reviewsDir, verdictRef), verdictBytes);
+    const ledgerDir = join(runDir, 'authoritative', 'ledger');
+    mkdirSync(ledgerDir, { recursive: true });
+    writeFileSync(join(ledgerDir, 'events.jsonl'), `${JSON.stringify({
+      event: 'review_verdict', task_id: 'task-evd', seq: '1', reviewed_head: head,
+      content_sha256: createHash('sha256').update(verdictBytes).digest('hex'),
+    })}\n`);
+    if (withBundle) {
+      const snapshot = resolveRevisionEvidence(runDir, 'task-evd');
+      materializeRevisionEvidence(worktree, snapshot, {
+        taskId: 'task-evd', runId: '0062', specVersion: '2',
+      });
+    }
+    const spec = join(base, 'task.yaml');
+    writeTaskSpec(spec, `task_id: task-evd
+run_id: "0062"
+spec_version: 2
+branch: hydra/0062/task-evd
+base_commit: ${head}
+worktree: ${worktree}
+objective: Do the thing.
+writable_paths:
+  - src/**
+read_only_paths: []
+acceptance_criteria:
+  - done
+supersedes: 1
+amendment_reason: Fix the blocking findings.
+delivered_via: restart
+`);
+    return { spec, worktree, verdictRef };
+  }
+
+  it('renders only the compact evidence manifest summary for an amended task with a bundle', () => {
+    const f = evidenceFixture(true);
+    const prompt = buildWorkerPrompt(f.spec, { cwd: TEST_TMP, env: {} });
+
+    assert.match(prompt, /THIS TASK WAS AMENDED/);
+    assert.match(prompt, /## Revision evidence bundle/);
+    assert.ok(prompt.includes('.hydra-context/revision-evidence/manifest.json'));
+    assert.ok(prompt.includes('.hydra-context/revision-evidence/latest-verdict.json'));
+    assert.match(prompt, /sha256 [0-9a-f]{64}/);
+    assert.match(prompt, /untrusted-reviewer-evidence/);
+    assert.ok(prompt.includes(f.verdictRef), 'source verdict ref exposed');
+    assert.ok(prompt.includes('src/thing.ts:44'), 'sanitized source hint exposed');
+    // Non-inlining: the verdict body itself must never ride into the prompt.
+    assert.ok(!prompt.includes('SECRET-VERDICT-BODY-MARKER'));
+    // The evidence block appears in the amendment section, before the objective.
+    assert.ok(prompt.indexOf('## Revision evidence bundle') < prompt.indexOf('Objective:'));
+  });
+
+  it('renders no evidence section when the worktree has no bundle', () => {
+    const f = evidenceFixture(false);
+    const prompt = buildWorkerPrompt(f.spec, { cwd: TEST_TMP, env: {} });
+    assert.match(prompt, /THIS TASK WAS AMENDED/);
+    assert.ok(!prompt.includes('## Revision evidence bundle'));
+  });
+
+  it('renders no evidence section for a non-amended task even when a bundle exists', () => {
+    const f = evidenceFixture(true);
+    const spec = join(dirname(f.spec), 'plain.yaml');
+    writeTaskSpec(spec, `task_id: task-evd
+run_id: "0062"
+spec_version: 1
+branch: hydra/0062/task-evd
+base_commit: ${'a'.repeat(40)}
+worktree: ${f.worktree}
+objective: Do the thing.
+writable_paths:
+  - src/**
+read_only_paths: []
+acceptance_criteria:
+  - done
+`);
+    const prompt = buildWorkerPrompt(spec, { cwd: TEST_TMP, env: {} });
+    assert.ok(!prompt.includes('## Revision evidence bundle'));
+  });
+
+  it('uses the dispatcher worktree anchor for a relative worktree from an adapter cwd', () => {
+    const f = evidenceFixture(true);
+    const original = readFileSync(f.spec, 'utf8');
+    writeFileSync(f.spec, original.replace(`worktree: ${f.worktree}`, 'worktree: worktree'));
+    const loaded = readEvidenceManifest(f.worktree)!;
+    const prompt = buildWorkerPrompt(f.spec, {
+      cwd: f.worktree,
+      env: {
+        HYDRA_WORKTREE_ABS: f.worktree,
+        HYDRA_REVISION_EVIDENCE_SHA256: loaded.manifestSha256,
+        HYDRA_REVISION_EVIDENCE_BYTES: String(loaded.manifestBytes),
+        HYDRA_REVISION_EVIDENCE_ENTRIES: loaded.manifest.entries.map((entry) => entry.path).join(','),
+      },
+    });
+    assert.match(prompt, /## Revision evidence bundle/);
   });
 });

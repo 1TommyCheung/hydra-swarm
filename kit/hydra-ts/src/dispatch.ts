@@ -5,6 +5,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  opendirSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -47,8 +48,16 @@ import {
   stateRoot,
   type JsonlTailState,
   warn,
+  yamlBlock,
+  yamlList,
   yamlScalar,
 } from './lib.ts';
+import {
+  clearRevisionEvidence,
+  materializeRevisionEvidence,
+  resolveRevisionEvidence,
+  verifyRevisionEvidence,
+} from './revision-evidence.ts';
 import { recordUsage } from './record-usage.ts';
 import {
   createLoopDetectorState,
@@ -732,38 +741,75 @@ async function acquireSlot(
 }
 
 function sessionValue(value: unknown): string {
-  if (value === null || value === undefined || value === false) return '';
-  if (typeof value === 'string') return value;
-  if (typeof value === 'object') return JSON.stringify(value);
-  return String(value);
+  return typeof value === 'string' && value.length <= 4096 ? value : '';
 }
 
-function findPriorSession(runId: string, taskId: string, sessionsDir: string): string {
-  if (!isDirectory(sessionsDir)) return '';
+interface PriorSession {
+  sessionId: string;
+  /** Vendor stamped into the session file by the recording adapter; undefined for legacy files. */
+  vendor?: string;
+}
+
+function findPriorSession(runId: string, taskId: string, sessionsDir: string): PriorSession {
+  if (!isDirectory(sessionsDir)) return { sessionId: '' };
   const prefix = `${runId}-${taskId}-v`;
-  const candidates = readdirSync(sessionsDir)
-    .filter((name) => name.startsWith(prefix) && name.endsWith('.json'))
-    .map((name) => {
-      const path = join(sessionsDir, name);
+  const candidates: Array<{ path: string; mtime: number }> = [];
+  const dir = opendirSync(sessionsDir);
+  let enumerated = 0;
+  try {
+    for (;;) {
+      const item = dir.readSync();
+      if (item === null) break;
+      if (++enumerated > 4096) throw new Error('sessions directory exceeds 4096 entries');
+      if (!item.name.startsWith(prefix) || !item.name.endsWith('.json')) continue;
+      const path = join(sessionsDir, item.name);
       try {
-        return { path, mtime: statSync(path).mtimeMs };
-      } catch {
-        return { path, mtime: -1 };
-      }
-    })
-    .filter(({ mtime }) => mtime >= 0)
-    .sort((a, b) => b.mtime - a.mtime);
+        const info = lstatSync(path);
+        if (!info.isFile() || info.isSymbolicLink() || info.size > 64 * 1024) continue;
+        candidates.push({ path, mtime: info.mtimeMs });
+        candidates.sort((a, b) => b.mtime - a.mtime);
+        if (candidates.length > 32) candidates.pop();
+      } catch { /* ignore an unstable advisory session file */ }
+    }
+  } finally { dir.closeSync(); }
 
   for (const candidate of candidates) {
     try {
-      const parsed = JSON.parse(readFileSync(candidate.path, 'utf8')) as { session_id?: unknown };
+      const parsed = JSON.parse(readFileSync(candidate.path, 'utf8')) as {
+        session_id?: unknown;
+        vendor?: unknown;
+      };
       const id = sessionValue(parsed.session_id);
-      if (id) return id;
+      if (id) {
+        const vendor = typeof parsed.vendor === 'string' && parsed.vendor !== ''
+          ? parsed.vendor
+          : undefined;
+        return { sessionId: id, vendor };
+      }
     } catch {
       // jq failures are ignored for individual candidate files by the shell loop.
     }
   }
-  return '';
+  return { sessionId: '' };
+}
+
+/** Reasons a requested resume degraded to a cold start. Ledger enum values. */
+export type DeliveryDowngradeReason =
+  | 'no_prior_session'
+  | 'session_vendor_unknown'
+  | 'session_vendor_mismatch'
+  | 'adapter_resume_unsupported';
+
+interface DeliveryPlan {
+  verb: 'start' | 'resume';
+  priorSession: string;
+  /** Present exactly when HYDRA_DELIVERY=resume degraded to a cold start. */
+  downgrade?: { reason: DeliveryDowngradeReason; sessionVendor?: string };
+}
+
+/** Session-file vendor values reach warn lines and ledger kvs; keep them tame. */
+function sanitizeVendorTag(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32) || 'unknown';
 }
 
 function determineDelivery(
@@ -773,9 +819,10 @@ function determineDelivery(
   adapter: { vendor: string; path: string; runtime: AdapterRuntime },
   env: NodeJS.ProcessEnv,
   timeoutMinutes: number,
-): { verb: 'start' | 'resume'; priorSession: string } {
+): DeliveryPlan {
   if (env.HYDRA_DELIVERY !== 'resume') return { verb: 'start', priorSession: '' };
-  const priorSession = findPriorSession(runId, taskId, sessionsDir);
+  const prior = findPriorSession(runId, taskId, sessionsDir);
+  const priorSession = prior.sessionId;
   let supportsResume = false;
   if (adapter.runtime === 'compiled') {
     // There is no adapter source file to inspect inside a compiled binary;
@@ -793,6 +840,33 @@ function determineDelivery(
       // The adapter existence gate already ran; treat a later read failure as no resume support.
     }
   }
+  // Resume session vendor ownership (issue #26): a session recorded for a
+  // DIFFERENT vendor must never be passed to the new adapter — a cross-vendor
+  // session id is meaningless at best and dangerous at worst (it could
+  // resurrect another CLI's context). Checked before resume capability so the
+  // mismatched id is dropped even on the unsupported-adapter path.
+  const timeoutHintEarly = ` A FULL COLD RESTART of the task will now run from scratch in the same worktree — this is NOT a quick incremental continuation or verification pass; expect time and cost comparable to the original dispatch (task timeout_minutes=${timeoutMinutes}).`;
+  if (priorSession && (!prior.vendor || !['claude', 'codex', 'kimi', 'opencode'].includes(prior.vendor))) {
+    warn(
+      `HYDRA_DELIVERY=resume was requested for ${adapter.vendor} task '${taskId}', but prior session ownership is UNKNOWN. The session id will NOT be forwarded.` + timeoutHintEarly,
+    );
+    return {
+      verb: 'start', priorSession: '',
+      downgrade: { reason: 'session_vendor_unknown', sessionVendor: sanitizeVendorTag(prior.vendor ?? 'unknown') },
+    };
+  }
+  if (priorSession && prior.vendor !== adapter.vendor) {
+    const sessionVendor = sanitizeVendorTag(prior.vendor!);
+    warn(
+      `HYDRA_DELIVERY=resume was requested for ${adapter.vendor} task '${taskId}', but the newest prior session for this task was recorded by a DIFFERENT VENDOR ('${sessionVendor}'). A session belonging to another vendor's CLI can never be resumed, so the mismatched session id will NOT be passed to the ${adapter.vendor} adapter.`
+      + timeoutHintEarly,
+    );
+    return {
+      verb: 'start',
+      priorSession: '',
+      downgrade: { reason: 'session_vendor_mismatch', sessionVendor },
+    };
+  }
   if (priorSession && supportsResume) return { verb: 'resume', priorSession };
   // Issue #20 (run 0052): when an operator amends a task with delivery=resume
   // but the cold-restart fallback fires, the SINGLE generic warn() line below
@@ -802,19 +876,115 @@ function determineDelivery(
   // (not a quick incremental continuation) is about to start in the same
   // worktree. The dispatch BEHAVIOR (verb='start', priorSession preserved) is
   // unchanged; this is a message-clarity fix only.
-  const timeoutHint = ` A FULL COLD RESTART of the task will now run from scratch in the same worktree — this is NOT a quick incremental continuation or verification pass; expect time and cost comparable to the original dispatch (task timeout_minutes=${timeoutMinutes}).`;
+  const timeoutHint = timeoutHintEarly;
   if (!priorSession) {
     warn(
       `HYDRA_DELIVERY=resume was requested for ${adapter.vendor} task '${taskId}', but NO PRIOR SESSION was found for this task under ${sessionsDir} (the session file may be missing, e.g. the prior run was cleaned up or never wrote one).`
       + timeoutHint,
     );
-  } else {
-    warn(
-      `HYDRA_DELIVERY=resume was requested for ${adapter.vendor} task '${taskId}', but the ${adapter.vendor} ADAPTER HAS NO REAL RESUME SUPPORT — the prior session was found but this vendor's adapter cannot consume it.`
-      + timeoutHint,
-    );
+    return { verb: 'start', priorSession, downgrade: { reason: 'no_prior_session' } };
   }
-  return { verb: 'start', priorSession };
+  warn(
+    `HYDRA_DELIVERY=resume was requested for ${adapter.vendor} task '${taskId}', but the ${adapter.vendor} ADAPTER HAS NO REAL RESUME SUPPORT — the prior session was found but this vendor's adapter cannot consume it.`
+    + timeoutHint,
+  );
+  return { verb: 'start', priorSession, downgrade: { reason: 'adapter_resume_unsupported' } };
+}
+
+/**
+ * File-first revision evidence (issue #26): when dispatching an AMENDED task
+ * that has recorded review verdicts, materialize the bounded evidence bundle
+ * into the worktree under .hydra-context/revision-evidence/ before any worker
+ * prompt is built, self-verify that every delivered path is readable and
+ * hash-clean, and record a durable ledger event either way. Failures fail
+ * OPEN with a distinct ledger event: a broken bundle must never wedge
+ * dispatch, but it must never be silent either.
+ */
+function materializeEvidenceForDispatch(
+  runPath: string,
+  taskSpecPath: string,
+  spec: TaskSpec,
+  runId: string,
+  taskId: string,
+  worktreeAbs: string,
+  appendLedger: LedgerAppender,
+  env: NodeJS.ProcessEnv,
+): void {
+  let amendmentReason = '';
+  try {
+    amendmentReason = yamlBlock(taskSpecPath, 'amendment_reason')
+      || yamlScalar(taskSpecPath, 'amendment_reason');
+  } catch {
+    amendmentReason = '';
+  }
+  if (!amendmentReason) return;
+  let latestIsRevise = false;
+  try {
+    // Stale or partial dispatcher context is cleared before authoritative
+    // verdict resolution, so no failure path can advertise prior evidence.
+    clearRevisionEvidence(worktreeAbs);
+    const resolvedIds = yamlList(taskSpecPath, 'resolved_finding_ids');
+    const snapshot = resolveRevisionEvidence(runPath, taskId, resolvedIds);
+    if (snapshot.latest === null) {
+      appendLedger(
+        runId,
+        'revision_evidence_skipped',
+        'task_id', taskId,
+        'vendor', spec.vendor,
+        'spec_version', spec.specVersion,
+        'reason', 'no_recorded_verdicts',
+      );
+      return;
+    }
+    latestIsRevise = snapshot.latest.verdict === 'revise';
+    const materialized = materializeRevisionEvidence(worktreeAbs, snapshot, {
+      taskId,
+      runId,
+      specVersion: spec.specVersion,
+    });
+    const expectation = {
+      manifestSha256: materialized.manifestSha256,
+      manifestBytes: materialized.manifestBytes,
+      requiredEntryPaths: materialized.requiredEntryPaths,
+    };
+    const verification = verifyRevisionEvidence(worktreeAbs, expectation);
+    if (!verification.ok) {
+      throw new Error(`bundle self-verification failed: ${verification.issues.join('; ')}`);
+    }
+    env.HYDRA_WORKTREE_ABS = worktreeAbs;
+    env.HYDRA_REVISION_EVIDENCE_SHA256 = expectation.manifestSha256;
+    env.HYDRA_REVISION_EVIDENCE_BYTES = String(expectation.manifestBytes);
+    env.HYDRA_REVISION_EVIDENCE_ENTRIES = expectation.requiredEntryPaths.join(',');
+    appendLedger(
+      runId,
+      'revision_evidence_materialized',
+      'task_id', taskId,
+      'vendor', spec.vendor,
+      'spec_version', spec.specVersion,
+      'manifest_sha256', materialized.manifestSha256,
+      'entries', String(materialized.manifest.entries.length),
+      'latest_verdict_ref', materialized.manifest.latest_verdict_ref,
+      'unresolved_findings', String(materialized.manifest.unresolved_finding_ids.length),
+      'truncated', String(materialized.manifest.truncation.truncated),
+    );
+  } catch (error) {
+    try { clearRevisionEvidence(worktreeAbs); } catch { /* preserve the primary failure */ }
+    const message = (error instanceof Error ? error.message : String(error))
+      .replace(/\s+/g, ' ')
+      .slice(0, 200);
+    warn(`revision evidence materialization failed for task '${taskId}': ${message}`);
+    appendLedger(
+      runId,
+      'revision_evidence_failed',
+      'task_id', taskId,
+      'vendor', spec.vendor,
+      'spec_version', spec.specVersion,
+      'reason', message,
+    );
+    if (latestIsRevise || amendmentReason) {
+      throw new Error(`mandatory revision evidence unavailable for amended task '${taskId}': ${message}`);
+    }
+  }
 }
 
 function activitySignature(paths: string[]): string {
@@ -1768,6 +1938,31 @@ export async function dispatch(
     'spec_version', spec.specVersion,
     'attempt_ordinal', String(attemptOrdinal),
     'delivery', env.HYDRA_DELIVERY || 'start',
+  );
+
+  // Every cold-start downgrade of a requested resume is a DURABLE, task-keyed
+  // ledger event (issue #26) — the visible warning alone scrolls away; a
+  // replacement lead reconstructing the run must see why the expensive full
+  // re-run happened and what delivery actually took effect.
+  if (delivery.downgrade !== undefined) {
+    const extra = delivery.downgrade.sessionVendor !== undefined
+      ? ['session_vendor', delivery.downgrade.sessionVendor]
+      : [];
+    appendLedger(
+      runId,
+      'delivery_downgraded',
+      'task_id', taskId,
+      'vendor', spec.vendor,
+      'agent_run_id', agentRunId,
+      'requested_delivery', 'resume',
+      'effective_delivery', 'start',
+      'reason', delivery.downgrade.reason,
+      ...extra,
+    );
+  }
+
+  materializeEvidenceForDispatch(
+    runPath, taskSpecPath, spec, runId, taskId, resolvedWorktree, appendLedger, env,
   );
 
   const baseRecordUsage = options.recordUsage ?? recordUsage;

@@ -2,6 +2,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { die, yamlBlock, yamlList, yamlScalar } from './lib.ts';
 import { isCompiledBinary } from './kit-assets.ts';
+import { evidencePromptSectionFor, type EvidenceExpectation } from './revision-evidence.ts';
 
 /**
  * Options that make buildWorkerPrompt testable and environment-agnostic.
@@ -70,6 +71,37 @@ export function buildWorkerPrompt(
     ? `\n\n## Amendment verification gate (MANDATORY)\nBefore you may write status: "completed" in your result JSON, run\nEACH of the following commands yourself and include their exact\noutput in your reasoning:\n${amendmentCheck.map((cmd) => `  ${cmd}`).join('\n')}\nEvery command must produce non-empty output (exit 0, some stdout).\nIf ANY of them produces no output, the amendment described above is\nNOT YET FIXED, no matter what the existing test suite reports --\nkeep working. "There is already work on this branch and the\nexisting tests pass" is NOT evidence this amendment is satisfied;\nthe amendment exists precisely because the existing tests did not\ncatch the described defect.`
     : '';
 
+  // File-first revision evidence (issue #26): when the dispatcher has
+  // materialized an evidence bundle in the task's worktree, an amended prompt
+  // carries only the compact manifest summary — path, hash, byte size, trust
+  // label, source verdict refs, unresolved finding ids, and referenced source
+  // files — never the verdict history or source-file contents themselves.
+  // Absent an amendment or a bundle, the block is '' and the rendered prompt
+  // is byte-for-byte identical to the pre-fix output.
+  let evidenceBlock = '';
+  if (amendmentReason) {
+    const worktree = yamlScalar(specPath, 'worktree');
+    if (worktree) {
+      const env = options.env ?? process.env;
+      const sha = env.HYDRA_REVISION_EVIDENCE_SHA256;
+      const bytesRaw = env.HYDRA_REVISION_EVIDENCE_BYTES;
+      const pathsRaw = env.HYDRA_REVISION_EVIDENCE_ENTRIES;
+      let expected: EvidenceExpectation | undefined;
+      if (sha || bytesRaw || pathsRaw) {
+        const bytes = Number(bytesRaw);
+        const paths = pathsRaw ? pathsRaw.split(',').filter(Boolean) : [];
+        if (!sha || !/^[0-9a-f]{64}$/.test(sha) || !Number.isSafeInteger(bytes) || bytes < 1 || paths.length < 1) {
+          die('invalid dispatcher revision-evidence anchor');
+        }
+        expected = { manifestSha256: sha, manifestBytes: bytes, requiredEntryPaths: paths };
+      }
+      const worktreeAbs = env.HYDRA_WORKTREE_ABS || (worktree.startsWith('/') ? worktree : resolve(cwd, worktree));
+      const section = evidencePromptSectionFor(worktreeAbs, expected);
+      if (expected && !section) die('mandatory dispatcher revision evidence failed anchored verification');
+      if (section) evidenceBlock = `\n\n${section}`;
+    }
+  }
+
   const resultFile = '.hydra-result.json';
   const version = specVersion ? Number(specVersion) : 1;
 
@@ -108,7 +140,7 @@ ${amendmentReason
 *** THIS TASK WAS AMENDED. The amendment reason below is a REQUIRED FIX
 on top of your own prior work already committed on this branch -- read
 it first and follow it. ***
-Amendment reason: ${amendmentReason}${amendmentCheckBlock}
+Amendment reason: ${amendmentReason}${amendmentCheckBlock}${evidenceBlock}
 
 Objective: ${objective}`
     : `## Task ${taskId} (run ${runId}, spec v${specVersion})
