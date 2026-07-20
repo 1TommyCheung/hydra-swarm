@@ -17,6 +17,7 @@ import { aggregateUsageByVendor, type UsageEvent } from './aggregate-usage.ts';
 import type { LedgerEntry } from './current-attempt.ts';
 import { isCompiledBinary } from './kit-assets.ts';
 import { log, stateRoot as defaultStateRoot, yamlScalar } from './lib.ts';
+import { isSafeId, isTaskId, SAFE_ID_PATTERN } from './task-id.ts';
 
 // ---------------------------------------------------------------------------
 // Types.
@@ -87,6 +88,36 @@ export interface ReviewSummary {
   risk: string;
 }
 
+/**
+ * One reviewer process completion attributed to a task by an EXPLICIT task_id
+ * on a review_completed ledger event. A completion — even a clean exit 0 with
+ * glowing free-text output — is process telemetry, never a verdict (issue #32).
+ */
+export interface ReviewCompletion {
+  time: string | null;
+  review_id: string | null;
+  vendor: string | null;
+  exit_code: string | null;
+}
+
+/**
+ * The per-task review state, split into the three facts a reader must never
+ * conflate (issue #32):
+ * - completions: reviewer PROCESSES that ended for this task (oldest first);
+ * - verdict: the AUTHORITATIVE verdict record (ledger review_verdict, or the
+ *   latest valid append-only generation at
+ *   authoritative/reviews/<task>/<seq>-<reviewed_head>.json, which wins) —
+ *   the only acceptance gate;
+ * - accepted: true ONLY when that recorded verdict is exactly 'accept'.
+ * Legacy review events carrying no task_id never land here: they stay in the
+ * flat timeline and are never guessed onto a task row from review_id naming.
+ */
+export interface ReviewActivity {
+  completions: ReviewCompletion[];
+  verdict: ReviewSummary | null;
+  accepted: boolean;
+}
+
 export interface SquashSummary {
   integration_commit: string;
   candidate_head: string | null;
@@ -100,7 +131,7 @@ export interface TaskLifecycle {
   attempts: DispatchAttempt[];
   signals: TaskSignal[];
   promote: PromoteOutcome;
-  review: ReviewSummary | null;
+  review: ReviewActivity;
   squash: SquashSummary | null;
   integrated_head: string | null;
   worktree_reaped: TaskSignal | null;
@@ -172,20 +203,11 @@ export interface RunLogResult {
 
 // ---------------------------------------------------------------------------
 // Id validation — every id that ends up inside a filesystem path is checked
-// against the strict pattern BEFORE the path is constructed.
+// BEFORE the path is constructed. Both grammars are the SHARED contracts from
+// task-id.ts: run ids follow the bounded safe-id grammar; task ids follow the
+// canonical task-id grammar that review-store and review-dispatch enforce, so
+// the reader can never construct a path the store could not have written.
 // ---------------------------------------------------------------------------
-
-/**
- * Strict id pattern: a single safe path segment — alphanumeric start, then
- * alphanumerics, underscore or hyphen. No dots (so no `..` traversal), no
- * separators, no whitespace.
- */
-export const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-
-/** True when an id is safe to embed in a filesystem path. */
-export function isSafeId(id: string): boolean {
-  return ID_PATTERN.test(id);
-}
 
 // ---------------------------------------------------------------------------
 // Markdown escaping — every value from the ledger/state tree is DATA.
@@ -327,10 +349,21 @@ function discoverTaskIds(runPath: string, events: LedgerEntry[]): string[] {
       else if (name.endsWith('.json')) ids.add(name.slice(0, -'.json'.length));
     }
   }
+  // The append-only review store keeps one DIRECTORY per task
+  // (authoritative/reviews/<task>/<seq>-<reviewed_head>.json). Only a real,
+  // non-symlink directory whose name is a canonical task id counts; stray
+  // files (including legacy flat <task>.json files), symlinks, and
+  // non-conforming names are never treated as task ids.
   const reviewsDir = join(runPath, 'authoritative', 'reviews');
   if (existsSync(reviewsDir)) {
     for (const name of readdirSync(reviewsDir)) {
-      if (name.endsWith('.json')) ids.add(name.slice(0, -'.json'.length));
+      if (!isTaskId(name)) continue;
+      try {
+        const stats = lstatSync(join(reviewsDir, name));
+        if (stats.isDirectory() && !stats.isSymbolicLink()) ids.add(name);
+      } catch {
+        // Raced away — a vanished entry is simply not a task.
+      }
     }
   }
   for (const entry of events) {
@@ -387,13 +420,96 @@ function readJsonFile(path: string): Record<string, unknown> | null {
 }
 
 /**
+ * A published verdict generation's filename: at-least-4-digit sequence,
+ * hyphen, 40-hex reviewed head, `.json` — exactly what review-store's
+ * reviewFileName() emits (its own discovery scan matches `\d+`, so sequences
+ * past 9999 stay visible here too).
+ */
+const REVIEW_GENERATION_RE = /^(\d+)-[0-9a-f]{40}\.json$/;
+
+/**
+ * Read the AUTHORITATIVE review verdict for a task from the append-only store
+ * layout: authoritative/reviews/<task>/<seq>-<reviewed_head>.json.
+ *
+ * Trust rules:
+ * - the per-task entry must be a real directory (lstat; a symlink or plain
+ *   file — including a legacy flat <task>.json — is never followed);
+ * - only entries whose NAME matches the published-generation grammar count,
+ *   and each must be a regular non-symlink file;
+ * - generations are ordered deterministically by numeric sequence descending,
+ *   then by filename descending (byte order) so two hostile same-sequence
+ *   spellings still pick one defined winner;
+ * - a generation's parsed document must self-identify: its `task_id` must
+ *   exist and equal the task directory being read (record-review rejects
+ *   mismatches at publish time, so every legitimate generation carries it).
+ *   A missing or mismatched identity — e.g. a verdict misfiled under another
+ *   task's directory — is skipped and can never alter this task's verdict;
+ * - the HIGHEST VALID generation wins: an unparseable, non-object or
+ *   wrong-identity document at the top is skipped, never allowed to mask an
+ *   older valid verdict.
+ * The caller lets this record override conflicting ledger telemetry — a
+ * durable file-only generation (published but crash-lost before its ledger
+ * append) is still the authoritative verdict.
+ */
+function readAuthoritativeVerdict(runPath: string, taskId: string): ReviewSummary | null {
+  const dir = join(runPath, 'authoritative', 'reviews', taskId);
+  let dirStats;
+  try {
+    dirStats = lstatSync(dir);
+  } catch {
+    return null;
+  }
+  if (dirStats.isSymbolicLink() || !dirStats.isDirectory()) return null;
+
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return null;
+  }
+  const generations: Array<{ seq: number; name: string }> = [];
+  for (const name of names) {
+    const match = REVIEW_GENERATION_RE.exec(name);
+    if (match === null) continue;
+    generations.push({ seq: Number(match[1]), name });
+  }
+  generations.sort((a, b) => (b.seq - a.seq) || (b.name > a.name ? 1 : b.name < a.name ? -1 : 0));
+
+  for (const generation of generations) {
+    const path = join(dir, generation.name);
+    let stats;
+    try {
+      stats = lstatSync(path);
+    } catch {
+      continue;
+    }
+    if (stats.isSymbolicLink() || !stats.isFile()) continue;
+    const doc = readJsonFile(path);
+    if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) continue;
+    // Identity gate: the stored verdict must claim exactly this task. A
+    // missing or mismatched task_id skips THIS generation only — the scan
+    // falls back to the next (lower) valid generation.
+    if (doc.task_id !== taskId) continue;
+    return {
+      verdict: str(doc.verdict) ?? '',
+      reviewer: str(doc.reviewer) ?? 'unknown',
+      risk: str(doc.risk) ?? 'unknown',
+    };
+  }
+  return null;
+}
+
+/**
  * Build the lifecycle for one task from its (pre-grouped) ledger events plus
  * the authoritative tree. A task id comes from the ledger or from directory
  * listings — it is DATA, so no read path is ever constructed from an id that
  * fails the strict pattern; such tasks render with explicit gaps instead.
  */
 function buildTask(runPath: string, taskId: string, taskEvents: LedgerEntry[]): TaskLifecycle {
-  const pathsSafe = isSafeId(taskId);
+  // Task ids follow the SHARED canonical grammar (task-id.ts): no read path
+  // is ever constructed from a non-canonical id; such tasks render from
+  // ledger data alone, with explicit gaps for the file-backed pieces.
+  const pathsSafe = isTaskId(taskId);
 
   const specPath = join(runPath, 'tasks', `${taskId}.yaml`);
   let vendor: string | null = null;
@@ -423,6 +539,7 @@ function buildTask(runPath: string, taskId: string, taskEvents: LedgerEntry[]): 
     rejections,
   };
   let reviewFromLedger: ReviewSummary | null = null;
+  const reviewCompletions: ReviewCompletion[] = [];
   let squashFromLedger: string | null = null;
   let integratedHead: string | null = null;
   let reaped: TaskSignal | null = null;
@@ -483,6 +600,17 @@ function buildTask(runPath: string, taskId: string, taskEvents: LedgerEntry[]): 
         promote.divergence = str(entry.divergence);
         promote.time = time;
         break;
+      case 'review_completed':
+        // Reached ONLY via an explicit task_id on the event (the grouping in
+        // buildRunLogData keys on entry.task_id alone) — never via review_id
+        // pattern-matching. Records process completion, not a verdict.
+        reviewCompletions.push({
+          time,
+          review_id: str(entry.review_id),
+          vendor: str(entry.vendor),
+          exit_code: str(entry.exit_code),
+        });
+        break;
       case 'review_verdict':
         reviewFromLedger = {
           verdict: str(entry.verdict) ?? '',
@@ -509,17 +637,19 @@ function buildTask(runPath: string, taskId: string, taskEvents: LedgerEntry[]): 
   }
 
   // The authoritative tree wins over the ledger for review + squash records.
-  let review: ReviewSummary | null = reviewFromLedger;
-  const reviewDoc = pathsSafe
-    ? readJsonFile(join(runPath, 'authoritative', 'reviews', `${taskId}.json`))
-    : null;
-  if (reviewDoc !== null) {
-    review = {
-      verdict: str(reviewDoc.verdict) ?? '',
-      reviewer: str(reviewDoc.reviewer) ?? 'unknown',
-      risk: str(reviewDoc.risk) ?? 'unknown',
-    };
+  // The verdict — and ONLY the verdict — is the acceptance gate: a recorded
+  // 'accept' accepts the candidate; anything else (revise/reject/blocked, or
+  // no verdict at all) does not, no matter how the reviewer process exited.
+  let verdict: ReviewSummary | null = reviewFromLedger;
+  const authoritativeVerdict = pathsSafe ? readAuthoritativeVerdict(runPath, taskId) : null;
+  if (authoritativeVerdict !== null) {
+    verdict = authoritativeVerdict;
   }
+  const review: ReviewActivity = {
+    completions: reviewCompletions,
+    verdict,
+    accepted: verdict !== null && verdict.verdict === 'accept',
+  };
 
   let squash: SquashSummary | null = null;
   const squashDoc = pathsSafe
@@ -674,7 +804,7 @@ function inspectResultFile(path: string, taskId: string): ResultEntryState {
 function reconcilePromotions(runPath: string, tasks: TaskLifecycle[]): ReconciliationFlag[] {
   const flags: ReconciliationFlag[] = [];
   for (const task of tasks) {
-    const entry: ResultEntryState = isSafeId(task.task_id)
+    const entry: ResultEntryState = isTaskId(task.task_id)
       ? inspectResultFile(join(runPath, 'authoritative', 'results', `${task.task_id}.json`), task.task_id)
       : { state: 'absent' };
     if (task.promote.promoted && entry.state !== 'valid') {
@@ -876,10 +1006,37 @@ function renderPromoteCell(promote: PromoteOutcome, recon: ReconciliationFlag | 
   return parts.length === 0 ? NONE : parts.join('<br>');
 }
 
+/**
+ * Render the three-state Review cell (issue #32). Each reviewer completion is
+ * shown as process telemetry; the authoritative verdict — when recorded — is
+ * shown separately; and only a recorded 'accept' verdict renders as accepted.
+ * A completed review without a verdict reads "verdict pending", never
+ * "(none recorded)" and NEVER accepted.
+ */
+function renderReviewCell(review: ReviewActivity): string {
+  const parts: string[] = [];
+  for (const completion of review.completions) {
+    const meta = [
+      completion.review_id === null ? '' : `review_id=${escapeMarkdown(completion.review_id)}`,
+      completion.vendor === null ? '' : `vendor=${escapeMarkdown(completion.vendor)}`,
+      completion.exit_code === null ? '' : `exit=${escapeMarkdown(completion.exit_code)}`,
+      completion.time === null ? '' : escapeMarkdown(completion.time),
+    ]
+      .filter((part) => part !== '')
+      .join(', ');
+    parts.push(`reviewer completed${meta === '' ? '' : ` (${meta})`}`);
+  }
+  if (review.verdict !== null) {
+    const summary = `${escapeMarkdown(review.verdict.verdict)} (reviewer=${escapeMarkdown(review.verdict.reviewer)}, risk=${escapeMarkdown(review.verdict.risk)})`;
+    parts.push(review.accepted ? `accepted — verdict ${summary}` : `verdict ${summary} — not accepted`);
+  } else if (review.completions.length > 0) {
+    parts.push('verdict pending — a completed review is not a verdict');
+  }
+  return parts.length === 0 ? NONE : parts.join('<br>');
+}
+
 function renderTaskRow(task: TaskLifecycle, recon: ReconciliationFlag | undefined): string {
-  const review = task.review === null
-    ? NONE
-    : `${escapeMarkdown(task.review.verdict)} (reviewer=${escapeMarkdown(task.review.reviewer)}, risk=${escapeMarkdown(task.review.risk)})`;
+  const review = renderReviewCell(task.review);
   const squash = task.squash === null ? NONE : `integration_commit=${cellCode(task.squash.integration_commit)}`;
   const reaped = task.worktree_reaped === null
     ? NONE
@@ -1072,7 +1229,7 @@ export function runLog(runId: string, options: RunLogOptions = {}): RunLogResult
     throw new Error('hydra: error: usage: run-log <run_id> [--out <dir>] [--json]');
   }
   if (!isSafeId(runId)) {
-    throw new Error(`hydra: error: invalid run_id ${JSON.stringify(runId)}: must match ${ID_PATTERN}`);
+    throw new Error(`hydra: error: invalid run_id ${JSON.stringify(runId)}: must match ${SAFE_ID_PATTERN}`);
   }
   const cwd = options.cwd ?? process.cwd();
   const root = options.stateRoot ? resolve(cwd, options.stateRoot) : defaultStateRoot();

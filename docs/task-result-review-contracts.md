@@ -114,6 +114,8 @@ risk: low                # low | medium | high | critical
 
 Only `accept` candidates enter integration. `revise` returns to the same worktree unless scope/ownership changes materially (then: spec amendment or task split). Review policy: cross-vendor review mandatory for `risk: high|critical`, architecture, security, and migrations (Wave 1 formalizes; in Wave 0 with two vendors, Codex reviews Claude and vice versa by default).
 
+Storage: `record-review` publishes each validated verdict as an append-only generation at `authoritative/reviews/<task>/<seq>-<reviewed_head>.json` — nothing is overwritten, a second review round adds `0002-…`, and the highest valid generation is the authoritative verdict (it wins over conflicting `review_verdict` ledger telemetry, including a durable generation whose ledger append was lost to a crash). A generation is valid only if its document's own `task_id` exists and equals the task directory it sits in — the reader skips a misfiled or identity-less file and falls back to the next valid generation. Reviewer dispatch itself (`review-dispatch`) requires an explicit `--task <task_id>` and stamps it on `review_started`/`review_completed`; those events are process telemetry, never a verdict.
+
 ## 4. Squash policy (harness-created)
 
 Workers do **not** rewrite their own history — self-squashing lets a worker hide intermediate or reverted changes from review.

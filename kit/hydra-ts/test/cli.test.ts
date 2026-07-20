@@ -203,6 +203,16 @@ describe('cli route() dispatch', () => {
       assert.equal(text.split(`  ${name}\n`).length - 1, 1, `'${name}' must appear exactly once`);
     }
   });
+
+  it('usage() advertises the required --task flag for review-dispatch (issue #32)', () => {
+    const text = usage();
+    const line = text.split('\n').find((l) => l.includes('<review_id>'));
+    assert.ok(line !== undefined, 'review-dispatch signature line missing');
+    assert.ok(
+      line.includes('--task <task_id>'),
+      `review-dispatch signature must require explicit task provenance: ${line}`,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

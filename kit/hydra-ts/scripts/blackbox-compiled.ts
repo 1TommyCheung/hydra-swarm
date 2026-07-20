@@ -149,7 +149,10 @@ const EXPECTATIONS: Record<string, Expectation> = {
   'promote': { exit: 2, signature: 'usage: promote(run_id, task_id, inbox_result.json)' },
   'record-review': { exit: 1, signature: 'usage: record-review.sh <run_id> <task_id> <verdict.json>' },
   'record-usage': { exit: 1, signature: 'usage: record-usage.sh <run_id> <task_id> <vendor>' },
-  'review-dispatch': { exit: 1, signature: 'usage: reviewDispatch <run_id> <review_id> <vendor>' },
+  // The signature pins the FULL argv contract including the required --task
+  // (issue #32), so the compiled binary cannot silently diverge from the
+  // source lane's strict parser.
+  'review-dispatch': { exit: 1, signature: 'usage: reviewDispatch <run_id> <review_id> <vendor> <prompt_file> --task <task_id> [--image PATH]' },
   'review-required': { exit: 1, signature: 'usage: review-required.sh <implementer_vendor> <risk>' },
   'run-init': { exit: 1, signature: 'usage: run-init.sh <run_id> [base_commit]' },
   'squash': { exit: 1, signature: 'usage: squash.sh <run_id> <task_id>' },
@@ -439,20 +442,24 @@ function main(argv: string[]): number {
 
     // 2b. EMBED: record-review loads and ENFORCES the embedded review schema.
     {
+      const reviewedHead = 'a'.repeat(40);
       const validVerdict = join(cwd2, 'verdict-ok.json');
       const invalidVerdict = join(cwd2, 'verdict-invalid.json');
       writeFileSync(validVerdict, JSON.stringify({
-        task_id: 't', verdict: 'accept', reviewed_base: 'b', reviewed_head: 'h',
+        task_id: 't', verdict: 'accept', reviewed_base: 'b'.repeat(40), reviewed_head: reviewedHead,
         reviewer: 'codex', risk: 'low',
         blocking_findings: [], non_blocking_findings: [], required_integration_checks: [],
       }));
       writeFileSync(invalidVerdict, JSON.stringify({ task_id: 't' }));
       const okRun = run(relocated, ['record-review', '1', 't', validVerdict], { cwd: cwd2, env, timeoutMs });
       const okCombined = `${okRun.stdout}\n${okRun.stderr}`;
-      const recorded = okRun.code === 0 && okCombined.includes('review recorded');
+      // The printed path pins the append-only storage contract:
+      // authoritative/reviews/<task>/<seq>-<reviewed_head>.json.
+      const recorded = okRun.code === 0 && okCombined.includes('review recorded')
+        && okRun.stdout.includes(join('authoritative', 'reviews', 't', `0001-${reviewedHead}.json`));
       record('cwd-independence[record-review-embeds-schema]', recorded,
         recorded
-          ? 'valid verdict recorded via EMBEDDED review.schema.json, checkout absent'
+          ? 'valid verdict recorded via EMBEDDED review.schema.json into an append-only generation, checkout absent'
           : `exit ${okRun.code} | output: ${JSON.stringify(okCombined.slice(0, 300))}`);
       const badRun = run(relocated, ['record-review', '1', 't', invalidVerdict], { cwd: cwd2, env, timeoutMs });
       const enforced = badRun.code === 5 && badRun.stderr.includes('review verdict rejected (schema)');
@@ -498,10 +505,73 @@ function main(argv: string[]): number {
       for (const name of names) {
         if (!r.stderr.includes(`  ${name}\n`)) problems.push(`usage listing missing ${name}`);
       }
+      // The listing must advertise the required --task flag for
+      // review-dispatch (issue #32) — the compiled usage contract may not
+      // silently diverge from the source SIGNATURES table.
+      if (!r.stderr.includes('<run_id> <review_id> <vendor> <prompt_file> --task <task_id> [--image PATH]')) {
+        problems.push('usage listing missing the review-dispatch --task signature');
+      }
       record('unknown-subcommand', problems.length === 0,
         problems.length === 0
           ? `exit 1, empty stdout, usage banner + all ${names.length} names on stderr`
           : problems.join('; '));
+    }
+
+    // ------------------------------------------------------------------
+    // Check 3b — review-dispatch strict argv contract (issue #32): every
+    // malformed argv must fail with the documented error BEFORE any ledger,
+    // session or filesystem mutation, in the COMPILED binary exactly as in
+    // the source lane.
+    // ------------------------------------------------------------------
+    {
+      const argvCases: Array<{ name: string; args: string[]; message: string }> = [
+        {
+          name: 'missing-task',
+          args: ['review-dispatch', 'bbrev', 'rev1', 'claude', 'prompt.md'],
+          message: 'task_id required',
+        },
+        {
+          name: 'unknown-flag',
+          args: ['review-dispatch', 'bbrev', 'rev1', 'claude', 'prompt.md', '--task', 't', '--frobnicate'],
+          message: 'unknown option "--frobnicate"',
+        },
+        {
+          name: 'duplicate-task',
+          args: ['review-dispatch', 'bbrev', 'rev1', 'claude', 'prompt.md', '--task', 't', '--task', 'u'],
+          message: 'duplicate --task',
+        },
+        {
+          name: 'flag-eating-flag',
+          args: ['review-dispatch', 'bbrev', 'rev1', 'claude', 'prompt.md', '--task', '--image'],
+          message: 'missing value for --task',
+        },
+        {
+          name: 'traversal-review-id',
+          args: ['review-dispatch', 'bbrev', '../evil', 'claude', 'prompt.md', '--task', 't'],
+          message: 'invalid review_id',
+        },
+        {
+          name: 'hostile-task-id',
+          args: ['review-dispatch', 'bbrev', 'rev1', 'claude', 'prompt.md', '--task', '../evil'],
+          message: 'invalid task_id',
+        },
+      ];
+      for (const c of argvCases) {
+        const r = run(binary, c.args, { cwd, env, timeoutMs });
+        const combined = `${r.stdout}\n${r.stderr}`;
+        const problems: string[] = [];
+        if (r.timedOut) problems.push(`timed out after ${timeoutMs}ms`);
+        if (r.signal !== null) problems.push(`killed by signal ${r.signal}`);
+        if (r.code !== 1) problems.push(`exit ${r.code} != 1`);
+        if (!combined.includes(c.message)) problems.push(`missing error ${JSON.stringify(c.message)}`);
+        if (existsSync(join(scratch, 'state', 'runs', 'run-bbrev'))) {
+          problems.push('state mutated: runs/run-bbrev exists after an argv error');
+        }
+        record(`review-dispatch-argv[${c.name}]`, problems.length === 0,
+          problems.length === 0
+            ? `exit 1 with ${JSON.stringify(c.message)}, no state mutation (${r.ms}ms)`
+            : `${problems.join('; ')} | output: ${JSON.stringify(combined.slice(0, 300))}`);
+      }
     }
 
     // ------------------------------------------------------------------

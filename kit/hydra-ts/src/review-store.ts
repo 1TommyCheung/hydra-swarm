@@ -15,6 +15,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
+import { assertTaskId } from './task-id.ts';
 
 // ---------------------------------------------------------------------------
 // Append-only, ledger-correlatable review verdict storage.
@@ -44,28 +45,10 @@ export function assertGitObjectId(value: string, label: string): string {
   return value.toLowerCase();
 }
 
-/**
- * taskId is interpolated into a path segment exactly like reviewed_head, so
- * it needs the same treatment: a strict canonical grammar (lowercase letters,
- * digits and hyphens; no dots, no slashes, no leading/trailing hyphen;
- * bounded length) that simply cannot express a traversal.
- */
-const TASK_ID_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
-const MAX_TASK_ID_LENGTH = 64;
-
-function assertTaskId(taskId: string): void {
-  if (
-    typeof taskId !== 'string'
-    || taskId.length === 0
-    || taskId.length > MAX_TASK_ID_LENGTH
-    || !TASK_ID_RE.test(taskId)
-  ) {
-    throw new Error(
-      `taskId: invalid task identifier ${JSON.stringify(taskId)} — expected 1-` +
-      `${MAX_TASK_ID_LENGTH} characters of [a-z0-9-] with no leading/trailing hyphen`,
-    );
-  }
-}
+// taskId is interpolated into a path segment exactly like reviewed_head, so
+// it needs the same treatment: the shared canonical grammar from task-id.ts
+// (lowercase letters, digits and hyphens; no dots, no slashes, no
+// leading/trailing hyphen; bounded length) simply cannot express a traversal.
 
 export function reviewDirFor(runDirPath: string, taskId: string): string {
   // Validate BEFORE any path is constructed. The grammar alone cannot contain

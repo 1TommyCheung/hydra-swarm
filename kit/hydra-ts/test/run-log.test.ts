@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -16,6 +17,8 @@ import {
   runLog,
   type ExecFunction,
 } from '../src/run-log.ts';
+import { recordReview } from '../src/record-review.ts';
+import { publishVerdict } from '../src/review-store.ts';
 
 const TEST_TMP = join(import.meta.dirname, 'tmp-run-log');
 const RUN_LOG_SH = join(import.meta.dirname, '../../hydra/scripts/run-log.sh');
@@ -75,10 +78,39 @@ function writeTaskSpec(
   writeFileSync(join(dir, `${taskId}.yaml`), `${body}\n`, 'utf8');
 }
 
-function writeReview(root: string, runId: string, taskId: string, review: Record<string, unknown>): void {
-  const dir = join(root, 'runs', `run-${runId}`, 'authoritative', 'reviews');
+/** Distinct 40-hex reviewed heads for append-only generation filenames. */
+const HEAD_A = 'a'.repeat(40);
+const HEAD_B = 'b'.repeat(40);
+const HEAD_C = 'c'.repeat(40);
+
+function reviewsDirFor(root: string, runId: string, taskId: string): string {
+  return join(root, 'runs', `run-${runId}`, 'authoritative', 'reviews', taskId);
+}
+
+/**
+ * Write one append-only review generation directly at the real store layout:
+ * authoritative/reviews/<task>/<seq>-<head>.json. This is the durable
+ * "file-only generation" shape — a verdict that reached disk without any
+ * ledger append (crash between publish and ledger write).
+ *
+ * The document self-identifies with `task_id` by default, exactly as every
+ * generation published through record-review does. Pass an explicit
+ * `task_id` in `review` to simulate a misfiled generation, or
+ * `task_id: undefined` for one with no identity at all.
+ */
+function writeReviewGeneration(
+  root: string,
+  runId: string,
+  taskId: string,
+  seq: number,
+  head: string,
+  review: Record<string, unknown>,
+): string {
+  const dir = reviewsDirFor(root, runId, taskId);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `${taskId}.json`), `${JSON.stringify(review)}\n`, 'utf8');
+  const path = join(dir, `${String(seq).padStart(4, '0')}-${head}.json`);
+  writeFileSync(path, `${JSON.stringify({ task_id: taskId, ...review })}\n`, 'utf8');
+  return path;
 }
 
 function writeSquash(root: string, runId: string, taskId: string, record: Record<string, unknown>): void {
@@ -191,7 +223,7 @@ function fullLifecycleFixture(): { runId: string; stateRoot: string; repoRoot: s
   ]);
   // The ledger promotion and the authoritative result file agree: no divergence.
   writePromotedResult(stateRoot, runId, 'task-a');
-  writeReview(stateRoot, runId, 'task-a', { verdict: 'accept', reviewer: 'claude', risk: 'low' });
+  writeReviewGeneration(stateRoot, runId, 'task-a', 1, HEAD_A, { verdict: 'accept', reviewer: 'claude', risk: 'low' });
   writeSquash(stateRoot, runId, 'task-a', {
     candidate_head: 'headaaa123',
     integration_commit: 'squashaaa',
@@ -1163,5 +1195,515 @@ describe('runLog ledger anomalies', () => {
     assert.ok(result.markdown.includes('4 malformed ledger lines skipped'), result.markdown);
     assert.ok(result.markdown.includes('line 2'), result.markdown);
     assert.ok(result.markdown.includes('line 5'), result.markdown);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review provenance semantics (issue #32): the Review column distinguishes
+// three separate states — reviewer process completed, authoritative verdict
+// recorded, recorded verdict accepted — and never infers a task from
+// review_id naming. Legacy review events without task_id stay in the flat
+// timeline only.
+// ---------------------------------------------------------------------------
+
+describe('runLog review provenance semantics (issue #32)', () => {
+  before(() => {
+    cleanTmp();
+    mkdirSync(TEST_TMP, { recursive: true });
+  });
+
+  after(() => {
+    cleanTmp();
+  });
+
+  interface ReviewFixtureOptions {
+    /** Extra ledger entries, appended after run_started. */
+    ledger?: Record<string, unknown>[];
+    /** Write a task spec for task-a (default true). */
+    spec?: boolean;
+    /** An authoritative review generation at authoritative/reviews/task-a/0001-<head>.json. */
+    reviewDoc?: Record<string, unknown>;
+  }
+
+  function reviewFixture(id: string, opts: ReviewFixtureOptions) {
+    const runId = id;
+    const stateRoot = makeDir(runId, 'state');
+    const repoRoot = makeDir(runId, 'repo');
+    writeRunYaml(stateRoot, runId, `base-${runId}`);
+    if (opts.spec !== false) {
+      writeTaskSpec(stateRoot, runId, 'task-a', { assigned_vendor: 'codex', spec_version: '1' });
+    }
+    writeLedger(stateRoot, runId, [
+      { time: '2026-07-14T00:00:00Z', event: 'run_started', run_id: runId, base_commit: `base-${runId}` },
+      ...(opts.ledger ?? []),
+    ]);
+    if (opts.reviewDoc !== undefined) writeReviewGeneration(stateRoot, runId, 'task-a', 1, HEAD_A, opts.reviewDoc);
+    return runLog(runId, { cwd: repoRoot, stateRoot, exec: repoExec(repoRoot), json: true });
+  }
+
+  /** The Review cell is the 7th column of the task lifecycle table. */
+  function reviewCell(md: string, taskId: string): string {
+    const row = md.split('\n').find((line) => line.startsWith(`| \`${taskId}\` |`));
+    assert.ok(row !== undefined, md);
+    const cells = row.split(' | ');
+    assert.ok(cells.length >= 7, row);
+    return cells[6];
+  }
+
+  it('marks a completed review without a verdict as verdict pending — exit 0 and free text are not acceptance', () => {
+    const { data, markdown } = reviewFixture('rev-pending', {
+      ledger: [
+        { time: '2026-07-14T00:00:01Z', event: 'review_started', run_id: 'rev-pending', task_id: 'task-a', review_id: 'rev-1', vendor: 'claude' },
+        // A clean exit plus free-text approval-looking output: still not a verdict.
+        { time: '2026-07-14T00:00:02Z', event: 'review_completed', run_id: 'rev-pending', task_id: 'task-a', review_id: 'rev-1', vendor: 'claude', exit_code: '0', note: 'LGTM — ship it' },
+      ],
+    });
+
+    const cell = reviewCell(markdown, 'task-a');
+    assert.ok(cell.includes('reviewer completed (review_id=rev-1, vendor=claude, exit=0, 2026-07-14T00:00:02Z)'), cell);
+    assert.ok(cell.includes('verdict pending — a completed review is not a verdict'), cell);
+    assert.ok(!cell.includes('accepted'), cell);
+    assert.ok(!cell.includes('(none recorded)'), cell);
+    assert.ok(!cell.includes('LGTM'), cell);
+
+    assert.equal(data.tasks.length, 1);
+    assert.equal(data.tasks[0].review.completions.length, 1);
+    assert.equal(data.tasks[0].review.completions[0].review_id, 'rev-1');
+    assert.equal(data.tasks[0].review.verdict, null);
+    assert.equal(data.tasks[0].review.accepted, false);
+  });
+
+  it('renders accepted only when the recorded verdict is accept', () => {
+    const { data, markdown } = reviewFixture('rev-accept', {
+      ledger: [
+        { time: '2026-07-14T00:00:01Z', event: 'review_started', run_id: 'rev-accept', task_id: 'task-a', review_id: 'rev-1', vendor: 'claude' },
+        { time: '2026-07-14T00:00:02Z', event: 'review_completed', run_id: 'rev-accept', task_id: 'task-a', review_id: 'rev-1', vendor: 'claude', exit_code: '0' },
+        { time: '2026-07-14T00:00:03Z', event: 'review_verdict', run_id: 'rev-accept', task_id: 'task-a', verdict: 'accept', reviewer: 'claude', risk: 'low' },
+      ],
+    });
+
+    const cell = reviewCell(markdown, 'task-a');
+    assert.ok(cell.includes('reviewer completed (review_id=rev-1, vendor=claude, exit=0, 2026-07-14T00:00:02Z)'), cell);
+    assert.ok(cell.includes('accepted — verdict accept (reviewer=claude, risk=low)'), cell);
+    assert.ok(!cell.includes('verdict pending'), cell);
+
+    assert.equal(data.tasks[0].review.completions.length, 1);
+    assert.deepEqual(data.tasks[0].review.verdict, { verdict: 'accept', reviewer: 'claude', risk: 'low' });
+    assert.equal(data.tasks[0].review.accepted, true);
+  });
+
+  it('renders revise and reject verdicts as recorded but not accepted', () => {
+    for (const verdict of ['revise', 'reject'] as const) {
+      const { data, markdown } = reviewFixture(`rev-${verdict}`, {
+        ledger: [
+          { time: '2026-07-14T00:00:02Z', event: 'review_completed', run_id: `rev-${verdict}`, task_id: 'task-a', review_id: 'rev-1', vendor: 'claude', exit_code: '0' },
+          { time: '2026-07-14T00:00:03Z', event: 'review_verdict', run_id: `rev-${verdict}`, task_id: 'task-a', verdict, reviewer: 'claude', risk: 'medium' },
+        ],
+      });
+
+      const cell = reviewCell(markdown, 'task-a');
+      assert.ok(cell.includes(`verdict ${verdict} (reviewer=claude, risk=medium) — not accepted`), cell);
+      assert.ok(!cell.includes('accepted —'), cell);
+      assert.equal(data.tasks[0].review.accepted, false, `${verdict} must never satisfy acceptance`);
+      assert.equal(data.tasks[0].review.verdict?.verdict, verdict);
+    }
+  });
+
+  it('gates acceptance on a recorded verdict alone, even without completion events', () => {
+    const { data, markdown } = reviewFixture('rev-verdict-only', {
+      ledger: [
+        { time: '2026-07-14T00:00:03Z', event: 'review_verdict', run_id: 'rev-verdict-only', task_id: 'task-a', verdict: 'accept', reviewer: 'claude', risk: 'low' },
+      ],
+    });
+
+    const cell = reviewCell(markdown, 'task-a');
+    assert.ok(cell.includes('accepted — verdict accept (reviewer=claude, risk=low)'), cell);
+    assert.ok(!cell.includes('reviewer completed'), cell);
+    assert.equal(data.tasks[0].review.completions.length, 0);
+    assert.equal(data.tasks[0].review.accepted, true);
+  });
+
+  it('lets the authoritative review record win over the ledger verdict', () => {
+    const { data, markdown } = reviewFixture('rev-doc-wins', {
+      ledger: [
+        { time: '2026-07-14T00:00:03Z', event: 'review_verdict', run_id: 'rev-doc-wins', task_id: 'task-a', verdict: 'revise', reviewer: 'claude', risk: 'medium' },
+      ],
+      reviewDoc: { verdict: 'accept', reviewer: 'claude', risk: 'low' },
+    });
+
+    const cell = reviewCell(markdown, 'task-a');
+    assert.ok(cell.includes('accepted — verdict accept (reviewer=claude, risk=low)'), cell);
+    assert.equal(data.tasks[0].review.verdict?.verdict, 'accept');
+    assert.equal(data.tasks[0].review.accepted, true);
+  });
+
+  it('keeps legacy unkeyed review events in the flat timeline without task attribution', () => {
+    const { data, markdown } = reviewFixture('rev-legacy', {
+      ledger: [
+        { time: '2026-07-14T00:00:01Z', event: 'review_started', run_id: 'rev-legacy', review_id: 'rev-legacy-1', vendor: 'claude' },
+        { time: '2026-07-14T00:00:02Z', event: 'review_completed', run_id: 'rev-legacy', review_id: 'rev-legacy-1', vendor: 'claude', exit_code: '0' },
+      ],
+    });
+
+    // No false attribution: the task row shows the explicit gap, and no extra
+    // task row is invented for the legacy review.
+    assert.equal(data.tasks.length, 1);
+    assert.equal(data.tasks[0].task_id, 'task-a');
+    assert.equal(data.tasks[0].review.completions.length, 0);
+    assert.equal(data.tasks[0].review.verdict, null);
+    assert.equal(data.tasks[0].review.accepted, false);
+    assert.equal(reviewCell(markdown, 'task-a'), '(none recorded)');
+
+    // The events remain fully visible in the flat timeline, untasked.
+    const reviewEvents = data.timeline.filter((entry) => entry.event.startsWith('review_'));
+    assert.equal(reviewEvents.length, 2);
+    for (const entry of reviewEvents) {
+      assert.equal(entry.task_id, null);
+    }
+    assert.ok(markdown.includes('**review\\_completed** — review\\_id=rev-legacy-1'), markdown);
+  });
+
+  it('never infers a task from a review_id that matches a task id', () => {
+    const { data, markdown } = reviewFixture('rev-named-like-task', {
+      ledger: [
+        // Legacy event: no task_id, but the review_id IS a task id's spelling.
+        { time: '2026-07-14T00:00:02Z', event: 'review_completed', run_id: 'rev-named-like-task', review_id: 'task-a', vendor: 'claude', exit_code: '0' },
+      ],
+    });
+
+    assert.equal(data.tasks.length, 1);
+    assert.equal(data.tasks[0].review.completions.length, 0);
+    assert.equal(data.tasks[0].review.accepted, false);
+    assert.equal(reviewCell(markdown, 'task-a'), '(none recorded)');
+  });
+
+  it('lists repeated reviews in ledger order, each one only completed', () => {
+    const { data, markdown } = reviewFixture('rev-repeated', {
+      ledger: [
+        { time: '2026-07-14T00:00:02Z', event: 'review_completed', run_id: 'rev-repeated', task_id: 'task-a', review_id: 'rev-1', vendor: 'claude', exit_code: '1' },
+        { time: '2026-07-14T00:00:04Z', event: 'review_completed', run_id: 'rev-repeated', task_id: 'task-a', review_id: 'rev-2', vendor: 'codex', exit_code: '0' },
+      ],
+    });
+
+    const cell = reviewCell(markdown, 'task-a');
+    const first = cell.indexOf('review_id=rev-1');
+    const second = cell.indexOf('review_id=rev-2');
+    assert.ok(first !== -1 && second !== -1 && first < second, cell);
+    assert.ok(cell.includes('verdict pending'), cell);
+    assert.deepEqual(
+      data.tasks[0].review.completions.map((completion) => completion.review_id),
+      ['rev-1', 'rev-2'],
+    );
+    assert.equal(data.tasks[0].review.accepted, false);
+  });
+
+  it('accepts once the verdict is recorded regardless of ledger ordering', () => {
+    const { data, markdown } = reviewFixture('rev-order', {
+      ledger: [
+        // Verdict first, process completion second — the final snapshot still
+        // reflects both facts truthfully.
+        { time: '2026-07-14T00:00:03Z', event: 'review_verdict', run_id: 'rev-order', task_id: 'task-a', verdict: 'accept', reviewer: 'claude', risk: 'low' },
+        { time: '2026-07-14T00:00:04Z', event: 'review_completed', run_id: 'rev-order', task_id: 'task-a', review_id: 'rev-1', vendor: 'claude', exit_code: '0' },
+      ],
+    });
+
+    const cell = reviewCell(markdown, 'task-a');
+    assert.ok(cell.includes('reviewer completed'), cell);
+    assert.ok(cell.includes('accepted — verdict accept (reviewer=claude, risk=low)'), cell);
+    assert.equal(data.tasks[0].review.accepted, true);
+  });
+
+  it('renders a hostile task id from a review event without constructing paths from it', () => {
+    const { data, markdown } = reviewFixture('rev-hostile', {
+      spec: false,
+      ledger: [
+        { time: '2026-07-14T00:00:02Z', event: 'review_completed', run_id: 'rev-hostile', task_id: '../evil', review_id: 'rev-x', vendor: 'claude', exit_code: '0' },
+        // A hostile review_id is data too: escaped, never markup.
+        { time: '2026-07-14T00:00:03Z', event: 'review_completed', run_id: 'rev-hostile', task_id: '../evil', review_id: 'rev`|*inject*|`', vendor: 'claude', exit_code: '0' },
+      ],
+    });
+
+    assert.equal(data.tasks.length, 1);
+    assert.equal(data.tasks[0].task_id, '../evil');
+    assert.equal(data.tasks[0].review.completions.length, 2);
+    assert.equal(data.tasks[0].review.accepted, false);
+    const cell = reviewCell(markdown, '../evil');
+    assert.ok(cell.includes('review_id=rev-x'), cell);
+    assert.ok(cell.includes("review_id=rev'\\|\\*inject\\*\\|'"), cell);
+    assert.ok(cell.includes('verdict pending'), cell);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Append-only authoritative review generations: run-log reads the REAL store
+// layout authoritative/reviews/<task>/<seq>-<reviewed_head>.json, picks the
+// highest valid generation deterministically, and lets that record override
+// conflicting ledger telemetry. Flat <task>.json files are legacy debris and
+// are never read.
+// ---------------------------------------------------------------------------
+
+describe('runLog append-only authoritative review generations', () => {
+  before(() => {
+    cleanTmp();
+    mkdirSync(TEST_TMP, { recursive: true });
+  });
+
+  after(() => {
+    cleanTmp();
+  });
+
+  function baseFixture(runId: string): { stateRoot: string; repoRoot: string } {
+    const stateRoot = makeDir(runId, 'state');
+    const repoRoot = makeDir(runId, 'repo');
+    writeRunYaml(stateRoot, runId, `base-${runId}`);
+    writeTaskSpec(stateRoot, runId, 'task-a', { assigned_vendor: 'codex', spec_version: '1' });
+    return { stateRoot, repoRoot };
+  }
+
+  function schemaVerdict(taskId: string, verdict: string, head: string, risk: string): Record<string, unknown> {
+    return {
+      task_id: taskId,
+      verdict,
+      reviewed_base: HEAD_C,
+      reviewed_head: head,
+      reviewer: 'codex',
+      risk,
+      blocking_findings: [],
+      non_blocking_findings: [],
+      required_integration_checks: [],
+    };
+  }
+
+  function verdictFile(name: string, doc: Record<string, unknown>): string {
+    const path = join(TEST_TMP, `${name}.json`);
+    writeFileSync(path, `${JSON.stringify(doc)}\n`, 'utf8');
+    return path;
+  }
+
+  it('reads the latest of multiple REAL generations published through record-review', () => {
+    const runId = 'gen-real';
+    const { stateRoot, repoRoot } = baseFixture(runId);
+    writeLedger(stateRoot, runId, [
+      { time: '2026-07-14T00:00:00Z', event: 'run_started', run_id: runId, base_commit: `base-${runId}` },
+      { time: '2026-07-14T00:00:02Z', event: 'review_completed', run_id: runId, task_id: 'task-a', review_id: 'rev-1', vendor: 'claude', exit_code: '0' },
+    ]);
+    // Two review rounds through the production lane: revise first, accept second.
+    captureStdout(() => recordReview(runId, 'task-a', verdictFile('gen-real-v1', schemaVerdict('task-a', 'revise', HEAD_A, 'medium')), { stateRoot }));
+    captureStdout(() => recordReview(runId, 'task-a', verdictFile('gen-real-v2', schemaVerdict('task-a', 'accept', HEAD_B, 'low')), { stateRoot }));
+
+    // The on-disk layout really is append-only generations, not a flat file.
+    assert.deepEqual(
+      readdirSync(reviewsDirFor(stateRoot, runId, 'task-a')).sort(),
+      [`0001-${HEAD_A}.json`, `0002-${HEAD_B}.json`],
+    );
+
+    const result = runLog(runId, { cwd: repoRoot, stateRoot, exec: repoExec(repoRoot), json: true });
+    assert.equal(result.data.tasks.length, 1);
+    assert.equal(result.data.tasks[0].review.verdict?.verdict, 'accept');
+    assert.equal(result.data.tasks[0].review.verdict?.risk, 'low');
+    assert.equal(result.data.tasks[0].review.accepted, true);
+    assert.ok(result.markdown.includes('accepted — verdict accept (reviewer=codex, risk=low)'), result.markdown);
+  });
+
+  it('a durable file-only generation with NO ledger append overrides stale ledger telemetry', () => {
+    const runId = 'gen-file-only';
+    const { stateRoot, repoRoot } = baseFixture(runId);
+    // The ledger last heard 'revise'; a later verdict reached the durable
+    // store but crashed before its review_verdict append.
+    writeLedger(stateRoot, runId, [
+      { time: '2026-07-14T00:00:00Z', event: 'run_started', run_id: runId, base_commit: `base-${runId}` },
+      { time: '2026-07-14T00:00:03Z', event: 'review_verdict', run_id: runId, task_id: 'task-a', verdict: 'revise', reviewer: 'claude', risk: 'medium' },
+    ]);
+    publishVerdict(
+      join(stateRoot, 'runs', `run-${runId}`),
+      'task-a',
+      Buffer.from(JSON.stringify(schemaVerdict('task-a', 'accept', HEAD_B, 'low'))),
+      HEAD_B,
+    );
+
+    const { data } = runLog(runId, { cwd: repoRoot, stateRoot, exec: repoExec(repoRoot), json: true });
+    assert.equal(data.tasks[0].review.verdict?.verdict, 'accept');
+    assert.equal(data.tasks[0].review.accepted, true);
+  });
+
+  it('the authoritative generation wins even when the ledger claims acceptance', () => {
+    const runId = 'gen-truth';
+    const { stateRoot, repoRoot } = baseFixture(runId);
+    writeLedger(stateRoot, runId, [
+      { time: '2026-07-14T00:00:00Z', event: 'run_started', run_id: runId, base_commit: `base-${runId}` },
+      // Stale/hostile telemetry claiming acceptance.
+      { time: '2026-07-14T00:00:03Z', event: 'review_verdict', run_id: runId, task_id: 'task-a', verdict: 'accept', reviewer: 'claude', risk: 'low' },
+    ]);
+    writeReviewGeneration(stateRoot, runId, 'task-a', 1, HEAD_A, { verdict: 'reject', reviewer: 'codex', risk: 'high' });
+
+    const { data, markdown } = runLog(runId, { cwd: repoRoot, stateRoot, exec: repoExec(repoRoot), json: true });
+    assert.equal(data.tasks[0].review.verdict?.verdict, 'reject');
+    assert.equal(data.tasks[0].review.accepted, false);
+    assert.ok(markdown.includes('verdict reject (reviewer=codex, risk=high) — not accepted'), markdown);
+  });
+
+  it('orders generations numerically: a five-digit sequence beats a padded low one', () => {
+    const runId = 'gen-numeric';
+    const { stateRoot, repoRoot } = baseFixture(runId);
+    writeLedger(stateRoot, runId, [
+      { time: '2026-07-14T00:00:00Z', event: 'run_started', run_id: runId, base_commit: `base-${runId}` },
+    ]);
+    writeReviewGeneration(stateRoot, runId, 'task-a', 2, HEAD_A, { verdict: 'revise', reviewer: 'codex', risk: 'medium' });
+    writeReviewGeneration(stateRoot, runId, 'task-a', 10_000, HEAD_B, { verdict: 'accept', reviewer: 'codex', risk: 'low' });
+
+    const { data } = runLog(runId, { cwd: repoRoot, stateRoot, exec: repoExec(repoRoot), json: true });
+    assert.equal(data.tasks[0].review.verdict?.verdict, 'accept');
+    assert.equal(data.tasks[0].review.accepted, true);
+  });
+
+  it('breaks a same-sequence tie deterministically by descending filename', () => {
+    const runId = 'gen-tie';
+    const { stateRoot, repoRoot } = baseFixture(runId);
+    writeLedger(stateRoot, runId, [
+      { time: '2026-07-14T00:00:00Z', event: 'run_started', run_id: runId, base_commit: `base-${runId}` },
+    ]);
+    // Two hostile same-sequence spellings: the byte-descending name wins.
+    writeReviewGeneration(stateRoot, runId, 'task-a', 3, HEAD_A, { verdict: 'accept', reviewer: 'codex', risk: 'low' });
+    writeReviewGeneration(stateRoot, runId, 'task-a', 3, HEAD_B, { verdict: 'reject', reviewer: 'codex', risk: 'high' });
+
+    const { data } = runLog(runId, { cwd: repoRoot, stateRoot, exec: repoExec(repoRoot), json: true });
+    assert.equal(data.tasks[0].review.verdict?.verdict, 'reject', `0003-${HEAD_B} sorts after 0003-${HEAD_A}`);
+    assert.equal(data.tasks[0].review.accepted, false);
+  });
+
+  it('skips invalid generations — symlinks, non-generation names, unparseable JSON, directories — and picks the highest VALID one', () => {
+    const runId = 'gen-invalid';
+    const { stateRoot, repoRoot } = baseFixture(runId);
+    writeLedger(stateRoot, runId, [
+      { time: '2026-07-14T00:00:00Z', event: 'run_started', run_id: runId, base_commit: `base-${runId}` },
+    ]);
+    const dir = reviewsDirFor(stateRoot, runId, 'task-a');
+    writeReviewGeneration(stateRoot, runId, 'task-a', 1, HEAD_A, { verdict: 'revise', reviewer: 'codex', risk: 'medium' });
+    // Higher-numbered debris that must all be skipped:
+    writeFileSync(join(dir, `0002-${HEAD_B}.json`), '{not json', 'utf8'); // unparseable
+    writeFileSync(join(dir, 'evil.json'), JSON.stringify({ verdict: 'accept', reviewer: 'x', risk: 'low' }), 'utf8'); // bad name
+    writeFileSync(join(dir, `0003-${'d'.repeat(12)}.json`), JSON.stringify({ verdict: 'accept' }), 'utf8'); // short head
+    mkdirSync(join(dir, `0004-${HEAD_C}.json`)); // a directory wearing a generation name
+    const outside = join(TEST_TMP, 'outside-accept.json');
+    writeFileSync(outside, JSON.stringify({ verdict: 'accept', reviewer: 'evil', risk: 'low' }), 'utf8');
+    symlinkSync(outside, join(dir, `0005-${HEAD_B}.json`)); // symlink: never followed
+
+    const { data } = runLog(runId, { cwd: repoRoot, stateRoot, exec: repoExec(repoRoot), json: true });
+    assert.equal(data.tasks[0].review.verdict?.verdict, 'revise', 'only generation 0001 is valid');
+    assert.equal(data.tasks[0].review.accepted, false);
+  });
+
+  it('skips a higher generation whose task_id claims a DIFFERENT task and falls back to the next valid one', () => {
+    const runId = 'gen-mismatch';
+    const { stateRoot, repoRoot } = baseFixture(runId);
+    writeTaskSpec(stateRoot, runId, 'task-b', { assigned_vendor: 'codex', spec_version: '1' });
+    writeLedger(stateRoot, runId, [
+      { time: '2026-07-14T00:00:00Z', event: 'run_started', run_id: runId, base_commit: `base-${runId}` },
+    ]);
+    // Generation 1 is task-a's real verdict; generation 2 is an 'accept'
+    // misfiled under task-a's directory but claiming task-b's identity.
+    writeReviewGeneration(stateRoot, runId, 'task-a', 1, HEAD_A, { verdict: 'revise', reviewer: 'codex', risk: 'medium' });
+    writeReviewGeneration(stateRoot, runId, 'task-a', 2, HEAD_B, { task_id: 'task-b', verdict: 'accept', reviewer: 'codex', risk: 'low' });
+
+    const { data } = runLog(runId, { cwd: repoRoot, stateRoot, exec: repoExec(repoRoot), json: true });
+    const taskA = data.tasks.find((task) => task.task_id === 'task-a');
+    const taskB = data.tasks.find((task) => task.task_id === 'task-b');
+    assert.equal(taskA?.review.verdict?.verdict, 'revise', 'the mismatched generation must be skipped, not trusted');
+    assert.equal(taskA?.review.accepted, false);
+    // The claimed task is untouched: a verdict misfiled under another task's
+    // directory can never surface as task-b's verdict either.
+    assert.equal(taskB?.review.verdict, null);
+    assert.equal(taskB?.review.accepted, false);
+  });
+
+  it('skips a higher generation with NO task_id and falls back to the next valid one', () => {
+    const runId = 'gen-missing-id';
+    const { stateRoot, repoRoot } = baseFixture(runId);
+    writeLedger(stateRoot, runId, [
+      { time: '2026-07-14T00:00:00Z', event: 'run_started', run_id: runId, base_commit: `base-${runId}` },
+    ]);
+    writeReviewGeneration(stateRoot, runId, 'task-a', 1, HEAD_A, { verdict: 'reject', reviewer: 'codex', risk: 'high' });
+    // A generation-shaped document with no identity at all (pre-#32 debris).
+    writeReviewGeneration(stateRoot, runId, 'task-a', 2, HEAD_B, { task_id: undefined, verdict: 'accept', reviewer: 'codex', risk: 'low' });
+
+    const { data } = runLog(runId, { cwd: repoRoot, stateRoot, exec: repoExec(repoRoot), json: true });
+    assert.equal(data.tasks[0].review.verdict?.verdict, 'reject', 'an identity-less generation must be skipped');
+    assert.equal(data.tasks[0].review.accepted, false);
+  });
+
+  it('yields no authoritative verdict when EVERY generation fails the identity check', () => {
+    const runId = 'gen-all-mismatch';
+    const { stateRoot, repoRoot } = baseFixture(runId);
+    writeLedger(stateRoot, runId, [
+      { time: '2026-07-14T00:00:00Z', event: 'run_started', run_id: runId, base_commit: `base-${runId}` },
+      // The ledger's own telemetry remains the fallback when the store holds
+      // nothing that self-identifies as this task.
+      { time: '2026-07-14T00:00:03Z', event: 'review_verdict', run_id: runId, task_id: 'task-a', verdict: 'revise', reviewer: 'claude', risk: 'medium' },
+    ]);
+    writeReviewGeneration(stateRoot, runId, 'task-a', 1, HEAD_A, { task_id: 'task-other', verdict: 'accept', reviewer: 'codex', risk: 'low' });
+    writeReviewGeneration(stateRoot, runId, 'task-a', 2, HEAD_B, { task_id: undefined, verdict: 'accept', reviewer: 'codex', risk: 'low' });
+
+    const { data } = runLog(runId, { cwd: repoRoot, stateRoot, exec: repoExec(repoRoot), json: true });
+    assert.equal(data.tasks[0].review.verdict?.verdict, 'revise', 'ledger telemetry stands when no store generation is valid');
+    assert.equal(data.tasks[0].review.accepted, false);
+  });
+
+  it('never follows a symlinked per-task directory in the reviews tree', () => {
+    const runId = 'gen-symdir';
+    const { stateRoot, repoRoot } = baseFixture(runId);
+    writeLedger(stateRoot, runId, [
+      { time: '2026-07-14T00:00:00Z', event: 'run_started', run_id: runId, base_commit: `base-${runId}` },
+      { time: '2026-07-14T00:00:03Z', event: 'review_verdict', run_id: runId, task_id: 'task-a', verdict: 'revise', reviewer: 'claude', risk: 'medium' },
+    ]);
+    // A real directory elsewhere holding an 'accept' generation, reachable
+    // only through a symlink planted at the task's slot.
+    const decoy = makeDir(runId, 'decoy');
+    writeFileSync(join(decoy, `0001-${HEAD_A}.json`), JSON.stringify({ verdict: 'accept', reviewer: 'evil', risk: 'low' }), 'utf8');
+    const reviewsRoot = join(stateRoot, 'runs', `run-${runId}`, 'authoritative', 'reviews');
+    mkdirSync(reviewsRoot, { recursive: true });
+    symlinkSync(decoy, join(reviewsRoot, 'task-a'));
+
+    const { data } = runLog(runId, { cwd: repoRoot, stateRoot, exec: repoExec(repoRoot), json: true });
+    assert.equal(data.tasks[0].review.verdict?.verdict, 'revise', 'the symlinked directory must not be read');
+    assert.equal(data.tasks[0].review.accepted, false);
+  });
+
+  it('ignores a legacy flat <task>.json file — flat records are never revived', () => {
+    const runId = 'gen-flat';
+    const { stateRoot, repoRoot } = baseFixture(runId);
+    writeLedger(stateRoot, runId, [
+      { time: '2026-07-14T00:00:00Z', event: 'run_started', run_id: runId, base_commit: `base-${runId}` },
+      { time: '2026-07-14T00:00:03Z', event: 'review_verdict', run_id: runId, task_id: 'task-a', verdict: 'revise', reviewer: 'claude', risk: 'medium' },
+    ]);
+    const reviewsRoot = join(stateRoot, 'runs', `run-${runId}`, 'authoritative', 'reviews');
+    mkdirSync(reviewsRoot, { recursive: true });
+    writeFileSync(join(reviewsRoot, 'task-a.json'), JSON.stringify({ verdict: 'accept', reviewer: 'x', risk: 'low' }), 'utf8');
+    // A flat file for an otherwise-unknown task must not invent a task row.
+    writeFileSync(join(reviewsRoot, 'task-ghost.json'), JSON.stringify({ verdict: 'accept' }), 'utf8');
+
+    const { data } = runLog(runId, { cwd: repoRoot, stateRoot, exec: repoExec(repoRoot), json: true });
+    assert.deepEqual(data.tasks.map((task) => task.task_id), ['task-a']);
+    assert.equal(data.tasks[0].review.verdict?.verdict, 'revise', 'the flat file must not override the ledger');
+    assert.equal(data.tasks[0].review.accepted, false);
+  });
+
+  it('discovers a task from its review generation directory alone', () => {
+    const runId = 'gen-discover';
+    const stateRoot = makeDir(runId, 'state');
+    const repoRoot = makeDir(runId, 'repo');
+    writeRunYaml(stateRoot, runId, `base-${runId}`);
+    writeLedger(stateRoot, runId, [
+      { time: '2026-07-14T00:00:00Z', event: 'run_started', run_id: runId, base_commit: `base-${runId}` },
+    ]);
+    writeReviewGeneration(stateRoot, runId, 'task-store-only', 1, HEAD_A, { verdict: 'accept', reviewer: 'codex', risk: 'low' });
+    // Directory names that are not canonical task ids never become tasks.
+    const reviewsRoot = join(stateRoot, 'runs', `run-${runId}`, 'authoritative', 'reviews');
+    mkdirSync(join(reviewsRoot, '.seq-0001.claimed'), { recursive: true });
+    mkdirSync(join(reviewsRoot, 'Task_UPPER'), { recursive: true });
+
+    const { data } = runLog(runId, { cwd: repoRoot, stateRoot, exec: repoExec(repoRoot), json: true });
+    assert.deepEqual(data.tasks.map((task) => task.task_id), ['task-store-only']);
+    assert.equal(data.tasks[0].review.verdict?.verdict, 'accept');
+    assert.equal(data.tasks[0].review.accepted, true);
   });
 });

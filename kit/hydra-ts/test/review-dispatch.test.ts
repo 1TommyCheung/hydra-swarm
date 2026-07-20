@@ -6,13 +6,17 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import {
   defaultExec,
+  main as reviewDispatchMain,
+  parseReviewDispatchArgs,
   reviewDispatch,
   type ReviewDispatchOptions,
   type ExecFn,
@@ -79,6 +83,10 @@ describe('reviewDispatch', () => {
     return {
       stateRoot: TEST_TMP,
       cwd: TEST_TMP,
+      // Explicit task provenance is required (issue #32); individual tests
+      // override with their own task id or pass taskId: undefined to probe
+      // the missing-task rejection.
+      taskId: 'task-default',
       ...extras,
     };
   }
@@ -196,6 +204,7 @@ describe('reviewDispatch', () => {
       vendor,
       prompt,
       options({
+        taskId: 'task-ledger',
         exec: makeExec({
           [`claude -p review --output-format json --add-dir ${TEST_TMP}`]: {
             stdout: JSON.stringify({ result: 'ok' }),
@@ -215,6 +224,233 @@ describe('reviewDispatch', () => {
     assert.equal(events[1].review_id, reviewId);
     assert.equal(events[1].vendor, vendor);
     assert.equal(events[1].exit_code, '0');
+  });
+
+  it('carries the explicit task_id on both review lifecycle events, with a review id unrelated to the task id', () => {
+    const runId = 'run-provenance';
+    const reviewId = 'rev-unrelated-99';
+    const vendor = 'claude';
+    const prompt = writePrompt('provenance review');
+
+    reviewDispatch(
+      runId,
+      reviewId,
+      vendor,
+      prompt,
+      options({
+        taskId: 'task-a',
+        exec: makeExec({
+          [`claude -p provenance review --output-format json --add-dir ${TEST_TMP}`]: {
+            stdout: JSON.stringify({ result: 'ok' }),
+            stderr: '',
+            exitCode: 0,
+          },
+        }),
+      }),
+    );
+
+    const events = ledgerEvents(runId);
+    assert.equal(events.length, 2);
+    for (const event of events) {
+      assert.equal(event.task_id, 'task-a', `${event.event} must carry the explicit task_id`);
+      assert.equal(event.review_id, reviewId, 'review_id stays an opaque session label');
+    }
+    // The session artifacts keep being named by review_id, not by task_id.
+    assert.ok(
+      existsSync(join(TEST_TMP, 'runs', `run-${runId}`, 'sessions', `${reviewId}.${vendor}.md`)),
+    );
+  });
+
+  it('throws before dispatch when the task id is missing', () => {
+    const runId = 'run-no-task';
+    let execCalled = false;
+    assert.throws(
+      () =>
+        reviewDispatch(runId, 'rev1', 'claude', writePrompt('no task'), {
+          stateRoot: TEST_TMP,
+          cwd: TEST_TMP,
+          exec: () => {
+            execCalled = true;
+            return { stdout: '', stderr: '', exitCode: 0 };
+          },
+        }),
+      /task_id required/,
+    );
+    assert.equal(execCalled, false, 'no vendor process may be spawned without --task');
+    assert.equal(
+      existsSync(join(TEST_TMP, 'runs', `run-${runId}`)),
+      false,
+      'no run state (sessions dir, ledger) may be created without --task',
+    );
+  });
+
+  it('throws before dispatch for hostile task ids', () => {
+    // The canonical grammar (task-id.ts): lowercase [a-z0-9-] only, no
+    // leading/trailing hyphen, max 64 — uppercase, underscore and over-long
+    // values are rejected exactly like traversal-shaped ones.
+    const hostile = [
+      '../evil', 'a/b', 'a b', 'a;b', '.dot', '-flag', 'a..b', 'é',
+      'Task-A', 'task_a', 'task-', 'a'.repeat(65),
+    ];
+    for (const taskId of hostile) {
+      const runId = `run-hostile-${hostile.indexOf(taskId)}`;
+      let execCalled = false;
+      assert.throws(
+        () =>
+          reviewDispatch(runId, 'rev1', 'claude', writePrompt('hostile task'), {
+            stateRoot: TEST_TMP,
+            cwd: TEST_TMP,
+            taskId,
+            exec: () => {
+              execCalled = true;
+              return { stdout: '', stderr: '', exitCode: 0 };
+            },
+          }),
+        /invalid task_id/,
+        `task id ${JSON.stringify(taskId)} must be rejected`,
+      );
+      assert.equal(execCalled, false, `no dispatch for task id ${JSON.stringify(taskId)}`);
+      assert.equal(
+        existsSync(join(TEST_TMP, 'runs', `run-${runId}`)),
+        false,
+        `no state written for task id ${JSON.stringify(taskId)}`,
+      );
+    }
+  });
+
+  it('accepts the exact 64-character task id boundary', () => {
+    const runId = 'run-task-64';
+    const taskId = 'a'.repeat(64);
+    reviewDispatch(
+      runId,
+      'rev1',
+      'claude',
+      writePrompt('boundary review'),
+      options({
+        taskId,
+        exec: makeExec({
+          [`claude -p boundary review --output-format json --add-dir ${TEST_TMP}`]: {
+            stdout: JSON.stringify({ result: 'ok' }),
+            stderr: '',
+            exitCode: 0,
+          },
+        }),
+      }),
+    );
+    const events = ledgerEvents(runId);
+    assert.equal(events.length, 2);
+    for (const event of events) {
+      assert.equal(event.task_id, taskId);
+    }
+  });
+
+  it('throws before any mutation for hostile run ids', () => {
+    const hostile = ['../evil', 'a/b', 'a b', '.', '..', 'run.id', '-run', 'r'.repeat(65), 'run x'];
+    for (const runId of hostile) {
+      const stateRoot = join(TEST_TMP, `runid-${hostile.indexOf(runId)}`);
+      mkdirSync(stateRoot, { recursive: true });
+      let execCalled = false;
+      assert.throws(
+        () =>
+          reviewDispatch(runId, 'rev1', 'claude', writePrompt('hostile run id'), {
+            stateRoot,
+            cwd: TEST_TMP,
+            taskId: 'task-a',
+            exec: () => {
+              execCalled = true;
+              return { stdout: '', stderr: '', exitCode: 0 };
+            },
+          }),
+        /invalid run_id/,
+        `run id ${JSON.stringify(runId)} must be rejected`,
+      );
+      assert.equal(execCalled, false, `no dispatch for run id ${JSON.stringify(runId)}`);
+      assert.deepEqual(
+        readdirSync(stateRoot),
+        [],
+        `state root must stay untouched for run id ${JSON.stringify(runId)}`,
+      );
+    }
+  });
+
+  it('throws before any mutation for hostile review ids — session artifacts cannot escape', () => {
+    // review_id names every session artifact (md/raw/exit/pid/pane-progress),
+    // so traversal, separators, dot segments, control bytes, whitespace and
+    // over-long values must all fail BEFORE any path is constructed.
+    const hostile = [
+      '../evil', '..', '.', 'a/b', 'a\\b', 'rev.1', 'rev id', 'rev\tid',
+      'rev\u0000id', '-rev', '_rev', 'r'.repeat(65), 'é',
+    ];
+    for (const reviewId of hostile) {
+      const stateRoot = join(TEST_TMP, `revid-${hostile.indexOf(reviewId)}`);
+      mkdirSync(stateRoot, { recursive: true });
+      let execCalled = false;
+      assert.throws(
+        () =>
+          reviewDispatch('run-esc', reviewId, 'claude', writePrompt('hostile review id'), {
+            stateRoot,
+            cwd: TEST_TMP,
+            taskId: 'task-a',
+            exec: () => {
+              execCalled = true;
+              return { stdout: '', stderr: '', exitCode: 0 };
+            },
+          }),
+        /invalid review_id/,
+        `review id ${JSON.stringify(reviewId)} must be rejected`,
+      );
+      assert.equal(execCalled, false, `no dispatch for review id ${JSON.stringify(reviewId)}`);
+      assert.deepEqual(
+        readdirSync(stateRoot),
+        [],
+        `nothing may be written anywhere for review id ${JSON.stringify(reviewId)} — no raw/md/exit/pid/progress file can exist, escaped or otherwise`,
+      );
+    }
+  });
+
+  it('containment: every session artifact for a valid dispatch stays inside the run sessions directory', () => {
+    const runId = 'run-contained';
+    const reviewId = 'rev-contained';
+    const stateRoot = join(TEST_TMP, 'containment-root');
+    mkdirSync(stateRoot, { recursive: true });
+    reviewDispatch(
+      runId,
+      reviewId,
+      'claude',
+      writePrompt('containment review'),
+      {
+        stateRoot,
+        cwd: TEST_TMP,
+        taskId: 'task-a',
+        exec: () => ({ stdout: JSON.stringify({ result: 'ok' }), stderr: '', exitCode: 0 }),
+      },
+    );
+    const runRoot = join(stateRoot, 'runs', `run-${runId}`);
+    const sessions = join(runRoot, 'sessions');
+    // Everything written under the state root lives beneath the run dir, and
+    // every session artifact (raw/md/exit/pid) beneath its sessions dir.
+    const walk = (dir: string): string[] =>
+      readdirSync(dir).flatMap((name: string) => {
+        const p = join(dir, name);
+        return statSync(p).isDirectory() ? walk(p) : [p];
+      });
+    const files = walk(stateRoot);
+    assert.ok(files.length > 0);
+    for (const file of files) {
+      assert.ok(
+        resolve(file).startsWith(resolve(runRoot) + '/'),
+        `${file} escapes the run directory`,
+      );
+    }
+    const sessionFiles = files.filter((file) => !file.includes('/authoritative/'));
+    assert.ok(sessionFiles.length >= 3, sessionFiles.join('\n'));
+    for (const file of sessionFiles) {
+      assert.ok(
+        resolve(file).startsWith(resolve(sessions) + '/'),
+        `${file} escapes the sessions directory`,
+      );
+      assert.match(file, /rev-contained\.claude\.(md|raw|exit|pid)$/);
+    }
   });
 
   it('extracts the final assistant message for Claude JSON output', () => {
@@ -392,8 +628,12 @@ describe('reviewDispatch', () => {
   it('records 127 when the vendor executable is missing', () => {
     const home = join(TEST_TMP, 'missing-vendor-home');
     mkdirSync(home, { recursive: true });
+    // .bash_login (not .bash_profile): sourced by `bash -lc` when no
+    // .bash_profile exists, and some sandboxed environments refuse to create
+    // files named .bash_profile/.profile at all (EPERM) — .bash_login keeps
+    // this test hermetic there too.
     writeFileSync(
-      join(home, '.bash_profile'),
+      join(home, '.bash_login'),
       "export PATH='/definitely/missing'\n",
       'utf8',
     );
@@ -669,8 +909,11 @@ describe('reviewDispatch', () => {
     const worktree = resolve(import.meta.dirname, '../..');
     const fakeClaude = join(bin, 'claude');
     mkdirSync(bin, { recursive: true });
+    // .bash_login: see the note in 'records 127 when the vendor executable is
+    // missing' — same login-shell semantics, creatable under sandboxes that
+    // forbid .bash_profile.
     writeFileSync(
-      join(home, '.bash_profile'),
+      join(home, '.bash_login'),
       `export PATH='${bin}':"$PATH"\n`,
       'utf8',
     );
@@ -683,7 +926,7 @@ describe('reviewDispatch', () => {
 
     const result = spawnSync(
       process.execPath,
-      ['--experimental-strip-types', source, 'cli-run', 'rev1', 'claude', prompt],
+      ['--experimental-strip-types', source, 'cli-run', 'rev1', 'claude', prompt, '--task', 'task-cli'],
       {
         cwd: worktree,
         encoding: 'utf8',
@@ -703,6 +946,131 @@ describe('reviewDispatch', () => {
       readFileSync(join(state, 'runs', 'run-cli-run', 'sessions', 'rev1.claude.pid'), 'utf8'),
       /^\d+\n?$/,
     );
+    // Both lifecycle events carry the explicit task provenance.
+    const events = readFileSync(
+      join(state, 'runs', 'run-cli-run', 'authoritative', 'ledger', 'events.jsonl'),
+      'utf8',
+    )
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.deepEqual(events.map((event) => event.event), ['review_started', 'review_completed']);
+    for (const event of events) {
+      assert.equal(event.task_id, 'task-cli');
+    }
+  });
+
+  it('CLI exits 1 when --task is missing, before any dispatch', () => {
+    const prompt = writePrompt('CLI without task');
+    const stderr: string[] = [];
+    const originalWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => {
+      stderr.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let code: number;
+    try {
+      code = reviewDispatchMain(['cli-no-task', 'rev1', 'claude', prompt]);
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+    assert.equal(code!, 1);
+    assert.match(stderr.join(''), /task_id required/);
+    // The failure happened before any state-root resolution or dispatch: no
+    // ledger, no session artifacts for this run anywhere under TEST_TMP.
+    assert.equal(existsSync(join(TEST_TMP, 'runs', 'run-cli-no-task')), false);
+  });
+
+  it('CLI exits 1 for an invalid --task value, before any dispatch', () => {
+    const prompt = writePrompt('CLI hostile task');
+    const stderr: string[] = [];
+    const originalWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => {
+      stderr.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let code: number;
+    try {
+      code = reviewDispatchMain(['cli-bad-task', 'rev1', 'claude', prompt, '--task', '../evil']);
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+    assert.equal(code!, 1);
+    assert.match(stderr.join(''), /invalid task_id/);
+    assert.equal(existsSync(join(TEST_TMP, 'runs', 'run-cli-bad-task')), false);
+  });
+
+  it('parses the documented flag orders: flags before, between, or after operands', () => {
+    const expected = {
+      runId: 'run1',
+      reviewId: 'rev1',
+      vendor: 'kimi',
+      promptFile: 'prompt.md',
+      taskId: 'task-a',
+      image: 'shot.png',
+    };
+    const orders = [
+      ['run1', 'rev1', 'kimi', 'prompt.md', '--task', 'task-a', '--image', 'shot.png'],
+      ['run1', 'rev1', 'kimi', 'prompt.md', '--image', 'shot.png', '--task', 'task-a'],
+      ['--task', 'task-a', 'run1', 'rev1', 'kimi', 'prompt.md', '--image', 'shot.png'],
+      ['run1', '--image', 'shot.png', 'rev1', 'kimi', '--task', 'task-a', 'prompt.md'],
+    ];
+    for (const args of orders) {
+      assert.deepEqual(parseReviewDispatchArgs(args), expected, args.join(' '));
+    }
+    assert.deepEqual(
+      parseReviewDispatchArgs(['run1', 'rev1', 'kimi', 'prompt.md', '--task', 'task-a']),
+      { ...expected, image: undefined },
+      '--image is optional',
+    );
+  });
+
+  it('rejects every malformed argv before any ledger, session or filesystem mutation', () => {
+    const state = join(TEST_TMP, 'cli-strict-state');
+    mkdirSync(state, { recursive: true });
+    const previousState = process.env.HYDRA_STATE_ROOT;
+    process.env.HYDRA_STATE_ROOT = state;
+    const cases: Array<{ args: string[]; error: RegExp }> = [
+      { args: [], error: /expected 4 positional arguments, got 0/ },
+      { args: ['run1', 'rev1', 'claude'], error: /expected 4 positional arguments, got 3/ },
+      { args: ['run1', 'rev1', 'claude', 'p.md'], error: /task_id required/ },
+      { args: ['run1', 'rev1', 'claude', 'p.md', 'extra', '--task', 't'], error: /unexpected extra operand "extra"/ },
+      { args: ['run1', 'rev1', 'claude', 'p.md', '--task', 't', '--frobnicate'], error: /unknown option "--frobnicate"/ },
+      { args: ['run1', 'rev1', 'claude', 'p.md', '-x', '--task', 't'], error: /unknown option "-x"/ },
+      { args: ['run1', 'rev1', 'claude', 'p.md', '--task', 't', '--task', 'u'], error: /duplicate --task/ },
+      { args: ['run1', 'rev1', 'claude', 'p.md', '--task', 't', '--image', 'a', '--image', 'b'], error: /duplicate --image/ },
+      { args: ['run1', 'rev1', 'claude', 'p.md', '--task'], error: /missing value for --task/ },
+      { args: ['run1', 'rev1', 'claude', 'p.md', '--task', 't', '--image'], error: /missing value for --image/ },
+      { args: ['run1', 'rev1', 'claude', 'p.md', '--task', '--image', 'x'], error: /missing value for --task: "--image" is another option/ },
+      { args: ['run1', 'rev1', 'claude', 'p.md', '--image', '--task', 't'], error: /missing value for --image: "--task" is another option/ },
+    ];
+    try {
+      for (const { args, error } of cases) {
+        const stderr: string[] = [];
+        const originalWrite = process.stderr.write;
+        process.stderr.write = ((chunk: unknown) => {
+          stderr.push(String(chunk));
+          return true;
+        }) as typeof process.stderr.write;
+        let code: number;
+        try {
+          code = reviewDispatchMain(args);
+        } finally {
+          process.stderr.write = originalWrite;
+        }
+        const output = stderr.join('');
+        assert.equal(code!, 1, `argv [${args.join(' ')}] must fail`);
+        assert.match(output, error, `argv [${args.join(' ')}]`);
+        assert.match(output, /usage: reviewDispatch <run_id> <review_id> <vendor> <prompt_file> --task <task_id> \[--image PATH\]/, `argv [${args.join(' ')}] must print the usage contract`);
+        assert.deepEqual(
+          readdirSync(state),
+          [],
+          `argv [${args.join(' ')}] must not touch the state root`,
+        );
+      }
+    } finally {
+      restoreEnv('HYDRA_STATE_ROOT', previousState);
+    }
   });
 
   it('live-tails codex progress events from the raw file into the pane', () => {
@@ -1290,6 +1658,7 @@ describe('reviewDispatch herdr workspace pin (issue #19)', () => {
     return {
       stateRoot: TEST_TMP,
       cwd: TEST_TMP,
+      taskId: 'task-default',
       ...extras,
     };
   }

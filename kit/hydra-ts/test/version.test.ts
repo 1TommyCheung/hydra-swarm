@@ -53,6 +53,6 @@ describe('version', () => {
     assert.ok(stdout.startsWith('Usage: hydra <subcommand> [args...]'));
     assert.ok(stdout.includes('  version\n'));
     assert.ok(stdout.includes('<run_id> <task_id> [--lines N] [--json]'));
-    assert.ok(stdout.includes('<run_id> <review_id> <vendor> <prompt_file> [--image PATH]'));
+    assert.ok(stdout.includes('<run_id> <review_id> <vendor> <prompt_file> --task <task_id> [--image PATH]'));
   });
 });

@@ -162,7 +162,7 @@ const SIGNATURES: Readonly<Record<string, string>> = {
   'promote': '<run_id> <task_id> <inbox_result.json>',
   'record-review': '<run_id> <task_id> <verdict.json>',
   'record-usage': '<run_id> <task_id> <vendor> <agent_run_id>',
-  'review-dispatch': '<run_id> <review_id> <vendor> <prompt_file> [--image PATH]',
+  'review-dispatch': '<run_id> <review_id> <vendor> <prompt_file> --task <task_id> [--image PATH]',
   'review-required': '<implementer_vendor> <risk> [label...]',
   'run-init': '<run_id> [base_commit]',
   'squash': '<run_id> <task_id>',

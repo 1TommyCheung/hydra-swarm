@@ -20,7 +20,7 @@ bash kit/hydra/scripts/status.sh 0042 <task>                   # one-shot read-o
 bash kit/hydra/scripts/cancel-task.sh 0042 <task>              # clean cancellation of a running task
 bash kit/hydra/scripts/promote.sh 0042 <task> \
      ~/.local/state/<repo>-hydra/runs/run-0042/inbox/<agent_run_id>/result.json # THE trust boundary
-bash kit/hydra/scripts/review-dispatch.sh 0042 <rev> <vendor> <prompt-file>   # cross-vendor review (read-only)
+bash kit/hydra/scripts/review-dispatch.sh 0042 <rev> <vendor> <prompt-file> --task <task>  # cross-vendor review (read-only)
 bash kit/hydra/scripts/record-review.sh 0042 <task> <verdict.json>            # record accept/revise/reject
 bash kit/hydra/scripts/squash.sh 0042 <task>                   # accepted candidates only
 bash kit/hydra/scripts/integrate.sh 0042 <task-in-dep-order>...# cherry-pick + smoke + combined gate
@@ -31,6 +31,25 @@ bash kit/hydra/scripts/gc.sh --apply --keep-last 3              # reap ledger-pr
 
 Only `accept` candidates enter `squash`/`integrate`. `revise`/`reject` return to
 the same worktree (amend the spec + re-dispatch).
+
+Review provenance is explicit (issue #32): `review-dispatch` refuses to run
+without `--task <task_id>` (validated against the canonical task-id grammar —
+1-64 chars of `[a-z0-9-]`, no leading/trailing hyphen — before any
+dispatch) and stamps `task_id` on both `review_started` and `review_completed`.
+Task identity is never inferred from the review id's naming. A finished
+reviewer — even a clean exit 0 with approval-sounding output — is process
+telemetry, not a verdict: only the `review_verdict` event recorded by
+`record-review` gates acceptance, backed by the append-only review store at
+`authoritative/reviews/<task>/<seq>-<reviewed_head>.json` (one generation per
+publish; the highest valid generation — one whose document's own `task_id`
+matches its task directory — is authoritative and overrides
+conflicting ledger telemetry).
+The `run-log` Review column therefore distinguishes three states: **reviewer
+completed**, **verdict recorded** (`accepted` only when the recorded verdict is
+`accept`; `revise`/`reject`/`blocked` render as not accepted), and **verdict
+pending** for completed-but-unjudged reviews. Legacy review events without
+`task_id` stay in the flat event timeline and are never guessed onto a task
+row. See `docs/ledger-schema.md`.
 
 ## Dispatch attempt namespaces
 

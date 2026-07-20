@@ -29,6 +29,7 @@ import {
 } from './lib.ts';
 import { herdrAgentPaneRatio, monitorEventText } from './dispatch.ts';
 import { isCompiledBinary } from './kit-assets.ts';
+import { isSafeId, isTaskId, SAFE_ID_PATTERN, TASK_ID_GRAMMAR } from './task-id.ts';
 
 // ---------------------------------------------------------------------------
 // Types.
@@ -51,6 +52,13 @@ export interface ReviewDispatchOptions {
   cwd?: string;
   /** Explicit state root; otherwise resolved from the environment. */
   stateRoot?: string;
+  /**
+   * Explicit task linkage (REQUIRED — issue #32): recorded as task_id on the
+   * review_started/review_completed lifecycle events. Task identity is never
+   * inferred from the review_id naming; a missing or unsafe value dies BEFORE
+   * any dispatch, ledger write, or state-tree mutation.
+   */
+  taskId?: string;
   /** Injectable command runner for tests. */
   exec?: ExecFn;
   /** Injectable pane-state reporter for tests. */
@@ -390,10 +398,26 @@ export function reviewDispatch(
   promptFile: string,
   options: ReviewDispatchOptions = {},
 ): string {
-  if (!runId) die('usage: reviewDispatch <run_id> <review_id> <vendor> <prompt_file> [--image PATH] (run_id required)');
+  // EVERY id is validated BEFORE any path construction, ledger append, or
+  // filesystem mutation. run_id and review_id follow the bounded safe-id
+  // grammar (task-id.ts SAFE_ID_PATTERN): review_id names every session
+  // artifact (sessions/<review_id>.<vendor>.{md,raw,exit,pid,
+  // pane-progress.txt}), so traversal, separators, dot segments, control
+  // bytes, whitespace and over-long values are all rejected here — a value
+  // that passes cannot escape the run's sessions directory.
+  if (!runId) die('usage: reviewDispatch <run_id> <review_id> <vendor> <prompt_file> --task <task_id> [--image PATH] (run_id required)');
+  if (!isSafeId(runId)) die(`invalid run_id ${JSON.stringify(runId)}: must match ${SAFE_ID_PATTERN}`);
   if (!reviewId) die('review_id required');
+  if (!isSafeId(reviewId)) die(`invalid review_id ${JSON.stringify(reviewId)}: must match ${SAFE_ID_PATTERN}`);
   if (!vendor) die('vendor required');
   if (!promptFile) die('prompt_file required');
+  // Explicit task provenance (issue #32): the task being reviewed is passed
+  // via --task and validated against the canonical task-id grammar BEFORE
+  // anything is dispatched or recorded. A review_id is an opaque session
+  // label — task identity is never inferred from its naming.
+  const taskId = options.taskId ?? '';
+  if (!taskId) die('task_id required: pass --task <task_id> (task identity is never inferred from review_id)');
+  if (!isTaskId(taskId)) die(`invalid task_id ${JSON.stringify(taskId)}: expected ${TASK_ID_GRAMMAR}`);
   if (!existsSync(promptFile)) die(`prompt file not found: ${promptFile}`);
 
   const exec = options.exec ?? defaultExec;
@@ -479,7 +503,7 @@ export function reviewDispatch(
     ].join('; ');
   }
 
-  appendLedger(stateRootPath, runId, 'review_started', 'review_id', reviewId, 'vendor', vendor);
+  appendLedger(stateRootPath, runId, 'review_started', 'review_id', reviewId, 'task_id', taskId, 'vendor', vendor);
 
   let launchedInPane = false;
   let pane: string | undefined;
@@ -584,6 +608,8 @@ export function reviewDispatch(
     'review_completed',
     'review_id',
     reviewId,
+    'task_id',
+    taskId,
     'vendor',
     vendor,
     'exit_code',
@@ -598,15 +624,73 @@ export function reviewDispatch(
 // CLI entry point.
 // ---------------------------------------------------------------------------
 
+const USAGE =
+  'usage: reviewDispatch <run_id> <review_id> <vendor> <prompt_file> --task <task_id> [--image PATH]';
+
+/** Parsed CLI arguments; produced only after the whole argv validated. */
+export interface ParsedReviewDispatchArgs {
+  runId: string;
+  reviewId: string;
+  vendor: string;
+  promptFile: string;
+  taskId: string;
+  image?: string;
+}
+
+/**
+ * Strict CLI parsing (issue #32). The contract: exactly four positional
+ * operands (<run_id> <review_id> <vendor> <prompt_file>), exactly one
+ * `--task <task_id>`, at most one `--image PATH`; the two flags may appear
+ * anywhere among the operands and in either order. Everything else is a
+ * loud error — unknown flags, extra operands, duplicated flags, a flag with
+ * no value, and a flag whose "value" is itself another option. Parsing
+ * happens BEFORE reviewDispatch() runs, so every argv error fails without
+ * touching the ledger, a session file, or any other state.
+ */
+export function parseReviewDispatchArgs(args: string[]): ParsedReviewDispatchArgs {
+  const positionals: string[] = [];
+  let taskId: string | undefined;
+  let image: string | undefined;
+
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--task' || arg === '--image') {
+      const already = arg === '--task' ? taskId : image;
+      if (already !== undefined) die(`duplicate ${arg} option\n${USAGE}`);
+      const value = args[i + 1];
+      if (value === undefined) die(`missing value for ${arg}\n${USAGE}`);
+      if (value.startsWith('-')) {
+        die(`missing value for ${arg}: ${JSON.stringify(value)} is another option, not a value\n${USAGE}`);
+      }
+      if (arg === '--task') taskId = value;
+      else image = value;
+      i += 1;
+    } else if (arg.startsWith('-')) {
+      die(`unknown option ${JSON.stringify(arg)}\n${USAGE}`);
+    } else if (positionals.length < 4) {
+      positionals.push(arg);
+    } else {
+      die(`unexpected extra operand ${JSON.stringify(arg)}\n${USAGE}`);
+    }
+  }
+
+  if (positionals.length < 4) {
+    die(`${USAGE} (expected 4 positional arguments, got ${positionals.length})`);
+  }
+  if (taskId === undefined) {
+    die(`task_id required: pass --task <task_id> (task identity is never inferred from review_id)\n${USAGE}`);
+  }
+  const [runId, reviewId, vendor, promptFile] = positionals;
+  return { runId, reviewId, vendor, promptFile, taskId, image };
+}
+
 export function main(args: string[] = process.argv.slice(2)): number {
   try {
-    const [runId, reviewId, vendor, promptFile, ...rest] = args;
-    let image: string | undefined;
-    const imageIdx = rest.indexOf('--image');
-    if (imageIdx !== -1) {
-      image = rest[imageIdx + 1];
-    }
-    reviewDispatch(runId, reviewId, vendor, promptFile, { image });
+    const parsed = parseReviewDispatchArgs(args);
+    reviewDispatch(parsed.runId, parsed.reviewId, parsed.vendor, parsed.promptFile, {
+      image: parsed.image,
+      taskId: parsed.taskId,
+    });
     return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
