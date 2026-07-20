@@ -17,13 +17,24 @@ Every ledger event carries:
 Most task-level events also carry:
 
 - `task_id` — the task identifier.
-- `agent_run_id` — deterministic attempt id: `<run_id>-<task_id>-v<spec_version>`.
+- `agent_run_id` — unique attempt id. Attempt 1 is
+  `<run_id>-<task_id>-v<spec_version>`; later attempts append `-a2`, `-a3`, etc.
 
 `dispatch_instance_id` — a random id created once per `dispatch.sh` invocation — is added only by dispatch's own ledger appender for dispatch-originated events such as `task_started`, `agent_exited`, `agent_cancelled`, and loop-detector events. It is **not** present on non-dispatch events such as `run_started`, review, promotion, squash, or integration events.
 
+Every new `task_started` also records `spec_version` and `attempt_ordinal`
+separately. Readers validate those numeric fields against `agent_run_id`, select
+the greatest ordinal rather than the latest appended start record, and correlate
+subsequent dispatch events by `dispatch_instance_id`. Ledger append order alone
+is not attempt order: overlapping processes can append starts and exits out of
+order. A terminal event for one instance never terminates another. The legacy
+fallback for old records without instance IDs is limited to the selected
+start's bounded append window.
+
 ## Common event types
 
-Terminal events end an attempt: `agent_exited`, `agent_cancelled`, `agent_timed_out`.
+Terminal events end an attempt: `agent_exited`, `agent_cancelled`,
+`agent_timed_out`, `agent_usage_limited`.
 
 Nonterminal events include:
 
@@ -37,3 +48,13 @@ Nonterminal events include:
 ## Session replacement
 
 If the session is replaced, do not rely on conversational memory. Read `run.yaml`, the ledger, and Git to reconstruct which tasks are planned / running / promoted / accepted / integrated, then resume from the last recorded checkpoint.
+
+For dispatch recovery, preserve every attempt artifact. The allocator computes
+the maximum ordinal from authoritative `task_started` records and durable inbox,
+session, supervisor, sentinel, pid, progress, outcome, and result evidence, then
+claims `max+1` with an exclusive directory create. It never fills a missing
+ordinal and never reopens an old namespace. Therefore deleting only
+`inbox/<agent_run_id>` is not a reset: ledger or session evidence still advances
+the next attempt. Do not rename or delete evidence to force a preferred suffix;
+re-dispatch normally and use the newly printed `agent_run_id` for status,
+promotion, session inspection, and incident notes.

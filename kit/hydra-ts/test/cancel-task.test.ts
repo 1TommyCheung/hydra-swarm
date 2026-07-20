@@ -95,8 +95,8 @@ function terminal(f: Fixture, event = 'agent_cancelled'): Record<string, unknown
   };
 }
 
-function writePidfile(f: Fixture, pid: number): void {
-  const path = join(f.sessionsDir, 'supervisor', `${f.agentRunId}.dispatch.pid`);
+function writePidfile(f: Fixture, pid: number, agentRunId = f.agentRunId): void {
+  const path = join(f.sessionsDir, 'supervisor', `${agentRunId}.dispatch.pid`);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${pid}\n`, 'utf8');
 }
@@ -188,6 +188,35 @@ describe('cancelTask', () => {
     assert.equal(result.terminal_event.event, 'agent_usage_limited');
     assert.deepEqual(signals, []);
     assert.match(output, /agent_usage_limited/);
+  });
+
+  it('cancels only the greatest attempt ordinal when starts and exits append out of order', async () => {
+    const f = fixture();
+    const a1 = f.agentRunId;
+    const a2 = `${f.agentRunId}-a2`;
+    const dispatchPid = 43219;
+    writeLedger(f, [
+      { ...started(f, a2), spec_version: '1', attempt_ordinal: '2', dispatch_instance_id: 'dispatch-b' },
+      { ...started(f, a1), spec_version: '1', attempt_ordinal: '1', dispatch_instance_id: 'dispatch-a' },
+      { ...terminal(f, 'agent_exited'), agent_run_id: a1, dispatch_instance_id: 'dispatch-a' },
+    ]);
+    writePidfile(f, dispatchPid, a2);
+    const signals: Array<[number, CancelSignal]> = [];
+
+    const result = await cancelTask(f.runId, f.taskId, options(f, {
+      processAlive: (pid) => pid === dispatchPid,
+      listProcesses: () => [dispatchProcess(f, dispatchPid)],
+      signalProcess: (pid, signal) => {
+        signals.push([pid, signal]);
+        appendLedger(f, {
+          ...terminal(f), agent_run_id: a2, dispatch_instance_id: 'dispatch-b',
+        });
+      },
+    }));
+
+    assert.equal(result.agent_run_id, a2);
+    assert.equal(result.terminal_event.dispatch_instance_id, 'dispatch-b');
+    assert.deepEqual(signals, [[dispatchPid, 'SIGTERM']]);
   });
 
   it('rejects a missing current task attempt', async () => {

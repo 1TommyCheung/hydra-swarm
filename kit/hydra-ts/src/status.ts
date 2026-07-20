@@ -410,17 +410,17 @@ export function status(
   const taskSpecPath = join(runPath, 'tasks', `${taskId}.yaml`);
   const spec = readTaskSpec(taskSpecPath);
 
-  const agentRunId = `${runId}-${taskId}-v${spec.specVersion}`;
+  const baseAgentRunId = `${runId}-${taskId}-v${spec.specVersion}`;
   const timeoutMinutes = spec.timeoutMinutes;
   const hardCapMinutes = Number(process.env.HYDRA_HARD_CAP_MIN || timeoutMinutes * 6);
 
   const ledgerPath = join(runPath, 'authoritative', 'ledger', 'events.jsonl');
   const allEvents = readLedger(ledgerPath, runId);
   const taskEvents = filterTaskEvents(allEvents, taskId);
-  const { events: attemptEvents, startedEntry } = currentAttemptEvents(
-    taskEvents,
-    agentRunId,
-  );
+  const currentAttempt = currentAttemptEvents(taskEvents, runId, taskId, spec.specVersion);
+  const agentRunId = currentAttempt?.agentRunId ?? baseAgentRunId;
+  const attemptEvents = currentAttempt?.events ?? [];
+  const startedEntry = currentAttempt?.startedEntry;
   const state = determineState(attemptEvents);
 
   const startedTime = parseEventTime(startedEntry?.time);

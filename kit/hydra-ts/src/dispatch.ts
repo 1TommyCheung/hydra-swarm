@@ -16,7 +16,11 @@ import { constants, cpus } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildWorkerPrompt } from './build-worker-prompt.ts';
-import { type LedgerEntry } from './current-attempt.ts';
+import {
+  agentRunIdForAttempt,
+  attemptOrdinalFromAgentRunId,
+  type LedgerEntry,
+} from './current-attempt.ts';
 import { eligible } from './allocate.ts';
 import {
   KNOWN_HEADS,
@@ -925,6 +929,10 @@ function recordUsageLimitedAndCooldown(
 function applyAdapterOutcome(ctx: WorkerContext, recorder: ExitRecorder): boolean {
   const outcome = readAdapterOutcome(ctx.sessionsDir, ctx.agentRunId);
   if (!outcome) return false;
+  if (outcome.vendor === 'unknown' && outcome.kind === 'terminal_failure') {
+    recorder.recordExit('agent_exited', '1', 'reason', 'adapter_outcome_malformed');
+    return true;
+  }
   if (outcome.vendor !== ctx.vendor) {
     recorder.recordExit('agent_exited', '1', 'reason', 'adapter_outcome_vendor_mismatch');
     return true;
@@ -1191,6 +1199,7 @@ async function runWorkerPlain(
   const args = ctx.adapterRuntime === 'compiled'
     ? [`adapter-${ctx.vendor}`, ...adapterArgs]
     : ['--experimental-strip-types', ctx.adapterPath, ...adapterArgs];
+  rmSync(join(ctx.sessionsDir, `${ctx.agentRunId}.outcome.json`), { force: true });
   const child = ctx.spawn(command, args, {
     detached: false,
     stdio: 'ignore',
@@ -1371,6 +1380,7 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
 
   let paneId: string | undefined;
   try {
+    rmSync(join(ctx.sessionsDir, `${ctx.agentRunId}.outcome.json`), { force: true });
     paneId = ctx.herdr.agentStart({ label, cwd: ctx.worktree, workspace, command: inner });
   } catch {
     return false;
@@ -1513,6 +1523,134 @@ async function runWorker(ctx: WorkerContext, recorder: ExitRecorder): Promise<vo
   if (!recorder.isCancelled()) safeRecordUsage(ctx);
 }
 
+export interface DispatchAttemptClaim {
+  agentRunId: string;
+  attemptOrdinal: number;
+  inbox: string;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function artifactOrdinals(path: string, baseAgentRunId: string): number[] {
+  if (!isDirectory(path)) return [];
+  const ordinals: number[] = [];
+  const pattern = new RegExp(`^(${escapeRegExp(baseAgentRunId)}(?:-a[1-9]\\d*)?)(?:\\.|$)`);
+  const visit = (dir: string): void => {
+    for (const name of readdirSync(dir)) {
+      const candidatePath = join(dir, name);
+      const match = pattern.exec(name);
+      if (match) {
+        const ordinal = match[1] === baseAgentRunId
+          ? 1
+          : Number(match[1].slice(baseAgentRunId.length + 2));
+        if (Number.isSafeInteger(ordinal) && ordinal >= 1
+          && (match[1] === baseAgentRunId || ordinal >= 2)) ordinals.push(ordinal);
+      }
+      try {
+        if (lstatSync(candidatePath).isDirectory()) visit(candidatePath);
+      } catch {
+        // A concurrent cleanup can remove advisory evidence between listing and stat.
+      }
+    }
+  };
+  visit(path);
+  return ordinals;
+}
+
+function contentOrdinals(path: string, baseAgentRunId: string): number[] {
+  if (!isDirectory(path)) return [];
+  const ordinals: number[] = [];
+  const pattern = new RegExp(`${escapeRegExp(baseAgentRunId)}(?:-a[1-9]\\d*)?(?![-A-Za-z0-9])`, 'g');
+  const visit = (dir: string): void => {
+    for (const name of readdirSync(dir)) {
+      const candidatePath = join(dir, name);
+      try {
+        const info = lstatSync(candidatePath);
+        if (info.isDirectory()) {
+          visit(candidatePath);
+        } else if (info.isFile()) {
+          const content = readFileSync(candidatePath, 'utf8');
+          for (const match of content.matchAll(pattern)) {
+            const ordinal = match[0] === baseAgentRunId
+              ? 1
+              : Number(match[0].slice(baseAgentRunId.length + 2));
+            if (Number.isSafeInteger(ordinal) && ordinal >= 1
+              && (match[0] === baseAgentRunId || ordinal >= 2)) ordinals.push(ordinal);
+          }
+        }
+      } catch {
+        // Evidence that disappears during the scan cannot be claimed or overwritten.
+      }
+    }
+  };
+  visit(path);
+  return ordinals;
+}
+
+function ledgerAttemptOrdinals(
+  ledgerPath: string,
+  runId: string,
+  taskId: string,
+  specVersion: string,
+): number[] {
+  let content = '';
+  try { content = readFileSync(ledgerPath, 'utf8'); } catch { return []; }
+  const ordinals: number[] = [];
+  for (const line of content.split('\n')) {
+    if (line.trim() === '') continue;
+    let entry: LedgerEntry;
+    try { entry = JSON.parse(line) as LedgerEntry; } catch { continue; }
+    if (entry.event !== 'task_started' || entry.run_id !== runId || entry.task_id !== taskId
+      || typeof entry.agent_run_id !== 'string') continue;
+    const parsed = attemptOrdinalFromAgentRunId(entry.agent_run_id, runId, taskId, specVersion);
+    if (parsed === undefined) continue;
+    const modern = entry.spec_version !== undefined || entry.attempt_ordinal !== undefined;
+    if (modern && (String(entry.spec_version) !== specVersion
+      || String(entry.attempt_ordinal) !== String(parsed))) continue;
+    ordinals.push(parsed);
+  }
+  return ordinals;
+}
+
+/** Claim a never-before-used attempt namespace. The inbox directory itself is
+ * the atomic cross-process claim: mkdir is deliberately exclusive and
+ * non-recursive, and EEXIST advances rather than reopening a namespace. */
+export function claimDispatchAttempt(
+  runPath: string,
+  runId: string,
+  taskId: string,
+  specVersion: string,
+): DispatchAttemptClaim {
+  const inboxRoot = join(runPath, 'inbox');
+  const sessionsDir = join(runPath, 'sessions');
+  const baseAgentRunId = agentRunIdForAttempt(runId, taskId, specVersion, 1);
+  mkdirSync(inboxRoot, { recursive: true });
+
+  const evidenced = [
+    ...ledgerAttemptOrdinals(
+      join(runPath, 'authoritative', 'ledger', 'events.jsonl'),
+      runId, taskId, specVersion,
+    ),
+    ...artifactOrdinals(inboxRoot, baseAgentRunId),
+    ...artifactOrdinals(sessionsDir, baseAgentRunId),
+    ...contentOrdinals(join(runPath, 'authoritative', 'results'), baseAgentRunId),
+  ];
+  let ordinal = evidenced.length === 0 ? 1 : Math.max(...evidenced) + 1;
+  while (true) {
+    const agentRunId = agentRunIdForAttempt(runId, taskId, specVersion, ordinal);
+    const inbox = join(inboxRoot, agentRunId);
+    try {
+      mkdirSync(inbox);
+      return { agentRunId, attemptOrdinal: ordinal, inbox };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      ordinal += 1;
+    }
+  }
+}
+
 export async function dispatch(
   runId: string,
   taskId: string,
@@ -1584,12 +1722,12 @@ export async function dispatch(
     die(`worktree not created yet (run create-worktree.sh): ${spec.worktree}`);
   }
 
-  const agentRunId = `${runId}-${taskId}-v${spec.specVersion}`;
-  const inbox = join(runPath, 'inbox', agentRunId);
   const sessionsDir = join(runPath, 'sessions');
   const slotsDir = join(runPath, '.slots');
-  mkdirSync(inbox, { recursive: true });
   mkdirSync(sessionsDir, { recursive: true });
+  const { agentRunId, attemptOrdinal, inbox } = claimDispatchAttempt(
+    runPath, runId, taskId, spec.specVersion,
+  );
 
   const delivery = determineDelivery(runId, taskId, sessionsDir, { vendor: spec.vendor, path: adapterPath, runtime: adapterRuntime }, env, spec.timeoutMinutes);
   const dispatchInstanceId = randomBytes(8).toString('hex');
@@ -1627,6 +1765,8 @@ export async function dispatch(
     'task_id', taskId,
     'vendor', spec.vendor,
     'agent_run_id', agentRunId,
+    'spec_version', spec.specVersion,
+    'attempt_ordinal', String(attemptOrdinal),
     'delivery', env.HYDRA_DELIVERY || 'start',
   );
 

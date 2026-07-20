@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { die, stateRoot, yamlScalar } from './lib.ts';
 import { currentAttemptEvents, type LedgerEntry } from './current-attempt.ts';
@@ -104,22 +104,31 @@ function readLedger(path: string, runId: string): LedgerEntry[] {
 }
 
 /**
- * Isolate the latest current-attempt window using the same boundary as
- * status.ts: scan backward for the newest task_started whose agent_run_id
- * matches the current task spec, then ignore everything before it.
+ * Resolve the greatest validated attempt ordinal and isolate only its dispatch
+ * instance (or the bounded legacy window for historical uncorrelated events).
  */
 function currentAttemptSnapshot(
   ledgerPath: string,
   runId: string,
   taskId: string,
-  agentRunId: string,
+  identity?: { agentRunId: string; dispatchInstanceId?: string },
 ): AttemptSnapshot {
   const taskEvents = readLedger(ledgerPath, runId)
     .filter((entry) => entry.task_id === taskId);
-  const { events, startedEntry } = currentAttemptEvents(taskEvents, agentRunId);
-  if (startedEntry === undefined) {
+  const selected = identity
+    ? currentAttemptEvents(taskEvents, identity.agentRunId)
+    : currentAttemptEvents(
+        taskEvents,
+        runId,
+        taskId,
+        readTaskSpec(join(dirname(dirname(dirname(ledgerPath))), 'tasks', `${taskId}.yaml`)).specVersion,
+      );
+  if (selected === undefined || selected.startedEntry === undefined
+    || (identity?.dispatchInstanceId !== undefined
+      && selected.startedEntry.dispatch_instance_id !== identity.dispatchInstanceId)) {
     return { events: [], startedEntry: undefined, terminalEntry: undefined };
   }
+  const { events, startedEntry } = selected;
 
   let terminalEntry: LedgerEntry | undefined;
   for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -154,14 +163,14 @@ async function waitForTerminal(
   ledgerPath: string,
   runId: string,
   taskId: string,
-  agentRunId: string,
+  identity: { agentRunId: string; dispatchInstanceId?: string },
   waitMs: number,
   pollIntervalMs: number,
   sleep: (ms: number) => Promise<void>,
 ): Promise<LedgerEntry | undefined> {
   let elapsed = 0;
   while (true) {
-    const terminal = currentAttemptSnapshot(ledgerPath, runId, taskId, agentRunId).terminalEntry;
+    const terminal = currentAttemptSnapshot(ledgerPath, runId, taskId, identity).terminalEntry;
     if (terminal) return terminal;
     if (elapsed >= waitMs) return undefined;
     const delay = Math.min(pollIntervalMs, waitMs - elapsed);
@@ -199,9 +208,14 @@ export async function cancelTask(
   const root = options.stateRoot ? resolve(cwd, options.stateRoot) : stateRoot();
   const runPath = join(root, 'runs', `run-${runId}`);
   const spec = readTaskSpec(join(runPath, 'tasks', `${taskId}.yaml`));
-  const agentRunId = `${runId}-${taskId}-v${spec.specVersion}`;
+  const baseAgentRunId = `${runId}-${taskId}-v${spec.specVersion}`;
   const ledgerPath = join(runPath, 'authoritative', 'ledger', 'events.jsonl');
-  let snapshot = currentAttemptSnapshot(ledgerPath, runId, taskId, agentRunId);
+  let snapshot = currentAttemptSnapshot(ledgerPath, runId, taskId);
+  const agentRunId = snapshot.startedEntry?.agent_run_id ?? baseAgentRunId;
+  const identity = {
+    agentRunId,
+    dispatchInstanceId: snapshot.startedEntry?.dispatch_instance_id,
+  };
 
   const write = options.write ?? ((text: string) => process.stdout.write(text));
   if (snapshot.terminalEntry) {
@@ -264,7 +278,7 @@ export async function cancelTask(
 
   // Close the race with another cancel invocation or normal worker exit before
   // delivering a signal. The command never mutates the ledger itself.
-  snapshot = currentAttemptSnapshot(ledgerPath, runId, taskId, agentRunId);
+  snapshot = currentAttemptSnapshot(ledgerPath, runId, taskId, identity);
   if (snapshot.terminalEntry) {
     emitTerminal(write, snapshot.terminalEntry);
     return {
@@ -281,7 +295,7 @@ export async function cancelTask(
   try {
     signalProcess(dispatchPid, 'SIGTERM');
   } catch {
-    const terminal = currentAttemptSnapshot(ledgerPath, runId, taskId, agentRunId).terminalEntry;
+    const terminal = currentAttemptSnapshot(ledgerPath, runId, taskId, identity).terminalEntry;
     if (terminal) {
       emitTerminal(write, terminal);
       return {
@@ -299,7 +313,7 @@ export async function cancelTask(
     ledgerPath,
     runId,
     taskId,
-    agentRunId,
+    identity,
     waitSeconds * 1000,
     pollIntervalMs,
     sleep,
@@ -316,7 +330,7 @@ export async function cancelTask(
 
   // Re-read both sources immediately before escalation. If SIGTERM is still
   // completing, a terminal event or a dead PID turns escalation into a no-op.
-  terminal = currentAttemptSnapshot(ledgerPath, runId, taskId, agentRunId).terminalEntry;
+  terminal = currentAttemptSnapshot(ledgerPath, runId, taskId, identity).terminalEntry;
   if (terminal) {
     emitTerminal(write, terminal);
     return {
@@ -331,7 +345,7 @@ export async function cancelTask(
   if (safeProcessAlive(processAlive, dispatchPid)) {
     // One final ledger read narrows the cancel-vs-escalate race without adding
     // any lock or state mutation to this observer-only command.
-    terminal = currentAttemptSnapshot(ledgerPath, runId, taskId, agentRunId).terminalEntry;
+    terminal = currentAttemptSnapshot(ledgerPath, runId, taskId, identity).terminalEntry;
     if (terminal) {
       emitTerminal(write, terminal);
       return {
@@ -356,7 +370,7 @@ export async function cancelTask(
   }
 
   if (killGraceMs > 0) await sleep(killGraceMs);
-  terminal = currentAttemptSnapshot(ledgerPath, runId, taskId, agentRunId).terminalEntry;
+  terminal = currentAttemptSnapshot(ledgerPath, runId, taskId, identity).terminalEntry;
   if (terminal) {
     emitTerminal(write, terminal);
     return {

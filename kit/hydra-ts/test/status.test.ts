@@ -180,7 +180,28 @@ describe('status', () => {
     assert.equal(result.state, 'running');
     assert.equal(result.agent_run_id, `${f.runId}-task-a-v2`);
     assert.equal(result.loop_suspicion, null);
-    assert.deepEqual(result.ledger_events.map(({ event }) => event), ['task_started', 'heartbeat']);
+    assert.deepEqual(result.ledger_events.map(({ event }) => event), ['task_started']);
+  });
+
+  it('selects the greatest validated attempt ordinal and correlates out-of-order events by dispatch instance', () => {
+    const f = fixture(uniqueRunId('ordinal-instance'));
+    const a1 = `${f.runId}-task-a-v1`;
+    const a2 = `${f.runId}-task-a-v1-a2`;
+    writeLedger(f, [
+      { time: '2024-01-01T00:10:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: a2, spec_version: '1', attempt_ordinal: '2', dispatch_instance_id: 'dispatch-b' },
+      { time: '2024-01-01T00:12:00Z', event: 'agent_exited', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: a2, exit_code: '0', dispatch_instance_id: 'dispatch-b' },
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: a1, spec_version: '1', attempt_ordinal: '1', dispatch_instance_id: 'dispatch-a' },
+      { time: '2024-01-01T00:13:00Z', event: 'agent_timed_out', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: a1, dispatch_instance_id: 'dispatch-a' },
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f, {
+      now: () => Date.parse('2024-01-01T00:14:00Z'),
+    }));
+
+    assert.equal(result.agent_run_id, a2);
+    assert.equal(result.state, 'completed');
+    assert.deepEqual(result.ledger_events.map(({ event }) => event), ['task_started', 'agent_exited']);
+    assert.ok(result.ledger_events.every(({ dispatch_instance_id }) => dispatch_instance_id === 'dispatch-b'));
   });
 
   it('reports a completed task when agent_exited is present', () => {

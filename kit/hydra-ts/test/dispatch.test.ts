@@ -16,6 +16,7 @@ import { dirname, join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
+  claimDispatchAttempt,
   dispatch,
   herdrAgentPaneRatio,
   kimiEventText,
@@ -365,6 +366,76 @@ describe('dispatch Bash parity', () => {
     await assert.rejects(dispatch(f.runId, 'task-a', injectedOptions(f, spawn)), /worktree not created yet/);
   });
 
+  it('keeps the first attempt unsuffixed and never fills an artifact gap', () => {
+    const first = fixture(runId());
+    const firstClaim = claimDispatchAttempt(first.runDir, first.runId, 'task-a', '1');
+    assert.equal(firstClaim.agentRunId, `${first.runId}-task-a-v1`);
+    assert.equal(firstClaim.attemptOrdinal, 1);
+
+    const gap = fixture(runId());
+    const inboxRoot = join(gap.runDir, 'inbox');
+    mkdirSync(join(inboxRoot, `${gap.runId}-task-a-v1`), { recursive: true });
+    mkdirSync(join(inboxRoot, `${gap.runId}-task-a-v1-a3`), { recursive: true });
+    const gapClaim = claimDispatchAttempt(gap.runDir, gap.runId, 'task-a', '1');
+    assert.equal(gapClaim.agentRunId, `${gap.runId}-task-a-v1-a4`);
+    assert.equal(gapClaim.attemptOrdinal, 4);
+  });
+
+  it('recovers the maximum attempt from ledger and session evidence with no inbox', () => {
+    const f = fixture(runId());
+    const ledgerPath = join(f.runDir, 'authoritative', 'ledger', 'events.jsonl');
+    mkdirSync(dirname(ledgerPath), { recursive: true });
+    writeFileSync(ledgerPath, `${JSON.stringify({
+      event: 'task_started', run_id: f.runId, task_id: 'task-a',
+      agent_run_id: `${f.runId}-task-a-v1-a2`, spec_version: '1', attempt_ordinal: '2',
+    })}\n`);
+    writeFileSync(join(f.sessionsDir, `${f.runId}-task-a-v1-a3.json`), JSON.stringify({
+      agent_run_id: `${f.runId}-task-a-v1-a3`, session_id: 'prior-session',
+    }));
+
+    const claim = claimDispatchAttempt(f.runDir, f.runId, 'task-a', '1');
+    assert.equal(claim.agentRunId, `${f.runId}-task-a-v1-a4`);
+    assert.equal(claim.attemptOrdinal, 4);
+  });
+
+  it('atomically gives two true cross-process claimants distinct monotonic attempts', async () => {
+    const f = fixture(runId());
+    const dispatchSrc = fileURLToPath(new URL('../src/dispatch.ts', import.meta.url));
+    const helperPath = join(TEST_TMP, `claim-helper-${f.runId}.mjs`);
+    writeFileSync(helperPath, [
+      `import { claimDispatchAttempt } from ${JSON.stringify(pathToFileURL(dispatchSrc).href)};`,
+      'const [runPath, runId, taskId, specVersion] = process.argv.slice(2);',
+      'process.stdout.write(JSON.stringify(claimDispatchAttempt(runPath, runId, taskId, specVersion)));',
+      '',
+    ].join('\n'));
+
+    const launch = (): Promise<string> => new Promise((resolveChild, rejectChild) => {
+      const child = spawn(process.execPath, [
+        '--experimental-strip-types', helperPath, f.runDir, f.runId, 'task-a', '1',
+      ], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      child.stdout?.on('data', (chunk) => { stdout += String(chunk); });
+      child.stderr?.on('data', (chunk) => { stderr += String(chunk); });
+      child.on('error', rejectChild);
+      child.on('exit', (code) => code === 0
+        ? resolveChild(stdout)
+        : rejectChild(new Error(`claim helper exited ${code}: ${stderr}`)));
+    });
+
+    try {
+      const claims = (await Promise.all([launch(), launch()]))
+        .map((raw) => JSON.parse(raw) as { agentRunId: string; attemptOrdinal: number })
+        .sort((a, b) => a.attemptOrdinal - b.attemptOrdinal);
+      assert.deepEqual(claims.map(({ attemptOrdinal }) => attemptOrdinal), [1, 2]);
+      assert.deepEqual(claims.map(({ agentRunId }) => agentRunId), [
+        `${f.runId}-task-a-v1`, `${f.runId}-task-a-v1-a2`,
+      ]);
+    } finally {
+      rmSync(helperPath, { force: true });
+    }
+  });
+
   it('dispatches the selected adapter and closes task_started with agent_exited', async () => {
     const f = fixture(runId(), { specVersion: '03' });
     const mock = fakeSpawn();
@@ -436,6 +507,100 @@ describe('dispatch Bash parity', () => {
     assert.deepEqual(events.map(({ event }) => event), ['task_started', 'agent_exited']);
     assert.equal(events.at(-1)?.exit_code, '1');
     assert.equal(events.at(-1)?.reason, 'claude_api_error');
+  });
+
+  it('clears a sidecar created while queued only after acquiring the worker slot', async () => {
+    const f = fixture(runId());
+    const slotsDir = join(f.runDir, '.slots');
+    mkdirSync(slotsDir, { recursive: true });
+    writeFileSync(join(slotsDir, 'occupied'), '');
+    const clock = new GateClock();
+    const sidecar = join(f.sessionsDir, `${f.runId}-task-a-v1.outcome.json`);
+    const mock = fakeSpawn({ onSpawn: () => {
+      assert.equal(existsSync(sidecar), false, 'queued sidecar must be absent at actual worker start');
+    } });
+    const pending = dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+      background: true,
+      maxConcurrency: 1,
+      clock,
+    }));
+
+    await waitFor(() => ledger(f).some(({ event }) => event === 'concurrency_wait'));
+    writeFileSync(sidecar, JSON.stringify({
+      version: 1, vendor: 'claude', kind: 'terminal_failure',
+      reason: 'stale queued sidecar', rawError: 'must not survive launch',
+    }));
+    rmSync(join(slotsDir, 'occupied'));
+    clock.release();
+    const handle = await pending;
+    await handle.finished;
+
+    assert.equal(mock.calls.length, 1);
+    assert.equal(ledger(f).at(-1)?.event, 'agent_exited');
+    assert.equal(ledger(f).at(-1)?.exit_code, '0');
+  });
+
+  it('treats a fresh Herdr usage_limited sidecar as authoritative', async () => {
+    const f = fixture(runId(), { vendor: 'kimi' });
+    const herdr = new FakeHerdr();
+    herdr.live = true;
+    const cooldownFile = join(f.runDir, 'vendor-cooldowns.json');
+    const clock = new StepClock((_ms, count) => {
+      if (count !== 1) return;
+      const agentRunId = ledger(f)[0].agent_run_id;
+      writeFileSync(join(f.sessionsDir, `${agentRunId}.outcome.json`), JSON.stringify({
+        version: 1, vendor: 'kimi', kind: 'usage_limited',
+        details: {
+          vendor: 'kimi', limitKind: 'quota_exhausted', retryable: false,
+          source: 'structured_event', confidence: 'exact', rawError: 'quota exhausted',
+        },
+      }));
+      writeFileSync(join(f.sessionsDir, `${agentRunId}.exit`), '0');
+    });
+
+    await dispatch(f.runId, 'task-a', injectedOptions(f, () => { throw new Error('plain spawn'); }, {
+      env: { HYDRA_HERDR_PANES: '1' }, herdr, clock, cooldownFile,
+    }));
+
+    assert.deepEqual(ledger(f).map(({ event }) => event), [
+      'task_started', 'herdr_pane_started', 'agent_usage_limited',
+    ]);
+    assert.equal(readFileSync(join(f.sessionsDir, `${ledger(f)[0].agent_run_id}.exit`), 'utf8'), '125');
+  });
+
+  it('fails malformed and mismatched sidecars closed with accurate diagnostics', async () => {
+    for (const testCase of [
+      { content: '{malformed', reason: 'adapter_outcome_malformed' },
+      {
+        content: JSON.stringify({ version: 1, vendor: 'codex', kind: 'success' }),
+        reason: 'adapter_outcome_vendor_mismatch',
+      },
+    ]) {
+      const f = fixture(runId());
+      const mock = fakeSpawn({ onSpawn: () => {
+        const agentRunId = ledger(f)[0].agent_run_id;
+        writeFileSync(join(f.sessionsDir, `${agentRunId}.outcome.json`), testCase.content);
+      } });
+      await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn));
+      assert.equal(ledger(f).at(-1)?.exit_code, '1');
+      assert.equal(ledger(f).at(-1)?.reason, testCase.reason);
+    }
+  });
+
+  it('preserves ordinary success for absent and explicit success sidecars', async () => {
+    for (const explicit of [false, true]) {
+      const f = fixture(runId());
+      const mock = fakeSpawn({ onSpawn: () => {
+        if (!explicit) return;
+        const agentRunId = ledger(f)[0].agent_run_id;
+        writeFileSync(join(f.sessionsDir, `${agentRunId}.outcome.json`), JSON.stringify({
+          version: 1, vendor: 'claude', kind: 'success',
+        }));
+      } });
+      await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn));
+      assert.equal(ledger(f).at(-1)?.event, 'agent_exited');
+      assert.equal(ledger(f).at(-1)?.exit_code, '0');
+    }
   });
 
   it('defaults to the TypeScript adapter when no runtime is configured', async () => {
@@ -1294,11 +1459,12 @@ describe('dispatch Bash parity', () => {
 
   it('records an opencode exit when monitor banner setup fails', async () => {
     const f = fixture(runId(), { vendor: 'opencode' });
-    const expectedId = `${f.runId}-task-a-v1`;
-    mkdirSync(join(f.sessionsDir, `${expectedId}.monitor.txt`));
     const herdr = new FakeHerdr();
     herdr.live = true;
-    const mock = fakeSpawn();
+    const mock = fakeSpawn({ onSpawn: () => {
+      const agentRunId = ledger(f)[0].agent_run_id;
+      mkdirSync(join(f.sessionsDir, `${agentRunId}.monitor.txt`));
+    } });
 
     await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
       env: { HYDRA_HERDR_PANES: '1' },
@@ -1703,9 +1869,13 @@ describe('dispatch Bash parity', () => {
     const exited = fixture(runId(), { vendor: 'codex' });
     const exitedHerdr = new FakeHerdr();
     exitedHerdr.live = true;
-    const exitedId = `${exited.runId}-task-a-v1`;
-    mkdirSync(join(exited.sessionsDir, `${exitedId}.pane-banner.txt`));
-    mkdirSync(join(exited.sessionsDir, `${exitedId}.pane-progress.txt`));
+    let exitedId = '';
+    exitedHerdr.focusedWorkspace = () => {
+      exitedId = ledger(exited)[0].agent_run_id;
+      mkdirSync(join(exited.sessionsDir, `${exitedId}.pane-banner.txt`));
+      mkdirSync(join(exited.sessionsDir, `${exitedId}.pane-progress.txt`));
+      return undefined;
+    };
     const exitClock = new StepClock((_ms, count) => {
       if (count === 1) {
         writeFileSync(join(exited.sessionsDir, `${exitedId}.cli.jsonl`), `${JSON.stringify({
@@ -1729,9 +1899,12 @@ describe('dispatch Bash parity', () => {
     const timedOut = fixture(runId(), { vendor: 'codex', timeoutMinutes: 1 });
     const timedOutHerdr = new FakeHerdr();
     timedOutHerdr.live = true;
-    const timedOutId = `${timedOut.runId}-task-a-v1`;
-    mkdirSync(join(timedOut.sessionsDir, `${timedOutId}.pane-banner.txt`));
-    mkdirSync(join(timedOut.sessionsDir, `${timedOutId}.pane-progress.txt`));
+    timedOutHerdr.focusedWorkspace = () => {
+      const timedOutId = ledger(timedOut)[0].agent_run_id;
+      mkdirSync(join(timedOut.sessionsDir, `${timedOutId}.pane-banner.txt`));
+      mkdirSync(join(timedOut.sessionsDir, `${timedOutId}.pane-progress.txt`));
+      return undefined;
+    };
 
     await dispatch(timedOut.runId, 'task-a', injectedOptions(timedOut, () => { throw new Error('no spawn'); }, {
       env: { HYDRA_HERDR_PANES: '1' },
@@ -1753,6 +1926,8 @@ describe('dispatch Bash parity', () => {
       const events = ledger(f);
       assert.equal(events[0].event, 'task_started');
       assert.match(events[0].dispatch_instance_id, /^[0-9a-f]{16}$/);
+      assert.equal(events[0].spec_version, '1');
+      assert.equal(events[0].attempt_ordinal, '1');
       assert.equal(events.at(-1)?.event, 'agent_exited');
       assert.equal(events.at(-1)?.dispatch_instance_id, events[0].dispatch_instance_id);
     });
@@ -1776,19 +1951,18 @@ describe('dispatch Bash parity', () => {
       assert.equal(existsSync(pidfile), false, 'dispatch pidfile should be removed after completion');
     });
 
-    it('cleans up the temp file when atomic write fails to rename', async () => {
+    it('preserves stale supervisor metadata in the prior attempt namespace', async () => {
       const f = fixture(runId());
       const pidfile = join(f.sessionsDir, 'supervisor', `${f.runId}-task-a-v1.dispatch.pid`);
       mkdirSync(dirname(pidfile), { recursive: true });
-      mkdirSync(pidfile); // destination exists as directory, so rename will fail
+      writeFileSync(pidfile, 'stale-prior-attempt\n');
       const mock = fakeSpawn();
 
-      await assert.rejects(
-        dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { background: true })),
-        /cross-device|ENOTEMPTY|EISDIR|ENAMETOOLONG/i,
-      );
+      const handle = await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn));
 
-      assert.equal(existsSync(`${pidfile}.tmp.${process.pid}`), false, 'temp file should be removed after rename failure');
+      assert.equal(handle.agentRunId, `${f.runId}-task-a-v1-a2`);
+      assert.equal(readFileSync(pidfile, 'utf8'), 'stale-prior-attempt\n');
+      assert.equal(existsSync(`${pidfile}.tmp.${process.pid}`), false);
     });
 
     it('does not let supervisor metadata interfere with the plain-activity timeout', async () => {
@@ -2008,11 +2182,15 @@ describe('dispatch Bash parity', () => {
       return JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } });
     }
 
-    function writeRepeatedFailureCapture(f: Fixture, count = 12, textCount = 8): void {
+    function writeRepeatedFailureCapture(f: Fixture, count = 12, textCount = 8): string {
       const lines: string[] = [];
       for (let i = 0; i < count; i += 1) lines.push(codexCommand('npm test', 1));
       for (let i = 0; i < textCount; i += 1) lines.push(codexText(`msg ${i}`));
-      writeFileSync(join(f.sessionsDir, `${f.runId}-task-a-v1.cli.jsonl`), `${lines.join('\n')}\n`, 'utf8');
+      const agentRunId = ledger(f).find(({ event }) => event === 'task_started')?.agent_run_id;
+      assert.ok(agentRunId);
+      const path = join(f.sessionsDir, `${agentRunId}.cli.jsonl`);
+      writeFileSync(path, `${lines.join('\n')}\n`, 'utf8');
+      return path;
     }
 
     function stableGitExec(): ExecFileSyncLike {
@@ -2047,10 +2225,10 @@ describe('dispatch Bash parity', () => {
 
     it('detects repeated failure, emits suspected then confirmed, and cancels via recorder.cancel()', async () => {
       const f = fixture(runId(), { vendor: 'codex', timeoutMinutes: 30 });
-      writeRepeatedFailureCapture(f);
       const mock = fakeSpawn({ autoExit: false });
-      const capturePath = join(f.sessionsDir, `${f.runId}-task-a-v1.cli.jsonl`);
+      let capturePath = '';
       const clock = new StepClock((_, count) => {
+        if (count === 1) capturePath = writeRepeatedFailureCapture(f);
         // Stage 2 requires ongoing fresh evidence during the confirmation
         // window, not just elapsed wall-clock time. Append fresh matching
         // failures throughout the run so confirmation can fire.
@@ -2077,7 +2255,6 @@ describe('dispatch Bash parity', () => {
 
     it('clears suspicion when the Git signature changes', async () => {
       const f = fixture(runId(), { vendor: 'codex', timeoutMinutes: 30 });
-      writeRepeatedFailureCapture(f);
       const mock = fakeSpawn({ autoExit: false });
       let gitCall = 0;
       const execGit: ExecFileSyncLike = (file, args) => {
@@ -2094,6 +2271,7 @@ describe('dispatch Bash parity', () => {
         return '';
       };
       const clock = new StepClock((_, count) => {
+        if (count === 1) writeRepeatedFailureCapture(f);
         if (count === 13) mock.calls[0]?.child.exit(0);
       });
       const options = injectedOptions(f, mock.spawn, {
@@ -2149,7 +2327,6 @@ describe('dispatch Bash parity', () => {
 
     it('is fully disabled when HYDRA_LOOP_DETECTOR=0', async () => {
       const f = fixture(runId(), { vendor: 'codex', timeoutMinutes: 30 });
-      writeRepeatedFailureCapture(f);
       const mock = fakeSpawn({ autoExit: false });
       let gitCalls = 0;
       const execGit: ExecFileSyncLike = (file) => {
@@ -2157,6 +2334,7 @@ describe('dispatch Bash parity', () => {
         throw new Error(`git should not be called when disabled: ${file}`);
       };
       const clock = new StepClock((_, count) => {
+        if (count === 1) writeRepeatedFailureCapture(f);
         if (count === 8) mock.calls[0]?.child.exit(0);
       });
       const options = injectedOptions(f, mock.spawn, {
@@ -2175,7 +2353,6 @@ describe('dispatch Bash parity', () => {
       const f = fixture(runId(), { vendor: 'codex', timeoutMinutes: 30 });
       const untracked = join(f.worktree, 'untracked.log');
       writeFileSync(untracked, 'first', 'utf8');
-      writeRepeatedFailureCapture(f);
       const mock = fakeSpawn({ autoExit: false });
       let lsCall = 0;
       const execGit: ExecFileSyncLike = (file, args) => {
@@ -2193,6 +2370,7 @@ describe('dispatch Bash parity', () => {
         return '';
       };
       const clock = new StepClock((_, count) => {
+        if (count === 1) writeRepeatedFailureCapture(f);
         if (count === 13) mock.calls[0]?.child.exit(0);
       });
       const options = injectedOptions(f, mock.spawn, {

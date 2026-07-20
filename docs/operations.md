@@ -19,7 +19,7 @@ bash kit/hydra/scripts/dispatch.sh 0042 <task>                 # runs the assign
 bash kit/hydra/scripts/status.sh 0042 <task>                   # one-shot read-only task status
 bash kit/hydra/scripts/cancel-task.sh 0042 <task>              # clean cancellation of a running task
 bash kit/hydra/scripts/promote.sh 0042 <task> \
-     ~/.local/state/<repo>-hydra/runs/run-0042/inbox/0042-<task>-v1/result.json   # THE trust boundary
+     ~/.local/state/<repo>-hydra/runs/run-0042/inbox/<agent_run_id>/result.json # THE trust boundary
 bash kit/hydra/scripts/review-dispatch.sh 0042 <rev> <vendor> <prompt-file>   # cross-vendor review (read-only)
 bash kit/hydra/scripts/record-review.sh 0042 <task> <verdict.json>            # record accept/revise/reject
 bash kit/hydra/scripts/squash.sh 0042 <task>                   # accepted candidates only
@@ -31,6 +31,33 @@ bash kit/hydra/scripts/gc.sh --apply --keep-last 3              # reap ledger-pr
 
 Only `accept` candidates enter `squash`/`integrate`. `revise`/`reject` return to
 the same worktree (amend the spec + re-dispatch).
+
+## Dispatch attempt namespaces
+
+Each invocation claims a durable, unique attempt namespace before writing
+`task_started`. Attempt 1 keeps the compatible
+`<run>-<task>-v<spec_version>` identifier; retries append `-a2`, `-a3`, and so
+on. Allocation is atomic across dispatch processes and monotonic: it takes the
+maximum ordinal evidenced by the authoritative ledger, inbox directories,
+session/supervisor artifacts, and promoted-result content, then exclusively
+creates the next inbox directory. Gaps are never reused. Removing an inbox does
+not reset the sequence when a session, sentinel, pid, progress, outcome, ledger,
+or result artifact still proves that attempt existed.
+
+`task_started` records `spec_version`, `attempt_ordinal`, `agent_run_id`, and
+`dispatch_instance_id` as separate correlation fields. `status.sh` and
+`cancel-task.sh` choose the greatest validated numeric ordinal, then accept
+lifecycle and terminal events only from that dispatch instance. This prevents a
+late exit from an older attempt from completing or cancelling a newer one.
+Historical records without instance IDs retain a bounded append-window fallback.
+
+Adapter outcome sidecars are attempt-scoped under `sessions/`. A sidecar can be
+written while a dispatch waits for a concurrency slot, so the dispatcher clears
+only the newly claimed attempt's sidecar after acquiring the slot and immediately
+before each actual launch (plain, Herdr, or Herdr fallback). A fresh structured
+`usage_limited` result takes precedence over ordinary exit handling; malformed
+or vendor-mismatched sidecars fail closed, while absent or explicit-success
+sidecars preserve the worker exit result.
 
 ## Harness runtime selection
 
@@ -236,8 +263,10 @@ It's recommend-only — a human pins the role.
 - **Slots:** `dispatch.sh` uses a per-run slot dir (`runs/run-<id>/.slots`) capped
   at `HYDRA_MAX_CONCURRENCY`; the slot is acquired unconditionally before a
   dispatch proceeds, so both foreground (blocking) and backgrounded dispatches
-  can wait and emit `concurrency_wait`. There is **no per-task mutex** yet — do
-  not dispatch the same `(run, task)` twice concurrently (open item, roadmap).
+  can wait and emit `concurrency_wait`. Concurrent invocations for the same
+  `(run, task, spec_version)` atomically receive different attempt namespaces;
+  they still share the task worktree, so intentionally overlapping worker edits
+  require the same operator judgment as any other shared-tree activity.
 - **Stale base:** if primary moves mid-run, do not silently rebase candidates.
   Finish against the recorded base; integrate; then update-to-latest as a
   separate re-verified step (architecture §8).
