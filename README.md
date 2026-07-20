@@ -1,6 +1,6 @@
 # Hydra-Swarm
 
-**v0.6.8** · A local multi-agent development harness. A lead (Claude Code)
+**v0.6.8.1** · A local multi-agent development harness. A lead (Claude Code)
 plans, dispatches, and judges; a deterministic harness owns state, process
 launch, and verification. Four vendor heads — **Claude**, **Codex**,
 **OpenCode/GLM**, and **Kimi** — implement tasks in isolated Git worktrees.

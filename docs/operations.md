@@ -116,6 +116,7 @@ normal operation.
 | `HYDRA_LOOP_DETECTOR` | Loop-thinking detector. Enabled by default (`1` or unset); set to `0` to disable for a task/session where false positives are expected (e.g., legitimately long silent reasoning phases). |
 | `HYDRA_HERDR_PANES` | Host each worker/reviewer in a herdr pane (Layer-1 live monitor). Enabled by default (`1` or unset) when herdr is live; set to `0` to force headless subprocess hosting. |
 | `HYDRA_HERDR_KEEP_PANE=1` | Don't auto-close panes on completion (for inspection). |
+| `HYDRA_HERDR_PANE_RATIO` | Height ratio for spawned agent/reviewer panes (default `0.25`) — the lead console keeps the majority of the terminal. Applies to worker, reviewer, and monitor panes (v0.6.8.1). |
 | `HYDRA_REVIEW_TIMEOUT_MIN` | Harness timeout for a pane-hosted review (default 15). |
 | `HYDRA_OPENCODE_MODEL` | e.g. `zai-coding-plan/glm-5.2` (the working id; NOT `zhipu/…`). |
 | `MOONSHOT_API_KEY` / `ANTHROPIC_API_KEY` | Graphify semantic pass (`graphify-baseline.sh`). |
@@ -226,6 +227,7 @@ It's recommend-only — a human pins the role.
 | Codex: `Reading additional input from stdin...` (hang) | non-TTY stdin | adapters close stdin (`</dev/null`) |
 | Codex/Kimi can't `git commit` in-sandbox | linked worktree's `.git` is in the git-common-dir, outside the worktree | adapters add the git-common-dir to writable roots (resolved via `pwd -P`) |
 | A running task needs to be cancelled | Operator needs to stop a dispatched worker | Use `bash kit/hydra/scripts/cancel-task.sh <run> <task>`. This is the only supported clean cancellation path. Never `kill -9` a dispatch process directly: it bypasses the clean path and can leave a dangling `running` ledger entry. |
+| Dispatch refuses to start: vendor in usage-limit cooldown | A prior dispatch hit the vendor's usage/quota limit (`agent_usage_limited` terminal state, detected from the vendor SDK's own error stream — v0.6.8.1) | Wait out the cooldown or re-pin the task to another head. The machine-global cooldown registry (`~/.local/state/hydra/`) is consulted before every dispatch; hydra never auto-reroutes or auto-retries — humans re-pin. |
 
 ## Concurrent runs
 

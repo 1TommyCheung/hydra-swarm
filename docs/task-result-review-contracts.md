@@ -29,7 +29,7 @@ max_cost_usd: 3.00
 
 ### 1.1 Amendment protocol
 
-Amended specs supersede by version (`spec_version: 2`, `supersedes: v1`, `amendment_reason`, `delivered_via: resume|restart`). Every amendment is a ledger event. Gates evaluate only the latest version; results claiming an older version are stale and rejected at promotion.
+Amended specs supersede by version (`spec_version: 2`, `supersedes: v1`, `amendment_reason`, `delivered_via: resume|restart`). Every amendment is a ledger event. Gates evaluate only the latest version; results claiming an older version are stale and rejected at promotion. An amendment may also carry an optional `amendment_check` list of shell assertions (v0.6.8.1): these are rendered as a mandatory verification block in the worker prompt, so a revise round cannot be satisfied by "the pre-existing tests still pass" alone. `amend-task` accepts `@file` for both `amendment_reason` and `amendment_check`, and a hand-edited reason in the spec is never silently overwritten by a shorter CLI argument.
 
 ## 2. Result contract
 

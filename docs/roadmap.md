@@ -3,7 +3,7 @@
 > **Dev notes:** vendor design/review/spike artifacts referenced below (`bun-migration-*`, `*-design-*`, `*-review-*`, `license-research-*`, `doc-audit-*`) live in the machine-local, gitignored `docs/dev-notes/` — production users do not need them; recover from git history pre-split if absent.
 
 
-**Status:** v0.6.8 (2026-07-19). Waves 0–2 delivered; the post-Wave-2
+**Status:** v0.6.8.1 (2026-07-20). Waves 0–2 delivered; the post-Wave-2
 hardening (Bun single-binary migration, bash lane retirement, head
 auto-detection, GitHub Releases binary distribution, and the `hydra gc` +
 `hydra run-log` worktree-lifecycle pair) shipped across the 0.6.x–0.6.x
@@ -380,6 +380,27 @@ document-then-delete design.
   them; pre-split copies remain recoverable from git history. Official docs,
   run audit logs (`docs/hydra-dev-logs/`), and operator guidance stay
   tracked.
+
+### Observability & dispatch hardening (v0.6.8.1) · 2026-07-19
+
+Runs 0051–0055, closing issues #18–#23 — fixes only, no new features (first
+release under the four-segment fix-versioning policy):
+
+- **No blank panes** (#18): review-lane live tails cover all vendors (Claude
+  heartbeats when it can't stream); agent panes shrink via
+  `HYDRA_HERDR_PANE_RATIO` (default 0.25) so the lead console stays largest.
+- **Workspace-pinned panes** (#19): the lead's workspace is captured once per
+  run (atomic exclusive-create lock) — switching macOS Spaces mid-run no
+  longer redirects pane placement.
+- **Resume fidelity** (#20): louder cold-restart fallback warning; real Kimi
+  session resume via `-S` (`COMPILED_ADAPTERS.kimi.resume: true`).
+- **Amendment fidelity** (#21, #23): hand-edited `amendment_reason` preserved;
+  `@file` accepted for reason/check; optional `amendment_check` shell
+  assertions rendered as a mandatory verification block in the worker prompt.
+- **Vendor usage-limit detection** (new, motivated by a live OpenCode/GLM
+  provider outage): `agent_usage_limited` terminal ledger state, an
+  SDK-error-gated detector, and a machine-global cooldown registry consulted
+  before dispatch — no auto-reroute, no auto-retry, by design.
 
 ### Wave 3 preflight tooling — first real artifact · 2026-07-13
 
