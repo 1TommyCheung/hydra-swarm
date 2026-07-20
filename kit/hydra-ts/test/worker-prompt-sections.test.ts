@@ -3,7 +3,15 @@ import assert from 'node:assert/strict';
 import {
   renderAmendmentSections,
   MAX_FINDING_VALUE_CHARS,
+  MAX_FINDING_ID_CHARS,
+  MAX_FINDING_FIELD_CHARS,
+  MAX_FINDING_INDEX_CHARS,
+  MAX_REVIEWER_CHARS,
+  MAX_REVIEWER_VENDOR_CHARS,
+  MAX_VERDICT_CHARS,
+  MAX_VERDICT_REF_CHARS,
   MAX_UNTRUSTED_BODY_CHARS,
+  TRUSTED_TRUNCATION_NOTICE,
   type ResolvedVerdict,
 } from '../src/worker-prompt-sections.ts';
 
@@ -703,5 +711,279 @@ describe('renderAmendmentSections — total value serializer', () => {
   it('serializes ordinary non-string values as JSON', () => {
     const result = renderAmendmentSections({ evidence: [verdictWith({ a: 1 })] });
     assert.ok(extractContained(result.evidence).includes('{"a":1}'));
+  });
+});
+
+describe('renderAmendmentSections — incremental budget hardening', () => {
+  it('truthfully marks every tiny object/array value fallback from cap 1 through 21', () => {
+    const token = 'REVIEWER_SECRET_TOKEN';
+    const probe = renderAmendmentSections({ evidence: [verdictWith('VALUE_START')] });
+    const probeFence = openingFence(probe.evidence);
+    const probeContained = extractContained(probe.evidence);
+    const probeBody = probeContained.slice(probeFence.length + 2, -(probeFence.length + 2));
+    const valueStart = probeBody.indexOf('VALUE_START');
+    assert.ok(valueStart > 0);
+
+    const values: Array<[string, unknown]> = [
+      ['object', { alpha: token.repeat(20) }],
+      ['array', [token.repeat(20)]],
+    ];
+    for (const [kind, value] of values) {
+      for (let cap = 1; cap <= 21; cap += 1) {
+        const result = renderAmendmentSections(
+          { evidence: [verdictWith(value)] },
+          { maxUntrustedBodyChars: valueStart + cap },
+        );
+        const fence = openingFence(result.evidence);
+        const contained = extractContained(result.evidence);
+        const body = contained.slice(fence.length + 2, -(fence.length + 2));
+        const representation = body.slice(valueStart);
+        const label = `${kind} cap ${cap}`;
+
+        assert.ok(representation.length <= cap, `${label}: representation exceeded cap`);
+        assert.ok(!representation.includes('x'), `${label}: representation fabricated x`);
+        assert.equal(result.truncation.truncated, true, `${label}: metadata hid truncation`);
+        assert.ok(
+          result.truncation.events.some((event) => event.scope === 'finding-value'),
+          `${label}: finding-value truncation event missing`,
+        );
+        const trustedTail = afterEndMarker(result.evidence);
+        assert.ok(trustedTail.includes(TRUSTED_TRUNCATION_NOTICE), `${label}: notice missing`);
+        assert.ok(!trustedTail.includes(token), `${label}: reviewer data escaped into notice`);
+      }
+    }
+  });
+
+  it('caps every emitted untrusted field, including caps shorter than explanatory markers', () => {
+    const huge = 'X'.repeat(100_000);
+    const verdict = baseVerdict();
+    verdict.ref = huge;
+    verdict.reviewer = huge;
+    verdict.reviewerVendor = huge;
+    verdict.verdict = huge;
+    verdict.findings = [{ id: huge, field: huge, index: Number.MAX_VALUE, value: huge }];
+    const result = renderAmendmentSections({ evidence: [verdict] });
+    const body = extractContained(result.evidence);
+    const header = body.match(/### Verdict (.*) — (.*) \((.*)\): (.*)\n/);
+    assert.ok(header);
+    assert.ok(header[1]!.length <= MAX_VERDICT_REF_CHARS);
+    assert.ok(header[2]!.length <= MAX_REVIEWER_CHARS);
+    assert.ok(header[3]!.length <= MAX_REVIEWER_VENDOR_CHARS);
+    assert.ok(header[4]!.length <= MAX_VERDICT_CHARS);
+    const finding = body.match(/  - finding (.*) \(field=(.*), index=(.*)\): ([^\n]*)/);
+    assert.ok(finding);
+    assert.ok(finding[1]!.length <= MAX_FINDING_ID_CHARS);
+    assert.ok(finding[2]!.length <= MAX_FINDING_FIELD_CHARS);
+    assert.ok(finding[3]!.length <= MAX_FINDING_INDEX_CHARS);
+    assert.ok(finding[4]!.length <= MAX_FINDING_VALUE_CHARS);
+    assert.equal(result.truncation.truncated, true);
+  });
+
+  it('does not read a verdict element when its fixed syntax cannot fit', () => {
+    let reads = 0;
+    const evidence = new Proxy([baseVerdict()], {
+      get(target, property, receiver) {
+        if (property === '0') reads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const result = renderAmendmentSections(
+      { evidence },
+      { maxUntrustedBodyChars: 1 },
+    );
+    assert.equal(reads, 0);
+    assert.equal(result.truncation.omittedVerdicts, 1);
+    assert.equal(result.truncation.usedBudget, 0);
+    assert.ok(result.evidence.includes(TRUSTED_TRUNCATION_NOTICE));
+    assert.ok(afterEndMarker(result.evidence).includes(TRUSTED_TRUNCATION_NOTICE));
+  });
+
+  it('fails closed with fixed metadata when an array length getter throws', () => {
+    const evidence = new Proxy([] as ResolvedVerdict[], {
+      get(_target, property) {
+        if (property === 'length') throw new Error('hostile length');
+        return undefined;
+      },
+    });
+    const result = renderAmendmentSections({ evidence });
+    assert.equal(result.truncation.truncated, true);
+    assert.deepEqual(result.truncation.events, [{ scope: 'verdict', reason: 'access-failed' }]);
+    assert.ok(afterEndMarker(result.evidence).includes(TRUSTED_TRUNCATION_NOTICE));
+  });
+
+  it('does not read findings when a capped header exactly consumes the body budget', () => {
+    let findingReads = 0;
+    const verdict = baseVerdict();
+    Object.defineProperty(verdict, 'findings', {
+      get() {
+        findingReads += 1;
+        throw new Error('findings must be unreachable');
+      },
+    });
+    const probe = renderAmendmentSections({ evidence: [{ ...baseVerdict(), findings: [] }] });
+    const probeBody = extractContained(probe.evidence);
+    const fence = openingFence(probe.evidence);
+    const body = probeBody.slice(fence.length + 2, -(fence.length + 2));
+    const headerLength = body.indexOf('\n') + 1;
+    const result = renderAmendmentSections(
+      { evidence: [verdict] },
+      { maxUntrustedBodyChars: headerLength },
+    );
+    assert.equal(findingReads, 0);
+    assert.equal(result.truncation.renderedVerdicts, 1);
+    assert.equal(result.truncation.truncated, true);
+    assert.ok(result.truncation.events.some((event) => event.scope === 'findings'));
+    assert.ok(afterEndMarker(result.evidence).includes(TRUSTED_TRUNCATION_NOTICE));
+  });
+
+  it('marks an empty findings placeholder omitted when it cannot fit', () => {
+    const verdict = { ...baseVerdict(), findings: [] };
+    const full = renderAmendmentSections({ evidence: [verdict] });
+    const fullBody = extractContained(full.evidence);
+    const fence = openingFence(full.evidence);
+    const body = fullBody.slice(fence.length + 2, -(fence.length + 2));
+    const budget = body.length - '  (no findings)'.length;
+    const result = renderAmendmentSections(
+      { evidence: [verdict] },
+      { maxUntrustedBodyChars: budget },
+    );
+    assert.equal(result.truncation.truncated, true);
+    assert.ok(result.truncation.events.some((event) => event.scope === 'findings'));
+  });
+
+  it('reports an exact no-findings boundary as complete and truthful', () => {
+    const verdict = { ...baseVerdict(), findings: [] };
+    const full = renderAmendmentSections({ evidence: [verdict] });
+    const fullBody = extractContained(full.evidence);
+    const fence = openingFence(full.evidence);
+    const body = fullBody.slice(fence.length + 2, -(fence.length + 2));
+    const exact = renderAmendmentSections(
+      { evidence: [verdict] },
+      { maxUntrustedBodyChars: body.length },
+    );
+    assert.equal(exact.truncation.usedBudget, body.length);
+    assert.equal(exact.truncation.truncated, false);
+    assert.equal(exact.truncation.omittedVerdicts, 0);
+    assert.ok(!exact.evidence.includes(TRUSTED_TRUNCATION_NOTICE));
+  });
+
+  it('does not read a finding value when its fixed prefix exactly consumes the budget', () => {
+    let valueReads = 0;
+    const finding = { id: 'f1', field: 'summary', index: 0 } as ResolvedVerdict['findings'][number];
+    Object.defineProperty(finding, 'value', {
+      get() {
+        valueReads += 1;
+        throw new Error('value must be unreachable');
+      },
+    });
+    const probeVerdict = baseVerdict();
+    probeVerdict.findings = [{ id: 'f1', field: 'summary', index: 0, value: 'UNIQUE_VALUE' }];
+    const probe = renderAmendmentSections({ evidence: [probeVerdict] });
+    const fence = openingFence(probe.evidence);
+    const contained = extractContained(probe.evidence);
+    const body = contained.slice(fence.length + 2, -(fence.length + 2));
+    const valueStart = body.indexOf('UNIQUE_VALUE');
+    assert.ok(valueStart > 0);
+    const verdict = baseVerdict();
+    verdict.findings = [finding];
+    const result = renderAmendmentSections(
+      { evidence: [verdict] },
+      { maxUntrustedBodyChars: valueStart },
+    );
+    assert.equal(valueReads, 0);
+    assert.equal(result.truncation.renderedFindings, 0);
+    assert.equal(result.truncation.omittedFindings, 1);
+  });
+
+  it('never calls hostile toJSON, whether its field is reachable or not', () => {
+    let calls = 0;
+    const value = {
+      toJSON() {
+        calls += 1;
+        return 'Z'.repeat(2_000_000);
+      },
+      safe: 1,
+    };
+    const reachable = renderAmendmentSections({ evidence: [verdictWith(value)] });
+    assert.equal(calls, 0);
+    assert.match(reachable.evidence, /"safe":1/);
+
+    const unreachable = renderAmendmentSections(
+      { evidence: [verdictWith(value)] },
+      { maxUntrustedBodyChars: 1 },
+    );
+    assert.equal(calls, 0);
+    assert.equal(unreachable.truncation.renderedFindings, 0);
+  });
+
+  it('stops enormous lazy arrays without touching later elements or allocating from them', () => {
+    let laterVerdictRead = false;
+    const evidence = new Proxy([baseVerdict()], {
+      get(target, property, receiver) {
+        if (property === 'length') return 1_000_000_000;
+        if (property !== '0' && typeof property === 'string' && /^\d+$/.test(property)) {
+          laterVerdictRead = true;
+          throw new Error('later verdict must not be read');
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const result = renderAmendmentSections(
+      { evidence },
+      { maxUntrustedBodyChars: 80 },
+    );
+    assert.equal(laterVerdictRead, false);
+    assert.equal(result.truncation.configuredBudget, 80);
+    assert.equal(result.truncation.omittedVerdicts, 999_999_999);
+    assert.ok(result.truncation.usedBudget <= 80);
+  });
+
+  it('stops an enormous findings array before reading an unreachable later element', () => {
+    let laterFindingRead = false;
+    const first = { id: 'f0', field: 'summary', index: 0, value: 'A'.repeat(1000) };
+    const findings = new Proxy([first], {
+      get(target, property, receiver) {
+        if (property === 'length') return 1_000_000_000;
+        if (property !== '0' && typeof property === 'string' && /^\d+$/.test(property)) {
+          laterFindingRead = true;
+          throw new Error('later finding must not be read');
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const verdict = baseVerdict();
+    verdict.findings = findings;
+    const result = renderAmendmentSections(
+      { evidence: [verdict] },
+      { maxUntrustedBodyChars: 256 },
+    );
+    assert.equal(laterFindingRead, false);
+    assert.equal(result.truncation.omittedFindings, 999_999_999);
+  });
+
+  it('never splits a surrogate pair at a hard field cap', () => {
+    const verdict = baseVerdict();
+    verdict.ref = `${'A'.repeat(MAX_VERDICT_REF_CHARS - 1)}😀`;
+    const result = renderAmendmentSections({ evidence: [verdict] });
+    const header = extractContained(result.evidence).match(/### Verdict (.*) —/);
+    assert.ok(header);
+    const emitted = header[1]!;
+    assert.ok(emitted.length <= MAX_VERDICT_REF_CHARS);
+    const last = emitted.charCodeAt(emitted.length - 1);
+    assert.ok(last < 0xd800 || last > 0xdbff, 'emitted field must not end in a high surrogate');
+  });
+
+  it('keeps truncation metadata and the outside-fence notice reviewer-data-free', () => {
+    const token = 'REVIEWER_SECRET_TOKEN';
+    const verdict = baseVerdict();
+    verdict.reviewer = token.repeat(1000);
+    const result = renderAmendmentSections(
+      { evidence: [verdict] },
+      { maxUntrustedBodyChars: 64 },
+    );
+    assert.ok(!JSON.stringify(result.truncation).includes(token));
+    assert.ok(!afterEndMarker(result.evidence).includes(token));
+    assert.equal(result.truncation.configuredBudget, 64);
+    assert.ok(result.truncation.usedBudget <= 64);
   });
 });
