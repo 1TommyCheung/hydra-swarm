@@ -1,8 +1,9 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isCompiledBinary, kitAssetText } from './kit-assets.ts';
 import { die, ledgerAppend, log, repoRoot, runDir, warn } from './lib.ts';
+import { assertGitObjectId, publishVerdict } from './review-store.ts';
 
 // ---------------------------------------------------------------------------
 // Record a branch-review verdict.
@@ -99,16 +100,12 @@ function validate(node: unknown, sch: SchemaNode | null | undefined, path: strin
   }
 }
 
-function validateVerdict(verdictPath: string, schema: SchemaNode): string[] {
-  let instance: unknown;
+function parseVerdict(verdictPath: string, verdictBytes: Buffer): { instance: unknown; errors: string[] } {
   try {
-    instance = JSON.parse(readFileSync(verdictPath, 'utf8'));
+    return { instance: JSON.parse(verdictBytes.toString('utf8')), errors: [] };
   } catch (e) {
-    return [`${verdictPath}: invalid JSON: ${(e as Error).message}`];
+    return { instance: undefined, errors: [`${verdictPath}: invalid JSON: ${(e as Error).message}`] };
   }
-  const errors: string[] = [];
-  validate(instance, schema, '$', errors);
-  return errors;
 }
 
 function withStateRoot<T>(stateRootOverride: string | undefined, fn: () => T): T {
@@ -123,21 +120,36 @@ function withStateRoot<T>(stateRootOverride: string | undefined, fn: () => T): T
   }
 }
 
-function rejectReview(runId: string, taskId: string, errors: string[]): never {
-  const detail = errors.slice(0, 2).join(';');
+function rejectReview(runId: string, taskId: string, reason: string, message: string, detail: string): never {
   ledgerAppend(
     runId,
     'review_rejected',
     'task_id',
     taskId,
     'reason',
-    'schema_invalid',
+    reason,
     'detail',
     detail,
   );
-  const message = `review verdict rejected (schema): ${errors.join('; ')}`;
   warn(message);
   throw new RecordReviewError(message);
+}
+
+function rejectSchemaInvalid(runId: string, taskId: string, errors: string[]): never {
+  const detail = errors.slice(0, 2).join(';');
+  const message = `review verdict rejected (schema): ${errors.join('; ')}`;
+  return rejectReview(runId, taskId, 'schema_invalid', message, detail);
+}
+
+function rejectTaskIdMismatch(runId: string, taskId: string, bodyTaskId: string): never {
+  const detail = `verdict body task_id '${bodyTaskId}' does not match target task '${taskId}'`;
+  const message = `review verdict rejected (task_id_mismatch): ${detail}`;
+  return rejectReview(runId, taskId, 'task_id_mismatch', message, detail);
+}
+
+function rejectInvalidReviewedHead(runId: string, taskId: string, detail: string): never {
+  const message = `review verdict rejected (reviewed_head): ${detail}`;
+  return rejectReview(runId, taskId, 'invalid_reviewed_head', message, detail);
 }
 
 /**
@@ -177,19 +189,36 @@ export function recordReview(
         ? JSON.parse(readFileSync(options.schemaPath, 'utf8')) as SchemaNode
         : JSON.parse(defaultSchemaText()) as SchemaNode;
     } catch (e) {
-      rejectReview(runId, taskId, [`cannot read/parse schema: ${(e as Error).message}`]);
+      rejectSchemaInvalid(runId, taskId, [`cannot read/parse schema: ${(e as Error).message}`]);
     }
 
-    const errors = validateVerdict(verdictPath, schema);
+    const verdictBytes = readFileSync(verdictPath);
+    const { instance, errors: parseErrors } = parseVerdict(verdictPath, verdictBytes);
+    if (parseErrors.length) {
+      rejectSchemaInvalid(runId, taskId, parseErrors);
+    }
+
+    const errors: string[] = [];
+    validate(instance, schema, '$', errors);
     if (errors.length) {
-      rejectReview(runId, taskId, errors);
+      rejectSchemaInvalid(runId, taskId, errors);
     }
 
-    const out = join(runDir(runId), 'authoritative', 'reviews', `${taskId}.json`);
-    mkdirSync(dirname(out), { recursive: true });
-    copyFileSync(verdictPath, out);
+    const verdictObj = instance as Record<string, unknown>;
+    const bodyTaskId = String(verdictObj.task_id ?? '');
+    if (bodyTaskId !== taskId) {
+      rejectTaskIdMismatch(runId, taskId, bodyTaskId);
+    }
 
-    const verdictObj = JSON.parse(readFileSync(out, 'utf8')) as Record<string, unknown>;
+    const reviewedHead = String(verdictObj.reviewed_head ?? '');
+    try {
+      assertGitObjectId(reviewedHead, 'reviewed_head');
+    } catch (e) {
+      rejectInvalidReviewedHead(runId, taskId, (e as Error).message);
+    }
+
+    const published = publishVerdict(runDir(runId), taskId, verdictBytes, reviewedHead);
+
     const v = String(verdictObj.verdict ?? '');
     const reviewer = String(verdictObj.reviewer ?? 'unknown');
     const risk = String(verdictObj.risk ?? 'unknown');
@@ -205,11 +234,17 @@ export function recordReview(
       reviewer,
       'risk',
       risk,
+      'reviewed_head',
+      reviewedHead,
+      'seq',
+      String(published.seq),
+      'content_sha256',
+      published.sha256,
     );
 
     log(`review recorded [${taskId}]: ${v} (reviewer=${reviewer} risk=${risk})`);
-    process.stdout.write(`${out}\n`);
-    return out;
+    process.stdout.write(`${published.path}\n`);
+    return published.path;
   });
 }
 

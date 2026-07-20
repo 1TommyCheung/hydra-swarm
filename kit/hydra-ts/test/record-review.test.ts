@@ -13,6 +13,8 @@ import { join } from 'node:path';
 import { RecordReviewError, recordReview } from '../src/record-review.ts';
 
 const TEST_TMP = join(import.meta.dirname, 'tmp-record-review');
+const BASE_HEAD = 'a'.repeat(40);
+const REVIEWED_HEAD = 'b'.repeat(40);
 
 function cleanTmp(): void {
   if (existsSync(TEST_TMP)) {
@@ -51,8 +53,23 @@ function ledgerPath(stateRoot: string, runId: string): string {
   return join(stateRoot, 'runs', `run-${runId}`, 'authoritative', 'ledger', 'events.jsonl');
 }
 
-function reviewPath(stateRoot: string, runId: string, taskId: string): string {
-  return join(stateRoot, 'runs', `run-${runId}`, 'authoritative', 'reviews', `${taskId}.json`);
+function reviewPath(
+  stateRoot: string,
+  runId: string,
+  taskId: string,
+  seq: number,
+  reviewedHead: string,
+): string {
+  const paddedSeq = String(seq).padStart(4, '0');
+  return join(
+    stateRoot,
+    'runs',
+    `run-${runId}`,
+    'authoritative',
+    'reviews',
+    taskId,
+    `${paddedSeq}-${reviewedHead}.json`,
+  );
 }
 
 function captureStdout<T>(fn: () => T): { output: string; result: T } {
@@ -78,8 +95,8 @@ describe('recordReview', () => {
   const validVerdict = {
     task_id: 'task-a',
     verdict: 'accept',
-    reviewed_base: 'abc123',
-    reviewed_head: 'def456',
+    reviewed_base: BASE_HEAD,
+    reviewed_head: REVIEWED_HEAD,
     reviewer: 'claude',
     risk: 'low',
   };
@@ -108,7 +125,7 @@ describe('recordReview', () => {
       recordReview('run-ok', 'task-a', verdictPath, { stateRoot }),
     );
 
-    const expectedPath = reviewPath(stateRoot, 'run-ok', 'task-a');
+    const expectedPath = reviewPath(stateRoot, 'run-ok', 'task-a', 1, REVIEWED_HEAD);
     assert.equal(result, expectedPath);
     assert.equal(existsSync(result), true);
     assert.equal(output, `${expectedPath}\n`);
@@ -122,7 +139,82 @@ describe('recordReview', () => {
     assert.equal(ledger[0].verdict, 'accept');
     assert.equal(ledger[0].reviewer, 'claude');
     assert.equal(ledger[0].risk, 'low');
+    assert.equal(ledger[0].reviewed_head, REVIEWED_HEAD);
+    assert.equal(ledger[0].seq, '1');
+    assert.match(String(ledger[0].content_sha256), /^[0-9a-f]{64}$/);
     assert.match(String(ledger[0].time), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+  });
+
+  it('appends a second verdict for the same task without destroying the first', () => {
+    const stateRoot = makeStateRoot();
+    createRun(stateRoot, 'run-append');
+    const firstVerdictPath = writeVerdict(validVerdict);
+
+    const first = recordReview('run-append', 'task-a', firstVerdictPath, { stateRoot });
+
+    const secondHead = 'c'.repeat(40);
+    const secondVerdictPath = writeVerdict({
+      ...validVerdict,
+      reviewed_head: secondHead,
+      verdict: 'revise',
+    });
+    const second = recordReview('run-append', 'task-a', secondVerdictPath, { stateRoot });
+
+    assert.notEqual(first, second);
+    assert.equal(existsSync(first), true, 'first verdict must not be overwritten');
+    assert.equal(existsSync(second), true);
+    assert.equal(first, reviewPath(stateRoot, 'run-append', 'task-a', 1, REVIEWED_HEAD));
+    assert.equal(second, reviewPath(stateRoot, 'run-append', 'task-a', 2, secondHead));
+    assert.deepEqual(JSON.parse(readFileSync(first, 'utf8')).verdict, 'accept');
+    assert.deepEqual(JSON.parse(readFileSync(second, 'utf8')).verdict, 'revise');
+
+    const ledger = readJsonl(ledgerPath(stateRoot, 'run-append'));
+    assert.equal(ledger.length, 2);
+    assert.equal(ledger[0].seq, '1');
+    assert.equal(ledger[1].seq, '2');
+    assert.equal(ledger[1].reviewed_head, secondHead);
+  });
+
+  it('rejects a verdict whose body task_id does not match the recording target', () => {
+    const stateRoot = makeStateRoot();
+    createRun(stateRoot, 'run-mismatch');
+    const verdictPath = writeVerdict({ ...validVerdict, task_id: 'task-other' });
+
+    assert.throws(
+      () => recordReview('run-mismatch', 'task-a', verdictPath, { stateRoot }),
+      (error: unknown) =>
+        error instanceof RecordReviewError &&
+        error.exitCode === 5 &&
+        /review verdict rejected \(task_id_mismatch\)/.test(error.message),
+    );
+
+    const ledger = readJsonl(ledgerPath(stateRoot, 'run-mismatch'));
+    assert.equal(ledger.length, 1);
+    assert.equal(ledger[0].event, 'review_rejected');
+    assert.equal(ledger[0].reason, 'task_id_mismatch');
+  });
+
+  it('rejects a reviewed_head that is not 40-char hex, before any path is constructed', () => {
+    const stateRoot = makeStateRoot();
+    createRun(stateRoot, 'run-bad-head');
+    const verdictPath = writeVerdict({ ...validVerdict, task_id: 'task-x', reviewed_head: '../escape' });
+
+    assert.throws(
+      () => recordReview('run-bad-head', 'task-x', verdictPath, { stateRoot }),
+      (error: unknown) =>
+        error instanceof RecordReviewError &&
+        error.exitCode === 5 &&
+        /review verdict rejected \(reviewed_head\)/.test(error.message),
+    );
+
+    const ledger = readJsonl(ledgerPath(stateRoot, 'run-bad-head'));
+    assert.equal(ledger.length, 1);
+    assert.equal(ledger[0].event, 'review_rejected');
+    assert.equal(ledger[0].reason, 'invalid_reviewed_head');
+    assert.equal(
+      existsSync(join(stateRoot, 'runs', 'run-run-bad-head', 'authoritative', 'reviews', 'task-x')),
+      false,
+    );
   });
 
   it('defaults reviewer and risk to unknown when the schema permits absence', () => {
@@ -148,8 +240,8 @@ describe('recordReview', () => {
     const verdictPath = writeVerdict({
       task_id: 'task-b',
       verdict: 'revise',
-      reviewed_base: 'abc123',
-      reviewed_head: 'def456',
+      reviewed_base: BASE_HEAD,
+      reviewed_head: REVIEWED_HEAD,
     });
 
     recordReview('run-defaults', 'task-b', verdictPath, { stateRoot, schemaPath });
@@ -225,13 +317,13 @@ describe('recordReview', () => {
   it('honours the stateRoot option', () => {
     const stateRoot = makeStateRoot();
     createRun(stateRoot, 'opt');
-    const verdictPath = writeVerdict(validVerdict);
+    const verdictPath = writeVerdict({ ...validVerdict, task_id: 'task-opt' });
 
     const { result } = captureStdout(() =>
       recordReview('opt', 'task-opt', verdictPath, { stateRoot }),
     );
 
-    assert.equal(result, reviewPath(stateRoot, 'opt', 'task-opt'));
+    assert.equal(result, reviewPath(stateRoot, 'opt', 'task-opt', 1, REVIEWED_HEAD));
     assert.equal(existsSync(result), true);
   });
 
@@ -269,8 +361,8 @@ describe('recordReview', () => {
       ]);
 
       assert.deepEqual(result, [
-        reviewPath(firstRoot, 'concurrent-a', 'task-concurrent-a'),
-        reviewPath(secondRoot, 'concurrent-b', 'task-concurrent-b'),
+        reviewPath(firstRoot, 'concurrent-a', 'task-concurrent-a', 1, REVIEWED_HEAD),
+        reviewPath(secondRoot, 'concurrent-b', 'task-concurrent-b', 1, REVIEWED_HEAD),
       ]);
       assert.equal(
         readJsonl(ledgerPath(firstRoot, 'concurrent-a'))[0].task_id,
@@ -303,7 +395,11 @@ describe('recordReview', () => {
       }),
       'utf8',
     );
-    const verdictPath = writeVerdict({ task_id: 'task-schema', verdict: 'accept' });
+    const verdictPath = writeVerdict({
+      task_id: 'task-schema',
+      verdict: 'accept',
+      reviewed_head: REVIEWED_HEAD,
+    });
 
     const { result } = captureStdout(() =>
       recordReview('run-schema', 'task-schema', verdictPath, { stateRoot, schemaPath }),
@@ -343,8 +439,8 @@ describe('recordReview', () => {
     const verdictPath = join(TEST_TMP, `${uniqueName('verdict-bytes')}.json`);
     const verdictBytes = Buffer.concat([
       Buffer.from(
-        '{"task_id":"task-bytes","verdict":"accept","reviewed_base":"abc123",' +
-          '"reviewed_head":"def456","reviewer":"',
+        `{"task_id":"task-bytes","verdict":"accept","reviewed_base":"${BASE_HEAD}",` +
+          `"reviewed_head":"${REVIEWED_HEAD}","reviewer":"`,
       ),
       Buffer.from([0xff]),
       Buffer.from('","risk":"low"}'),
@@ -386,6 +482,9 @@ describe('recordReview', () => {
     assert.equal(result.status, 0, result.stderr);
     const recordedPath = result.stdout.trim();
     assert.equal(existsSync(recordedPath), true);
-    assert.equal(recordedPath, reviewPath(stateRoot, 'run-self-relative', 'task-a'));
+    assert.equal(
+      recordedPath,
+      reviewPath(stateRoot, 'run-self-relative', 'task-a', 1, REVIEWED_HEAD),
+    );
   });
 });

@@ -519,7 +519,7 @@ describe('record-review kit-asset wiring', () => {
         task_id: taskId,
         verdict: 'accept',
         reviewed_base: 'base',
-        reviewed_head: 'head',
+        reviewed_head: 'a'.repeat(40),
         reviewer: 'codex',
         risk: 'low',
       })}\n`,
