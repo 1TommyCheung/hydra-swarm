@@ -165,6 +165,9 @@ describe('kitAssetText', () => {
 });
 
 describe('isCompiledBinary', () => {
+  const bunVersions = { bun: '1.3.14' } as unknown as NodeJS.ProcessVersions;
+  const nodeVersions = {} as NodeJS.ProcessVersions;
+
   it('is false under plain Node (source lane)', () => {
     // The true case requires an actual `bun build --compile` binary
     // (import.meta.url === file:///$bunfs/...); Phase 3 verifies that lane.
@@ -181,31 +184,63 @@ describe('isCompiledBinary', () => {
     assert.equal(
       isCompiledBinary(
         'file:///$bunfs/checkout/kit/hydra-ts/src/kit-assets.ts',
-        {} as NodeJS.ProcessVersions,
+        nodeVersions,
       ),
       false,
     );
   });
 
-  it('is true only when BOTH the $bunfs URL prefix and process.versions.bun hold', () => {
-    const bunVersions = { bun: '1.2.3' } as unknown as NodeJS.ProcessVersions;
+  it('keeps POSIX standalone detection gated by process.versions.bun', () => {
     // The compiled-binary shape: synthetic URL + Bun runtime marker.
     assert.equal(
       isCompiledBinary('file:///$bunfs/root/kit-assets.ts', bunVersions),
       true,
     );
+    assert.equal(
+      isCompiledBinary('file:///$bunfs/root/kit-assets.ts', nodeVersions),
+      false,
+    );
+  });
+
+  it('recognizes Bun 1.3.14 Windows standalone module URLs', () => {
+    assert.equal(
+      isCompiledBinary('file:///B:/~BUN/root/kit/hydra-ts/src/cli.ts', bunVersions),
+      true,
+    );
+    assert.equal(
+      isCompiledBinary('file:///z:/~BUN/root/kit/hydra-ts/src/cli.ts', bunVersions),
+      true,
+    );
+  });
+
+  it('does not treat Windows-looking standalone URLs as compiled under Node', () => {
+    assert.equal(
+      isCompiledBinary('file:///B:/~BUN/root/kit/hydra-ts/src/cli.ts', nodeVersions),
+      false,
+    );
+  });
+
+  it('does not accept arbitrary ~BUN text outside the Windows standalone root', () => {
+    for (const url of [
+      'file:///B:/checkout/~BUN/root/kit-assets.ts',
+      'file:///B:/~BUN/not-root/kit-assets.ts',
+      'file:///B:/~BUN/rootish/kit-assets.ts',
+      'file:///BB:/~BUN/root/kit-assets.ts',
+      'file:////B:/~BUN/root/kit-assets.ts',
+    ]) {
+      assert.equal(isCompiledBinary(url, bunVersions), false, url);
+    }
+  });
+
+  it('ordinary Bun source execution remains false', () => {
     // A Bun runtime WITHOUT the synthetic prefix (ordinary `bun script.ts`
     // source run) is not a compiled binary.
     assert.equal(
       isCompiledBinary('file:///home/user/checkout/kit-assets.ts', bunVersions),
       false,
     );
-    // Node runtime WITHOUT the prefix: the everyday source lane.
     assert.equal(
-      isCompiledBinary(
-        'file:///home/user/checkout/kit-assets.ts',
-        {} as NodeJS.ProcessVersions,
-      ),
+      isCompiledBinary('file:///C:/work/~BUN-project/root/kit-assets.ts', bunVersions),
       false,
     );
   });

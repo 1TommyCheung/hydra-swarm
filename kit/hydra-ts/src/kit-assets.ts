@@ -36,13 +36,16 @@ export function initEmbeddedAssets(map: Record<string, string>): void {
 /**
  * True inside a `bun build --compile` binary (observed in Test A).
  *
- * Requires BOTH the synthetic `/$bunfs/` module URL prefix AND a Bun-specific
- * runtime marker (`process.versions.bun`, a field only the Bun runtime sets;
- * safe to probe under Node, where it is simply absent). The URL prefix alone
- * is not unique to compiled binaries: an ordinary Node module physically
- * checked out at a root-level `/$bunfs/...` path (legal, e.g. in a root-run
- * container) produces the same prefix, which made plain Node suppress all 34
- * direct-invocation guards (Stage 4 review bug #3,
+ * Requires BOTH a Bun standalone virtual-root URL and a Bun-specific runtime
+ * marker (`process.versions.bun`, a field only the Bun runtime sets; safe to
+ * probe under Node, where it is simply absent). POSIX standalone modules use
+ * `file:///$bunfs/...`; Bun 1.3.14 on Windows uses
+ * `file:///B:/~BUN/root/...` (with the drive letter varying by build).
+ *
+ * The URL shape alone is not unique to compiled binaries: an ordinary Node
+ * module physically checked out at a root-level `/$bunfs/...` path (legal,
+ * e.g. in a root-run container) produces the same prefix, which made plain
+ * Node suppress all 34 direct-invocation guards (Stage 4 review bug #3,
  * docs/bun-migration-stage4-fixes-runtime.md).
  *
  * The parameters exist so tests can simulate exactly that collision without
@@ -52,7 +55,9 @@ export function isCompiledBinary(
   url: string = import.meta.url,
   versions: NodeJS.ProcessVersions = process.versions,
 ): boolean {
-  return url.startsWith('file:///$bunfs/') && typeof versions.bun === 'string';
+  if (typeof versions.bun !== 'string') return false;
+  return url.startsWith('file:///$bunfs/')
+    || /^file:\/\/\/[A-Za-z]:\/~BUN\/root\//.test(url);
 }
 
 /**
