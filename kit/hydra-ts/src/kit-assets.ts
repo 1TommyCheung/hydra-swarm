@@ -48,16 +48,31 @@ export function initEmbeddedAssets(map: Record<string, string>): void {
  * Node suppress all 34 direct-invocation guards (Stage 4 review bug #3,
  * docs/bun-migration-stage4-fixes-runtime.md).
  *
+ * On the real Windows Bun 1.3.14 runner the ~BUN virtual root does not reach
+ * routed modules' import.meta.url (only cli.ts's), so every routed module's
+ * direct-invocation main guard fired inside the compiled binary. Fallback:
+ * the standalone virtual ENTRY path is still exposed through process.argv[1]
+ * (`B:\~BUN\root\...`, either slash direction, drive letter varying by
+ * build), and argv is process-global, so routed modules see it too. The
+ * fallback keeps the Bun-marker gate and anchors the drive-rooted ~BUN/root
+ * prefix, so ordinary Bun source runs (argv[1] = a real checkout path) and
+ * near-miss paths (`~BUN` nested deeper, `~BUN-project`, `rootish`) stay
+ * false.
+ *
  * The parameters exist so tests can simulate exactly that collision without
  * root access; production callers keep the zero-arg form.
  */
 export function isCompiledBinary(
   url: string = import.meta.url,
   versions: NodeJS.ProcessVersions = process.versions,
+  argv1: string | undefined = process.argv[1],
 ): boolean {
   if (typeof versions.bun !== 'string') return false;
-  return url.startsWith('file:///$bunfs/')
-    || /^file:\/\/\/[A-Za-z]:\/~BUN\/root\//.test(url);
+  if (
+    url.startsWith('file:///$bunfs/')
+    || /^file:\/\/\/[A-Za-z]:\/~BUN\/root\//.test(url)
+  ) return true;
+  return typeof argv1 === 'string' && /^[A-Za-z]:[/\\]~BUN[/\\]root[/\\]/.test(argv1);
 }
 
 /**

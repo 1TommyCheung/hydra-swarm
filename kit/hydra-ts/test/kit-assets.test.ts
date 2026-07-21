@@ -232,6 +232,80 @@ describe('isCompiledBinary', () => {
     }
   });
 
+  it('detects the Windows standalone entry via the argv[1] fallback (forward slashes)', () => {
+    // Bun 1.3.14 on Windows: routed modules' import.meta.url does NOT carry
+    // the ~BUN virtual root, but process.argv[1] exposes the standalone
+    // virtual entry path. The fallback stays gated by the Bun runtime marker.
+    assert.equal(
+      isCompiledBinary(
+        'file:///C:/actual/checkout/kit/hydra-ts/src/status.ts',
+        bunVersions,
+        'B:/~BUN/root/kit/hydra-ts/src/cli.ts',
+      ),
+      true,
+    );
+  });
+
+  it('detects the Windows standalone entry via the argv[1] fallback (backslashes)', () => {
+    assert.equal(
+      isCompiledBinary(
+        'file:///C:/actual/checkout/kit/hydra-ts/src/status.ts',
+        bunVersions,
+        'B:\\~BUN\\root\\kit\\hydra-ts\\src\\cli.ts',
+      ),
+      true,
+    );
+  });
+
+  it('accepts any drive letter case in the argv[1] fallback', () => {
+    assert.equal(
+      isCompiledBinary('file:///x', bunVersions, 'z:/~BUN/root/cli.ts'),
+      true,
+    );
+    assert.equal(
+      isCompiledBinary('file:///x', bunVersions, 'Q:\\~BUN\\root\\cli.ts'),
+      true,
+    );
+  });
+
+  it('argv[1] fallback stays false under Node even with a standalone-shaped path', () => {
+    assert.equal(
+      isCompiledBinary('file:///x', nodeVersions, 'B:/~BUN/root/cli.ts'),
+      false,
+    );
+    assert.equal(
+      isCompiledBinary('file:///x', nodeVersions, 'B:\\~BUN\\root\\cli.ts'),
+      false,
+    );
+  });
+
+  it('argv[1] near-miss paths remain false', () => {
+    for (const argv1 of [
+      'B:/checkout/~BUN/root/cli.ts',
+      'B:\\checkout\\~BUN\\root\\cli.ts',
+      'B:/~BUN/not-root/cli.ts',
+      'B:/~BUN/rootish/cli.ts',
+      'B:/~BUN-project/root/cli.ts',
+      'BB:/~BUN/root/cli.ts',
+      '/~BUN/root/cli.ts',
+      '~BUN/root/cli.ts',
+      'B:/~BUN/root',
+      '',
+    ]) {
+      assert.equal(isCompiledBinary('file:///x', bunVersions, argv1), false, argv1);
+    }
+  });
+
+  it('ordinary Bun source argv[1] paths remain false', () => {
+    for (const argv1 of [
+      '/home/user/checkout/kit/hydra-ts/src/cli.ts',
+      'C:\\work\\checkout\\kit\\hydra-ts\\src\\cli.ts',
+      'C:/work/checkout/kit/hydra-ts/src/cli.ts',
+    ]) {
+      assert.equal(isCompiledBinary('file:///x', bunVersions, argv1), false, argv1);
+    }
+  });
+
   it('ordinary Bun source execution remains false', () => {
     // A Bun runtime WITHOUT the synthetic prefix (ordinary `bun script.ts`
     // source run) is not a compiled binary.
