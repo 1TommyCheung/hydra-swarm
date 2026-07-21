@@ -1,6 +1,6 @@
 # Hydra-Swarm
 
-**v0.6.8.1** · A local multi-agent development harness. A lead (Claude Code)
+**v0.6.8.3** · A local multi-agent development harness. A lead (Claude Code)
 plans, dispatches, and judges; a deterministic harness owns state, process
 launch, and verification. Four vendor heads — **Claude**, **Codex**,
 **OpenCode/GLM**, and **Kimi** — implement tasks in isolated Git worktrees.
@@ -17,7 +17,10 @@ human-authorized.
 > **Status:** Waves 0–2 complete and dogfooded on this repo's own
 > development. Since Wave 2: head auto-detection, the compiled single-binary
 > runtime with GitHub Releases distribution (`fetch-bin.sh`), and the `hydra
-> gc` + `hydra run-log` worktree-lifecycle pair are done (see
+> gc` + `hydra run-log` worktree-lifecycle pair are done. 0.6.8.3 hardened
+> the revise loop and the truth of record: file-first revision evidence,
+> append-only review provenance, unique dispatch-attempt identity, Claude
+> API-error truth, and bounded prompt/review-store hardening (see
 > [CHANGELOG.md](CHANGELOG.md) for the 0.6.x releases). The remaining
 > packaging work (kit extraction, `hydra-init` scaffolding, global ledger,
 > bundle export/import) is still design-only — see `docs/roadmap.md`.
@@ -50,10 +53,14 @@ The default runtime is a Bun-compiled single binary — never committed to
 git. Get one either way:
 
 - **Download a verified release**: `bash kit/hydra/scripts/fetch-bin.sh`
-  fetches the binary matching this plugin's version from GitHub Releases
-  (darwin-arm64/x64, linux-x64/arm64; Windows via WSL), verifies the
-  manifest SHA-256 and the binary's self-reported version, and installs to
-  `~/.local/share/hydra-bin/v<version>/`.
+  fetches the binary matching this plugin's version from GitHub Releases,
+  verifies the manifest SHA-256 and the binary's self-reported version, and
+  installs to `~/.local/share/hydra-bin/v<version>/`. Releases carry six
+  native artifacts (darwin-arm64/x64, linux-x64/arm64, and native Windows
+  windows-arm64/x64 `.exe`), each release natively verified on Linux, macOS,
+  and Windows before publish (v0.6.8.3). The `fetch-bin.sh` installer itself
+  remains Unix-only (darwin/linux): on Windows, run it under WSL or download
+  the native `.exe` + manifest from the release page directly.
 - **Build locally**: `npm run build:bin` in `kit/hydra-ts`.
 
 Resolution order: `HYDRA_BIN` → checkout `dist/` → version-keyed download
@@ -128,6 +135,7 @@ hydra-swarm/
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - `docs/architecture-diagram.html` — visual architecture diagram (open in a browser)
 - `docs/architecture.md` — trust boundary, verification gates, wave design
+- `docs/dispatch-modes.md` — every dispatch mode in detail (worker, review, amend, promote, squash/integrate, operational)
 - `docs/operations.md` — day-to-day driving reference
 - `docs/vendor-adapters.md` — per-vendor dispatch behavior and quirks
 - `docs/state-and-worktrees.md` — storage domains, state location

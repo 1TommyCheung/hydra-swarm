@@ -49,15 +49,16 @@ schema, worktree paths, branch naming, or custody boundaries described below.
 │   │   └── <agent-run-id>/result.json
 │   ├── authoritative/      # harness-written only
 │   │   ├── ledger/events.jsonl
-│   │   ├── results/        # promoted results
-│   │   ├── reviews/
-│   │   └── verification/
-│   └── sessions/           # session ids, adapter state
+│   │   ├── results/        # promoted results + <task>.squash.json records
+│   │   ├── reviews/        # append-only verdict store (v0.6.8.3)
+│   │   │   └── <task>/<seq>-<reviewed_head>.json   # one generation per publish; never overwritten
+│   │   └── verification/   # per-task + combined.json observed records
+│   └── sessions/           # session ids, adapter state, outcome sidecars, capture files
 ├── agents/                 # availability.yaml, usage.jsonl, profiles/ (Wave 2)
 └── indexes/                # gitnexus/<repo-id>/<commit-sha>/, graphify/ (Wave 1+)
 ```
 
-Rationale: state inside the repo would be worker-readable/writable, would appear in diffs, would desynchronize across worktrees, and is a prompt-injection surface. Task specs are **copied read-only** into worker environments; workers never see the state store.
+Rationale: state inside the repo would be worker-readable/writable, would appear in diffs, would desynchronize across worktrees, and is a prompt-injection surface. Task specs are **copied read-only** into worker environments; the state store is never handed to a worker (OS-enforced for sandboxed vendors, structural for Claude — `trust-and-permissions.md` §11).
 
 ### Domain 3 — Worktrees (Git-managed, outside the main checkout, disposable)
 
@@ -181,6 +182,19 @@ here).
   `.env.worktree`, `.hydra-result.json`, and `.gitnexus/` to the worktree's
   `info/exclude`, so harness-injected files never appear as untracked in the
   ownership audit.
+- **Revision-evidence bundle (v0.6.8.3).** A revise-round dispatch writes the
+  recorded review verdicts into `.hydra-context/revision-evidence/` inside the
+  worker's worktree (read-only files, self-excluding via a written
+  `.hydra-context/.gitignore`). It is dispatcher-generated, ephemeral, and
+  rebuilt per dispatch from the authoritative review store — never a state
+  domain of its own, and cleared of stale content before each
+  materialization. See `task-result-review-contracts.md` §1.1 and
+  `dispatch-modes.md`.
+- **Append-only review store (v0.6.8.3).** `authoritative/reviews/<task>/`
+  holds one immutable generation per recorded verdict
+  (`<seq>-<reviewed_head>.json`, fsynced no-replace publishes). The full
+  verdict history is part of authoritative state and travels with a recovery
+  bundle's `reviews/` directory.
 - **Linked-worktree git metadata.** A linked worktree's `.git` is the
   git-common-dir *outside* the worktree; OS-sandboxed vendors (Codex, Kimi) must
   be granted it as a writable root (resolved via `pwd -P`, since `sandbox-exec`

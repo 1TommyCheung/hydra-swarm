@@ -44,6 +44,8 @@ readers never construct a path from an id that fails its grammar.
 | `agent_timed_out` / `agent_cancelled` | `task_id`, `reason?`, dispatch ids | `dispatch` / `cancel-task` |
 | `agent_loop_suspected` / `agent_loop_confirmed` / `agent_loop_cleared` | `task_id`, details | loop detector |
 | `task_spec_amended` | `task_id`, `from`, `to`, `delivery`, `reason` | `amend-task` |
+| `delivery_downgraded` | `task_id`, `requested_delivery`, `effective_delivery`, `reason` | `dispatch` |
+| `revision_evidence_materialized` / `revision_evidence_skipped` / `revision_evidence_failed` | `task_id`, `manifest_sha256`, `entries`, `latest_verdict_ref`, `unresolved_findings`, `truncated` (materialized); `reason` (skipped/failed) | `dispatch` |
 | `result_rejected` | `task_id`, `reason`, `detail` | `promote` |
 | `result_promoted` | `task_id`, `head`, `divergence` | `promote` |
 | `review_verdict` | `task_id`, `verdict`, `reviewer`, `risk`, `reviewed_head`, `seq`, `content_sha256` | `record-review` |

@@ -383,7 +383,7 @@
     <h1 class="wordmark"><span class="h">HYDRA</span>-SWARM<span class="cursor" aria-hidden="true"></span></h1>
     <p class="tagline">One lead plans and judges. Four vendors — Claude, Codex, OpenCode, Kimi — implement in isolated worktrees. Nothing reaches your tree without crossing the trust boundary.</p>
     <div class="hero-meta">
-      <span class="pill">v0.6.8.1</span>
+      <span class="pill">v0.6.8.3</span>
       <span class="pill">MIT licensed</span>
       <span class="pill">compiled binary default</span>
       <span class="pill">gc + run-log lifecycle</span>
@@ -430,8 +430,8 @@
       <div class="stage">
         <div class="stage-num">STAGE 04</div>
         <h3>Review</h3>
-        <p>Cross-vendor by convention — Codex reviews Kimi's candidate, OpenCode reviews Codex's fix. Only <code>accept</code> lets a candidate proceed.</p>
-        <span class="cmd">review-dispatch.sh</span>
+        <p>Cross-vendor by convention — Codex reviews Kimi's candidate, OpenCode reviews Codex's fix. Verdicts are recorded as append-only generations; only a recorded <code>accept</code> lets a candidate proceed.</p>
+        <span class="cmd">review-dispatch.sh --task · record-review.sh</span>
       </div>
       <div class="stage">
         <div class="stage-num">STAGE 05</div>
@@ -548,7 +548,7 @@
         <div class="stat-label">vendor adapters, one contract</div>
       </div>
       <div>
-        <div class="stat-value">1044</div>
+        <div class="stat-value">1344</div>
         <div class="stat-label">tests passing on master (concurrent + promote suites)</div>
       </div>
       <div>

@@ -8,6 +8,10 @@ documented *building*). It assumes the lead protocol in
 > `~/.local/state/<repo-id>-hydra/authoritative/**`. Read promoted results, never
 > raw inbox drops. Merge/push/deploy is human-authorized.
 
+For a step-by-step account of what each command actually does — state written,
+what the worker sees, observability, termination, failure modes — see
+`dispatch-modes.md`.
+
 ## The loop, in commands
 
 ```bash
@@ -29,8 +33,38 @@ bash kit/hydra/scripts/run-log.sh 0042                           # -> docs/hydra
 bash kit/hydra/scripts/gc.sh --apply --keep-last 3              # reap ledger-proven-integrated worktrees+branches
 ```
 
-Only `accept` candidates enter `squash`/`integrate`. `revise`/`reject` return to
-the same worktree (amend the spec + re-dispatch).
+Only `accept` candidates enter `squash`/`integrate` — a **lead-protocol**
+rule: `squash` itself gates on promotion and `integrate` on squash records
+(neither consults the review store), so the operator checks the recorded
+verdict before squashing; the append-only store makes any deviation
+auditable. `revise`/`reject` return to the same worktree (amend the spec +
+re-dispatch).
+
+## The revise loop, in commands
+
+A `revise` verdict is closed by amending the spec and re-dispatching — never by
+hand-editing the worktree or whispering to a running worker:
+
+```bash
+# 1. Record the reviewer's verdict (creates an append-only generation)
+bash kit/hydra/scripts/record-review.sh 0042 <task> <verdict.json>
+# 2. Amend the spec: version bump + reason (+ optional machine-checkable gate)
+bash kit/hydra/scripts/amend-task.sh 0042 <task> @revise-reason.md restart @amendment-checks.txt
+# 3. amend-task re-dispatches automatically; the worker receives the recorded
+#    verdicts as a file-first evidence bundle (.hydra-context/revision-evidence/)
+# 4. Promote the new drop; then re-review and record the next verdict
+bash kit/hydra/scripts/promote.sh 0042 <task> .../inbox/<agent_run_id>/result.json
+```
+
+Notes (v0.6.8.3): the dispatcher materializes the latest verdict and every
+still-unresolved blocking finding into the worktree bundle and puts only
+compact manifest metadata in the prompt (`revision_evidence_materialized` in
+the ledger). Use `resume` delivery only for vendors with real session resume
+(Claude, Kimi); anything else cold-restarts loudly with a
+`delivery_downgraded` event. Each re-dispatch claims a fresh attempt namespace
+(`-a2`, `-a3`, …) — a retry never overwrites a rejected inbox drop. There is
+no automatic cap on amendment rounds; the operator decides when a lane is
+unrecoverable and re-plans.
 
 Review provenance is explicit (issue #32): `review-dispatch` refuses to run
 without `--task <task_id>` (validated against the canonical task-id grammar —
@@ -130,12 +164,16 @@ lookup location when `HYDRA_BIN` is unset.
 
 To get a verified release binary without building, run
 `bash kit/hydra/scripts/fetch-bin.sh`: it downloads the binary matching this
-plugin's version from GitHub Releases (darwin-arm64/x64, linux-x64/arm64;
-Windows via WSL), verifies the manifest SHA-256, the binary's self-reported
-version, and the target-triple, and installs it into the version-keyed cache
-at `~/.local/share/hydra-bin/v<version>/`. Any gate failing leaves nothing
-installed (the `ts` lane is unaffected). `hydra_resolve_bin` picks this cache
-up automatically after the fact.
+plugin's version from GitHub Releases, verifies the manifest SHA-256, the
+binary's self-reported version, and the target-triple, and installs it into
+the version-keyed cache at `~/.local/share/hydra-bin/v<version>/`. Any gate
+failing leaves nothing installed (the `ts` lane is unaffected).
+`hydra_resolve_bin` picks this cache up automatically after the fact.
+Releases carry six native artifacts (darwin-arm64/x64, linux-x64/arm64,
+windows-arm64/x64 `.exe`), natively verified on Linux, macOS, and Windows
+runners before publish (v0.6.8.3). `fetch-bin.sh` itself supports
+darwin/linux targets only — on Windows, run it under WSL or download the
+native `.exe` + manifest from the release page directly.
 
 A lower-level `HYDRA_ADAPTER_RUNTIME` override (`ts` or `compiled`) takes
 precedence inside TypeScript dispatch for the adapter only; leave it unset for

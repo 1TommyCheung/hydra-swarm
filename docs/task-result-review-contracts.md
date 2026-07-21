@@ -29,13 +29,37 @@ max_cost_usd: 3.00
 
 ### 1.1 Amendment protocol
 
-Amended specs supersede by version (`spec_version: 2`, `supersedes: v1`, `amendment_reason`, `delivered_via: resume|restart`). Every amendment is a ledger event. Gates evaluate only the latest version; results claiming an older version are stale and rejected at promotion. An amendment may also carry an optional `amendment_check` list of shell assertions (v0.6.8.1): these are rendered as a mandatory verification block in the worker prompt, so a revise round cannot be satisfied by "the pre-existing tests still pass" alone. `amend-task` accepts `@file` for both `amendment_reason` and `amendment_check`, and a hand-edited reason in the spec is never silently overwritten by a shorter CLI argument.
+Amended specs supersede by version (`spec_version: 2`, `supersedes: v1`, `amendment_reason`, `delivered_via: resume|restart`). Every amendment is a ledger event. Gates evaluate only the latest version; results claiming an older version are stale and rejected at promotion. An amendment may also carry an optional `amendment_check` list of shell assertions (v0.6.8.1): these are rendered as a mandatory verification block in the worker prompt, so a revise round cannot be satisfied by "the pre-existing tests still pass" alone. `amend-task` accepts `@file` for both `amendment_reason` and `amendment_check`. A hand-edited `amendment_reason` in the spec that differs from the CLI/`@file` argument is warned about and then **overwritten** — the CLI reason wins (the warning names what was lost; it is loud, not silent). Deliver multi-line reasons via `@file` instead of hand-editing the spec.
+
+**Revision evidence (v0.6.8.3, issue #26).** When an amended task has recorded
+review verdicts, dispatch materializes them for the worker as a **file-first
+bundle**, not prompt text: `.hydra-context/revision-evidence/` in the worker's
+worktree holds `manifest.json`, `latest-verdict.json`,
+`unresolved-findings.json` (every still-unresolved blocking finding across the
+full append-only verdict history), and a bounded `evidence.md` render — all
+read-only (mode 0444), git-excluded, and self-verified (per-entry SHA-256 +
+byte size) after write. The worker prompt carries only compact manifest
+metadata: bundle paths, hashes, trust labels, up to 16 short finding ids and
+up to 20 referenced source locations — verdict history is never inlined into
+the prompt. Every transported verdict must hash-match a `review_verdict`
+ledger event (provenance gate), and assembly is hard-budgeted (verdict /
+finding / byte caps) with explicit truncation metadata. The ledger records
+`revision_evidence_materialized`, `revision_evidence_skipped`
+(`no_recorded_verdicts`), or `revision_evidence_failed`; a bundle required by
+a `revise` verdict is mandatory — dispatch fails rather than sending the
+worker in blind.
+
+**Delivery.** `resume` is honored only when a prior captured session exists,
+its vendor matches, and the adapter really supports resume (Claude and Kimi
+today); otherwise dispatch cold-restarts loudly, recording
+`delivery_downgraded` with `no_prior_session`, `session_vendor_unknown`,
+`session_vendor_mismatch`, or `adapter_resume_unsupported`.
 
 ## 2. Result contract
 
 ### 2.1 Worker-emitted portion (claims — untrusted)
 
-Written by the worker **only** to `.hydra-result.json` in its own worktree (or stdout captured by the adapter). The adapter bridges that file into `inbox/<agent-run-id>/result.json`; workers cannot reach `authoritative/` or the state store.
+Written by the worker **only** to `.hydra-result.json` in its own worktree (or stdout captured by the adapter). The adapter bridges that file into `inbox/<agent-run-id>/result.json`; the state store is never handed to a worker (OS-enforced separation for Codex/Kimi; structural — path-not-provided plus post-hoc audit — for unsandboxed Claude, see `trust-and-permissions.md` §11).
 
 ```json
 {
@@ -112,9 +136,9 @@ required_integration_checks:
 risk: low                # low | medium | high | critical
 ```
 
-Only `accept` candidates enter integration. `revise` returns to the same worktree unless scope/ownership changes materially (then: spec amendment or task split). Review policy: cross-vendor review mandatory for `risk: high|critical`, architecture, security, and migrations (Wave 1 formalizes; in Wave 0 with two vendors, Codex reviews Claude and vice versa by default).
+Only `accept` candidates enter integration — enforced as lead protocol against the recorded verdict (the `squash`/`integrate` commands themselves gate on promotion and squash records, not on the review store; see `dispatch-modes.md` §5). `revise` returns to the same worktree unless scope/ownership changes materially (then: spec amendment or task split). Review policy: cross-vendor review mandatory for `risk: high|critical`, architecture, security, and migrations (Wave 1 formalizes; in Wave 0 with two vendors, Codex reviews Claude and vice versa by default).
 
-Storage: `record-review` publishes each validated verdict as an append-only generation at `authoritative/reviews/<task>/<seq>-<reviewed_head>.json` — nothing is overwritten, a second review round adds `0002-…`, and the highest valid generation is the authoritative verdict (it wins over conflicting `review_verdict` ledger telemetry, including a durable generation whose ledger append was lost to a crash). A generation is valid only if its document's own `task_id` exists and equals the task directory it sits in — the reader skips a misfiled or identity-less file and falls back to the next valid generation. Reviewer dispatch itself (`review-dispatch`) requires an explicit `--task <task_id>` and stamps it on `review_started`/`review_completed`; those events are process telemetry, never a verdict.
+Storage: `record-review` publishes each validated verdict as an append-only generation at `authoritative/reviews/<task>/<seq>-<reviewed_head>.json` — nothing is overwritten, a second review round adds `0002-…`, and the highest valid generation is the authoritative verdict (it wins over conflicting `review_verdict` ledger telemetry, including a durable generation whose ledger append was lost to a crash). Full historical verdict provenance therefore remains in authoritative state. Publishes are durable and non-replacing (temp file → fsync → `link(2)` → directory fsync) with age-based crash-safe sequence ownership. A generation is valid only if its document's own `task_id` exists and equals the task directory it sits in — the reader skips a misfiled or identity-less file and falls back to the next valid generation. `record-review` rejects invalid verdicts with `review_rejected` reason `schema_invalid`, `task_id_mismatch`, or `invalid_reviewed_head`; a successful publish appends `review_verdict` with `seq` and `content_sha256`. Reviewer dispatch itself (`review-dispatch`) requires an explicit `--task <task_id>` (issue #32) and stamps it on `review_started`/`review_completed`; those events are process telemetry, never a verdict.
 
 ## 4. Squash policy (harness-created)
 
@@ -238,9 +262,17 @@ The ledger + Git enable full recovery if the lead is interrupted or replaced. Us
   head + files are git facts, `verification_claims` stays empty, and promotion
   re-verifies. This is the "or stdout captured by the adapter" path.
 - **Ledger vocabulary — extended.** Beyond §7's list, the harness now emits
-  `agent_cancelled`, `agent_usage`, `review_started`/`review_completed`,
+  `agent_cancelled`, `agent_usage`, `agent_usage_limited`,
+  `review_started`/`review_completed`, `review_rejected`, `heads_detected`,
   `index_built`, `graph_impact`, `graphify_baseline`/`graphify_investigation`,
-  `herdr_pane_started`, `concurrency_wait`, and `observability_anomaly`.
+  `herdr_pane_started`, `concurrency_wait`, `observability_anomaly`,
+  `delivery_downgraded`,
+  `revision_evidence_materialized`/`revision_evidence_skipped`/`revision_evidence_failed`,
+  `integration_started`/`integration_conflict`/`integration_candidate_verify_failed`,
+  and `worktree_reaped`/`worktree_reap_partial`. `task_started` additionally
+  records `spec_version` and `attempt_ordinal` (v0.6.8.3 unique attempt
+  identity); `review_verdict` carries `seq` and `content_sha256` binding it to
+  its append-only store generation.
 - **Review verdicts are advisory; the human authorizes integration.** In run
   0015 a `revise` verdict was overridden by explicit human authorization to
   merge (recorded in the merge commit + Design Spec §4.2). "Only `accept`

@@ -15,6 +15,80 @@ run-by-run evidence) lives in `docs/roadmap.md`.
 > minor bumps overstated the changes. Content is identical; the superseded
 > tags/releases were retired and v0.6.8 republished.
 
+## [0.6.8.3] — 2026-07-21
+
+Runs 0057–0062: revise-loop fidelity and truth-of-record hardening,
+delivering the fixes for issues #26, #29, #30, #31, and #32. Every lane was
+cross-vendor reviewed and adversarially verified before integration.
+
+### Added
+- **File-first revision evidence transport** (#26): amended (revise-round)
+  dispatches materialize the latest recorded verdict, every still-unresolved
+  blocking finding across the full verdict history, a bounded human-readable
+  render, and a SHA-256-hashed manifest into a read-only, git-excluded
+  `.hydra-context/revision-evidence/` bundle inside the worker's own
+  worktree. The worker prompt carries only compact manifest metadata (paths,
+  SHA-256s, byte sizes, trust labels, short finding ids) — verdict history is
+  **not** inlined into the prompt. Every bundle entry is provenance-checked
+  against `review_verdict` ledger events, self-verified after write
+  (sha256 + size, regular non-symlink files), and hard-budgeted (verdict/
+  finding/byte caps with explicit truncation metadata, never an unbounded
+  bundle). Ledger events: `revision_evidence_materialized`,
+  `revision_evidence_skipped`, `revision_evidence_failed`.
+- **Explicit append-only review provenance** (#32): `review-dispatch`
+  requires `--task <task_id>` and stamps it on both `review_started` and
+  `review_completed`; task identity is never inferred from review-id naming.
+  `record-review` publishes each validated verdict as an append-only
+  generation at `authoritative/reviews/<task>/<seq>-<reviewed_head>.json` —
+  nothing is overwritten, the highest valid generation is authoritative, and
+  the full historical verdict provenance stays in authoritative state.
+  `run-log`'s Review column distinguishes reviewer-completed / verdict-
+  recorded / verdict-pending instead of "(none recorded)". The
+  recorded-`accept` requirement is enforced as lead protocol: `squash` gates
+  on promotion and `integrate` on squash records — neither consults the
+  review store itself.
+- **Native binary release matrix**: the release workflow now builds six
+  native artifacts (darwin-arm64/x64, linux-x64/arm64, and native Windows
+  windows-arm64/x64 `.exe`) in one build job, verifies the staged set
+  natively on Linux, macOS, **and Windows** runners, and publishes through a
+  single artifact fan-in job — no platform ships unverified. `fetch-bin.sh`
+  remains a Unix-only installer (Windows: WSL, or download the `.exe` +
+  manifest directly).
+
+### Fixed
+- **Claude API-error truth** (#29): a structured Claude API error (including
+  HTTP 429 usage limits) no longer records as a successful completion. The
+  adapter classifies the Claude-owned response envelope (`is_error`,
+  `api_error_status` — never assistant prose) into a per-attempt outcome
+  sidecar (`success` | `usage_limited` | `terminal_failure`); API-error runs
+  synthesize a failed drop instead of reading worker results, and 429/quota
+  errors feed the existing usage-limit cooldown registry. Malformed sidecars
+  fail closed.
+- **Unique dispatch attempt identity** (#31): every dispatch invocation
+  atomically claims a durable, unique attempt namespace before
+  `task_started` (attempt 1 keeps `<run>-<task>-v<spec_version>`; retries
+  append `-a2`, `-a3`, …), so a re-dispatch after a rejected promotion can
+  never reuse an `agent_run_id` or overwrite the rejected inbox drop.
+  `status`/`cancel-task` bind to the greatest validated attempt's
+  `dispatch_instance_id`, so a late exit from an older attempt cannot
+  complete or cancel a newer one.
+- **Renderer budget + review-store durability hardening** (#30, the deferred
+  run-0057 review findings): the shared worker-prompt renderer wraps
+  untrusted reviewer text in non-forgeable evidence fences (dynamic
+  backtick sizing, bidi/invisible-character neutralization), enforces
+  per-field and total byte budgets with incremental truncation and
+  trusted-side truncation notices; the review store gained fsynced atomic
+  no-replace publishes (temp → fsync → `link(2)` → directory fsync),
+  age-based crash-safe sequence ownership (never pid-liveness), and
+  contention-proof fault-injection tests.
+- **Vendor-owned resume semantics** (#26 anchoring loop, completing #20): a
+  requested `delivery=resume` downgrades loudly, not silently — the ledger
+  records `delivery_downgraded` with `no_prior_session`,
+  `session_vendor_unknown`, `session_vendor_mismatch`, or
+  `adapter_resume_unsupported`, and the effective delivery is chosen by the
+  adapter's declared resume capability plus the captured session's vendor,
+  never by naming conventions.
+
 ## [0.6.8.1] — 2026-07-19
 
 Fixes to existing herdr-pane, dispatch, and amend-task functionality — no
@@ -113,7 +187,8 @@ closed across both features before acceptance.
 ### Added
 - **Binary distribution via GitHub Releases.** A `v*` tag triggers
   `.github/workflows/release.yml`: build-matrix compiles all four targets
-  (darwin-arm64/x64, linux-x64/arm64 — glibc; Windows via WSL) with pinned
+  (darwin-arm64/x64, linux-x64/arm64 — glibc; Windows via WSL — superseded
+  in 0.6.8.3 by the six-target native matrix incl. Windows) with pinned
   Bun 1.3.14, blackbox-verifies the runner-native artifact, asserts
   tag == plugin.json version == binary self-report, and uploads binaries +
   provenance manifests + SHA256SUMS. Binaries are never committed to git.

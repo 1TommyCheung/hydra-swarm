@@ -17,17 +17,23 @@ The compiled binary is the operational default runtime, and it ships via
 GitHub Releases — not committed to git.
 
 - **Release pipeline** (`.github/workflows/release.yml`, triggered by a `v*`
-  tag): a 4-target build matrix compiles every release artifact
-  (darwin-arm64/x64, linux-x64/arm64 — glibc; Windows via WSL) with pinned
-  Bun 1.3.14, blackbox-verifies the runner-native artifact, asserts
-  `tag == plugin.json version == binary self-report`, and uploads binaries +
-  provenance manifests + SHA256SUMS.
+  tag; six-target native matrix since v0.6.8.3 — originally shipped as a
+  4-target matrix in v0.6.6): one build job compiles all six release
+  artifacts (darwin-arm64/x64, linux-x64/arm64 — glibc; native Windows
+  windows-arm64/x64 `.exe`) with pinned Bun 1.3.14 and stages them as a
+  single artifact; three **native verification jobs** (Linux, macOS, and
+  Windows runners) black-box-verify the staged binaries and assert
+  `tag == plugin.json version == binary self-report`; a sole publishing job
+  fans the verified artifact set in and uploads binaries + provenance
+  manifests + SHA256SUMS. No platform is published unverified.
 - **`fetch-bin.sh`** downloads the release binary matching THIS plugin's
   version into a version-keyed cache
   (`~/.local/share/hydra-bin/v<version>/hydra-cli-<target>`), gated on:
   manifest SHA-256 match, binary self-reported version == plugin version, and
   target-triple match. Any gate fails → nothing installed, the `ts` lane is
-  unaffected.
+  unaffected. The installer remains **Unix-only** (darwin/linux target
+  detection): Windows users run it under WSL, or download the native `.exe`
+  and its manifest from the release page directly.
 - **Resolution ladder** (`hydra_resolve_bin`): `HYDRA_BIN` → checkout `dist/`
   → version-keyed cache → `ts` fallback. The cache is keyed by the checkout's
   own plugin version, so a stale binary is structurally invisible rather than

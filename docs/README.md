@@ -3,7 +3,7 @@
 > **Dev notes:** vendor design/review/spike artifacts referenced below (`bun-migration-*`, `*-design-*`, `*-review-*`, `license-research-*`, `doc-audit-*`) live in the machine-local, gitignored `docs/dev-notes/` — production users do not need them; recover from git history pre-split if absent.
 
 
-**Date:** 2026-07-20 · **Status:** **v0.6.8.1** — Waves 0–2 delivered; the compiled Bun binary is the operational default with GitHub Releases distribution (`fetch-bin.sh`), head auto-detection is live, and `hydra gc` + `hydra run-log` own the worktree-lifecycle close (Node/`ts` is the automatic fallback when no binary is provisioned yet). 0.6.8.1 hardened live observability (no blank panes, workspace-pinned panes, usage-limit cooldown, real Kimi resume, `amendment_check` gates). Front of the roadmap: the two prioritized moat-sharpeners (adversarial verification vault, PR-mode trust check — `roadmap.md`), then kit extraction + the hardening daemon.
+**Date:** 2026-07-21 · **Status:** **v0.6.8.3** — Waves 0–2 delivered; the compiled Bun binary is the operational default with GitHub Releases distribution (`fetch-bin.sh`), head auto-detection is live, and `hydra gc` + `hydra run-log` own the worktree-lifecycle close (Node/`ts` is the automatic fallback when no binary is provisioned yet). 0.6.8.1 hardened live observability (no blank panes, workspace-pinned panes, usage-limit cooldown, real Kimi resume, `amendment_check` gates). 0.6.8.3 (runs 0057–0062, issues #26/#29–#32) hardened the revise loop and the truth of record: file-first revision evidence in `.hydra-context/`, append-only review provenance under `authoritative/reviews/<task>/`, unique dispatch-attempt identity, Claude API-error truth, and bounded renderer + durable review-store hardening. Front of the roadmap: the two prioritized moat-sharpeners (adversarial verification vault, PR-mode trust check — `roadmap.md`), then kit extraction + the hardening daemon.
 **Supersedes:** the single-document specs v1–v3. This document set is self-contained; no prior version is a normative dependency.
 **Evidence:** per-wave completion reports and the Wave 2 exit snapshot lived in the pre-extraction tree (`../hydra-reports/`); they were not carried into this standalone repo. Day-to-day operation is documented in `operations.md`.
 
@@ -58,6 +58,7 @@ Reserved prefix rule: no human or agent creates branches under `hydra/` or `hydr
 | `trust-and-permissions.md` | Worker/lead/harness boundaries, ownership enforcement, audit rules, verification sandbox |
 | `state-and-worktrees.md` | Git-tracked vs external state vs worktrees; bootstrap lifecycle; portability; recovery bundles |
 | `task-result-review-contracts.md` | Task spec, result contract, inbox→promotion, review gates, integration lifecycle, ledger schemas |
+| `dispatch-modes.md` | **Every dispatch mode in detail** — full worker dispatch, read-only review dispatch, amendment/revise, promotion, squash + integration, status/cancel/run-log/gc; command, state, visibility, observability, termination, failure modes per mode |
 | `code-intelligence.md` | GitNexus and Graphify — Wave 1+ only |
 | `vendor-adapters.md` | Adapter contract, per-vendor capabilities and quirks, capability ledger |
 | `operations.md` | **Runbook** — start/monitor/kill a run, herdr, the lead-kill drill, common failures + fixes, worktree retention (gc + run-log) |
@@ -72,8 +73,9 @@ Read, in order:
 
 1. `skills/hydra-swarm/SKILL.md` — the lead's run loop
 2. `operations.md` — the runbook (start/monitor/kill, herdr, recovery drill, failure modes)
-3. `task-result-review-contracts.md` — the task/result/review/integration contracts
-4. `vendor-adapters.md` — the four heads, capability ledger, allocation
+3. `dispatch-modes.md` — what each mode actually does, end to end
+4. `task-result-review-contracts.md` — the task/result/review/integration contracts
+5. `vendor-adapters.md` — the four heads, capability ledger, allocation
 
 ## Re-installing from scratch or learning how it was built?
 

@@ -3,7 +3,7 @@
 > **Dev notes:** vendor design/review/spike artifacts referenced below (`bun-migration-*`, `*-design-*`, `*-review-*`, `license-research-*`, `doc-audit-*`) live in the machine-local, gitignored `docs/dev-notes/` — production users do not need them; recover from git history pre-split if absent.
 
 
-**Status:** v0.6.8.1 (2026-07-20). Waves 0–2 delivered; the post-Wave-2
+**Status:** v0.6.8.3 (2026-07-21). Waves 0–2 delivered; the post-Wave-2
 hardening (Bun single-binary migration, bash lane retirement, head
 auto-detection, GitHub Releases binary distribution, and the `hydra gc` +
 `hydra run-log` worktree-lifecycle pair) shipped across the 0.6.x–0.6.x
@@ -155,7 +155,8 @@ Dates are the day the wave's exit criteria were met in this repo.
   covers a real Bun-vs-Node divergence where in-process `process.env`
   mutations are not inherited by spawned children under Bun.
 - **Stage 3 — cross-platform proof:** a 4-target build matrix
-  (darwin-arm64/x64, linux-x64/arm64) plus a target-agnostic black-box test
+  (darwin-arm64/x64, linux-x64/arm64 — extended to six targets incl. native
+  Windows in v0.6.8.3) plus a target-agnostic black-box test
   harness. Real execution (not just cross-compile) was proven via Docker on
   both Linux architectures — 44/44 checks each, including the asset-embedding
   and spawn fixes holding under a genuinely different OS/libc. darwin-x64 was
@@ -328,7 +329,8 @@ Dates are the day the wave's exit criteria were met in this repo.
 
 - **Release pipeline.** A `v*` tag triggers
   `.github/workflows/release.yml`: a 4-target build matrix compiles all four
-  targets (darwin-arm64/x64, linux-x64/arm64 — glibc; Windows via WSL) with
+  targets (darwin-arm64/x64, linux-x64/arm64 — glibc; Windows via WSL —
+  superseded in v0.6.8.3 by the six-target native matrix incl. Windows) with
   pinned Bun 1.3.14, blackbox-verifies the runner-native artifact, asserts
   `tag == plugin.json version == binary self-report`, and uploads binaries +
   provenance manifests + SHA256SUMS. Binaries are never committed to git.
@@ -401,6 +403,61 @@ release under the four-segment fix-versioning policy):
   provider outage): `agent_usage_limited` terminal ledger state, an
   SDK-error-gated detector, and a machine-global cooldown registry consulted
   before dispatch — no auto-reroute, no auto-retry, by design.
+
+### Revise-loop fidelity + truth of record (v0.6.8.3) · 2026-07-21
+
+Runs 0057–0062, delivering the fixes for issues #26, #29, #30, #31, and #32.
+Every lane was cross-vendor reviewed and adversarially verified; the run-0057
+verification-policy lane was deliberately **excluded** from the merge
+(bootstrap/worktree-lifecycle blast radius — needs its own scoped effort), so
+the tracked verification policy default is unchanged.
+
+- **File-first revision evidence (#26, runs 0057 + 0062):** a worker on a
+  revise round previously could not read the review verdicts it was being
+  asked to fix (they live under `authoritative/`, unreachable by design).
+  Amended dispatches now materialize the latest verdict, all unresolved
+  blocking findings across the full verdict history, a bounded render, and a
+  sha256 manifest into a read-only, git-excluded
+  `.hydra-context/revision-evidence/` bundle inside the worker's worktree;
+  the prompt carries only compact manifest metadata (file-first, prompt-light
+  — verdict history is never inlined). Bundle entries are provenance-checked
+  against `review_verdict` ledger events and hard-budgeted with explicit
+  truncation metadata. Ledger: `revision_evidence_materialized` /
+  `revision_evidence_skipped` / `revision_evidence_failed`.
+- **Append-only review provenance (#32, runs 0057 + 0062):**
+  `record-review` publishes verdicts as append-only generations at
+  `authoritative/reviews/<task>/<seq>-<reviewed_head>.json`; the highest
+  valid generation is authoritative and full historical provenance stays in
+  authoritative state. `review-dispatch` requires `--task <task_id>` and
+  stamps it on `review_started`/`review_completed`; `run-log` distinguishes
+  reviewer-completed / verdict-recorded / verdict-pending.
+- **Claude API-error truth (#29, run 0058):** structured Claude API errors
+  (classified from the vendor envelope's `is_error`/`api_error_status`, never
+  assistant prose) produce a per-attempt outcome sidecar and a synthesized
+  failed drop instead of a fake success; 429/quota errors feed the
+  usage-limit cooldown registry.
+- **Unique dispatch-attempt identity (#31, runs 0059–0060):** each dispatch
+  atomically claims a unique attempt namespace (`…-v<spec>` then `-a2`,
+  `-a3`, …) before `task_started`; a post-rejection re-dispatch can no
+  longer overwrite the rejected inbox drop, and `status`/`cancel-task` bind
+  to the newest attempt's `dispatch_instance_id`.
+- **Bounded renderer + durable review store (#30, run 0061):** the deferred
+  run-0057 review findings — budget-aware evidence assembly with
+  non-forgeable truncation notices, fsynced no-replace review-store
+  publishes (temp → fsync → `link(2)` → dir fsync), age-based crash-safe
+  sequence ownership, contention-proof fault-injection tests.
+- **Vendor-owned resume semantics (completing #20/#26's anchoring loop):**
+  a requested `resume` downgrades loudly via a `delivery_downgraded` ledger
+  event (`no_prior_session` / `session_vendor_unknown` /
+  `session_vendor_mismatch` / `adapter_resume_unsupported`); effective
+  delivery is decided by adapter capability + captured session vendor.
+- **Native binary release matrix:** the release workflow grew from four to
+  six targets — darwin-arm64/x64, linux-x64/arm64, and native Windows
+  windows-arm64/x64 `.exe` — built in one job, staged as a single artifact,
+  natively black-box-verified on Linux, macOS, and Windows runners, and
+  published through one artifact fan-in job. `fetch-bin.sh` remains
+  Unix-only (Windows: WSL, or manual `.exe` + manifest download).
+- New authoritative mode reference: `docs/dispatch-modes.md`.
 
 ### Wave 3 preflight tooling — first real artifact · 2026-07-13
 

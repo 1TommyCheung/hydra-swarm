@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Hydra-Swarm — Architecture &amp; Evolved Thinking (v0.6.8.1)</title>
+<title>Hydra-Swarm — Architecture &amp; Evolved Thinking (v0.6.8.3)</title>
 <style>
   :root {
     /* warm Claude palette */
@@ -99,7 +99,7 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>Hydra-Swarm <span class="v">v0.6.8.1</span></h1>
+  <h1>Hydra-Swarm <span class="v">v0.6.8.3</span></h1>
   <p class="sub">A local multi-agent development harness: a lead plans and judges, four vendor
   heads implement in isolated Git worktrees, and nothing a worker claims is real until it crosses
   a deterministic trust boundary.</p>
@@ -167,7 +167,7 @@
     <text x="823" y="248" text-anchor="middle" fill="#2a2520" font-size="13" font-weight="600">allocate</text>
     <text x="823" y="266" text-anchor="middle" fill="#6f6558" font-size="11">recommends; humans pin</text>
 
-    <text x="46" y="322" fill="#a2988a" font-size="11">status · cancel-task · loop-thinking detector (auto-cancel) · usage-limit cooldown gate · herdr panes, live feedback for every vendor</text>
+    <text x="46" y="322" fill="#a2988a" font-size="11">status · cancel-task · loop detector (auto-cancel) · cooldown gate · unique attempt identity · herdr panes, live feedback for every vendor</text>
 
     <!-- ======================= MACHINE STATE (right column) ======================= -->
     <rect x="930" y="186" width="220" height="330" rx="12" fill="#efe8dc" stroke="rgba(72,60,44,.18)"/>
@@ -278,7 +278,7 @@
 
     <rect x="46" y="908" width="256" height="64" rx="8" fill="#fdfbf7" stroke="rgba(72,60,44,.25)"/>
     <text x="174" y="932" text-anchor="middle" fill="#2a2520" font-size="13" font-weight="600">cross-vendor review</text>
-    <text x="174" y="950" text-anchor="middle" fill="#6f6558" font-size="11">different model family · only accept proceeds</text>
+    <text x="174" y="950" text-anchor="middle" fill="#6f6558" font-size="11">append-only recorded verdicts · only accept proceeds</text>
 
     <line x1="302" y1="940" x2="326" y2="940" stroke="#6f6558" stroke-width="1.5" marker-end="url(#arr)"/>
 
@@ -440,6 +440,23 @@
     autonomous merge on agent-authored tests.</p>
   </div>
 
+  <div class="era">
+    <div class="when">Runs 0057–0062 · v0.6.8.3 · the revise loop closes</div>
+    <h3>Evidence flows down; instructions never do</h3>
+    <div class="belief">
+      <div class="b-from"><span class="lbl">Common practice</span>Paste the reviewer's feedback into the next prompt and hope the worker addresses it.</div>
+      <div class="b-to"><span class="lbl">Hydra's move</span>Verdicts become append-only generations under <code>authoritative/reviews/&lt;task&gt;/</code> — a reviewer's clean exit is telemetry, never a verdict. A revise-round worker gets the recorded verdicts as a <em>file-first</em> read-only bundle in its own worktree (<code>.hydra-context/</code>), provenance-checked and hard-budgeted, with only compact manifest metadata in the prompt. Reviewer text that does reach a prompt is fenced non-forgeably and stripped of invisible/bidi characters.</div>
+    </div>
+    <p>The revise loop had a quiet contradiction: workers were asked to fix findings they could
+    not read (verdicts live in the state store, which is never handed to a worker). v0.6.8.3 resolved it with
+    an explicit <strong>evidence/instruction split</strong> — the reviewer influences what the
+    worker is <em>shown</em>, never what it is <em>instructed to do</em>, and never what promotion
+    re-verifies. The same release made the record itself harder to lie to: a structured Claude API
+    error can no longer register as a successful completion, every dispatch attempt claims a
+    unique namespace so a retry can't overwrite a rejected drop's forensics, and review-store
+    publishes are fsynced, no-replace, and crash-safe. Truth of record, end to end.</p>
+  </div>
+
   <!-- ======================= CURRENT CAPABILITY NOTES ======================= -->
   <h2 class="section">Current capability notes</h2>
   <div class="notes">
@@ -473,9 +490,17 @@
         <li>Real Kimi session resume (<code>-S</code>); amended tasks can carry a machine-checkable <code>amendment_check</code> gate; vendor usage-limit detection + pre-dispatch cooldown.</li>
       </ul>
     </div>
+    <div class="note">
+      <h2>Revise-loop fidelity (v0.6.8.3)</h2>
+      <ul>
+        <li>Verdicts: append-only generations at <code>authoritative/reviews/&lt;task&gt;/</code>; <code>review-dispatch</code> requires <code>--task</code>; full history retained.</li>
+        <li>Revise rounds ship a file-first evidence bundle (<code>.hydra-context/</code>) — provenance-checked, budgeted, prompt-light.</li>
+        <li>Unique dispatch-attempt namespaces (<code>-a2</code>, <code>-a3</code>, …); Claude API errors surface as real failures; resume downgrades loudly. Full mode reference: <code>docs/dispatch-modes.md</code>.</li>
+      </ul>
+    </div>
   </div>
 
-  <p class="foot">Hydra-Swarm v0.6.8.1 · MIT · This page is self-contained — open it in any browser.
+  <p class="foot">Hydra-Swarm v0.6.8.3 · MIT · This page is self-contained — open it in any browser.
   Deeper narrative: <code>docs/roadmap.md</code>; trust model: <code>docs/trust-and-permissions.md</code>;
   day-to-day driving: <code>docs/operations.md</code>.</p>
 </div>

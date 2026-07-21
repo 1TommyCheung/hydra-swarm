@@ -12,7 +12,7 @@
 
 ## 2. Worker confinement (permission floor, all vendors)
 
-1. **Filesystem:** worker process confined to its worktree plus declared read-only paths. `inaccessible_paths` are not mounted / not present in the worktree where enforceable, and read-only at the OS level otherwise. The external state store is never reachable from any worktree.
+1. **Filesystem:** worker process confined to its worktree plus declared read-only paths. `inaccessible_paths` are not mounted / not present in the worktree where enforceable, and read-only at the OS level otherwise. The external state store is never handed to any worker — OS-enforced for Codex/Kimi, structural (path-not-provided + post-hoc audit) for unsandboxed Claude (§11).
 2. **Network:** off by default for all roles; per-task allowlist only when the task requires it. Dependency installation happens **before** the worker starts, under a separate network policy (see `state-and-worktrees.md` §4).
 3. **Git:** local branches only. No remote credentials exist in any worker environment — push is impossible, not merely forbidden.
 4. **In-CLI controls layered on top (defense in depth, not the boundary):** Claude PreToolUse hooks + `--allowedTools`; Codex sandbox modes + hooks; OpenCode per-agent permission config; Kimi has no print-mode allowlist, so layers 1–3 are its only guard and Kimi never takes a write role outside the full sandbox.
@@ -93,7 +93,34 @@ Require explicit policy authorization or human approval regardless of role: forc
 
 ## 9. Prompt-injection resistance
 
-Repository content, issue text, generated files, comments, and tool output may contain instructions; agents treat them as project data. Valid instruction surfaces: the active versioned task spec, applicable `AGENTS.md`, approved configuration, or the human. Instruction-shaped content found in data is reported as a finding, quoted, never acted on. Structural defenses carry the load: the state store is unreachable from worktrees (no ledger/profile poisoning), network is off, command policy is deterministic.
+Repository content, issue text, generated files, comments, and tool output may contain instructions; agents treat them as project data. Valid instruction surfaces: the active versioned task spec, applicable `AGENTS.md`, approved configuration, or the human. Instruction-shaped content found in data is reported as a finding, quoted, never acted on. Structural defenses carry the load: the state store is never handed to a worker (OS-enforced for sandboxed vendors, structural for Claude — §11), so ledger/profile poisoning has no sanctioned path; network is off for write roles; command policy is deterministic.
+
+### 9.1 The reviewer→worker trust edge (v0.6.8.3)
+
+The revise loop creates a new edge: text authored by one untrusted agent (the
+reviewer's verdict and findings) is deliberately delivered to another untrusted
+agent (the revise-round worker). That edge is contained by an explicit
+**evidence/instruction split**:
+
+- The *instruction* remains the versioned, harness-written amended spec
+  (`amendment_reason`, optional `amendment_check`) — never reviewer prose.
+- The *evidence* is materialized by the dispatcher into a read-only,
+  git-excluded `.hydra-context/revision-evidence/` bundle in the worker's
+  worktree, with a manifest whose trust labels are fixed by the harness
+  (`untrusted-reviewer-evidence` for verdict content, `dispatcher-generated`
+  for harness-written files). The worker prompt carries only compact manifest
+  metadata and explicitly names the bundle as ephemeral untrusted data.
+- Where reviewer text does enter a prompt render, the shared renderer wraps it
+  in non-forgeable evidence fences (dynamic backtick sizing so reviewer text
+  cannot close the fence), neutralizes bidi and invisible control characters,
+  and enforces per-field and total byte budgets — truncation notices are
+  emitted on the trusted side of the fence, so a reviewer cannot forge one.
+- Provenance is checked before delivery: every verdict in the bundle must hash-
+  match a recorded `review_verdict` ledger event; unprovenanced files are not
+  transported.
+
+A reviewer therefore influences *what the worker is shown*, never *what the
+worker is instructed to do*, and never what promotion re-verifies.
 
 ## 10. `AGENTS.md` (tracked, inherited by every worktree)
 
@@ -143,3 +170,15 @@ Vendor files (`CLAUDE.md`, `.codex/config.toml`, `opencode.json`, `.kimi/`) conf
   network isolation.
 - **§4 layer 4 upheld and strengthened.** The post-hoc Git diff audit remains
   authoritative; the two new promote gates are additional layer-4 checks.
+- **§9.1 / review provenance — update 2026-07-21 (v0.6.8.3).** The reviewer→
+  worker edge described in §9.1 shipped: file-first revision evidence with
+  fenced, budgeted, provenance-checked delivery. On the record-keeping side,
+  verdicts are now append-only generations under
+  `authoritative/reviews/<task>/` (fsynced no-replace publishes, age-based
+  crash-safe sequence ownership) — a reviewer's clean process exit is
+  telemetry only; acceptance requires a recorded `accept` generation. The
+  run-0057 verification-policy repair (typecheck + tests as the tracked
+  default gate) was deliberately deferred and has **not** shipped — the
+  tracked policy default remains the JS syntax check; per-amendment
+  `amendment_check` assertions are the current mechanism for demanding
+  stronger checks on a revise round.

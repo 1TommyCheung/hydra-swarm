@@ -41,6 +41,8 @@ Merge to primary, push, deploy, destructive Git operations, secret changes, and 
 ### 4.6 Instructions are ledger events
 No instruction reaches a running agent outside a versioned task specification recorded in the run ledger. Mid-turn instruction injection is prohibited; course-correction happens at turn boundaries via `resume()` with an amended, version-bumped spec (see `vendor-adapters.md`).
 
+Evidence is the sanctioned complement to instructions (v0.6.8.3): an amended (revise-round) dispatch materializes the recorded review verdicts a worker must address into a read-only, git-excluded `.hydra-context/revision-evidence/` bundle inside the worker's own worktree — file-first, prompt-light. The prompt carries only compact manifest metadata (paths, SHA-256s, trust labels); the bundle content is explicitly labelled untrusted reviewer *data*, never instructions, and every entry is provenance-checked against `review_verdict` ledger events. This closes issue #26 (workers could not read the verdicts they were asked to fix) without ever granting workers access to `authoritative/`.
+
 ### 4.7 Deterministic gates decide; probabilistic tools inform
 
 | Evidence | Authority |
@@ -53,6 +55,9 @@ No instruction reaches a running agent outside a versioned task specification re
 | Graphify EXTRACTED edges (Wave 2) | Investigation triggers |
 | Graphify INFERRED edges (Wave 2) | Review questions only |
 | LLM review | Advisory judgment |
+| Recorded review verdict (append-only store, v0.6.8.3) | Authoritative record of the review judgment; reviewer process exit is telemetry, never a verdict. "Only a recorded `accept` proceeds" is a lead-protocol rule — `squash`/`integrate` gate on promotion + squash records, not on the review store |
+| Revision-evidence bundle (`.hydra-context/`, v0.6.8.3) | Untrusted reviewer evidence handed to a revise-round worker as data — input, never a gate |
+| `amendment_check` assertions (v0.6.8.1) | Mandatory worker-prompt gate on revise rounds; promotion still re-verifies independently |
 | Agent-reported tests | Untrusted until reproduced |
 
 ### 4.8 Authoritative-state writes (trust decision)
@@ -146,11 +151,20 @@ disagreeing).
   credentials in the worker env. *Disposition: honest as a Wave 0–2 "privileged
   lead + audited worker" model; the daemon milestone closes it. Also amended in
   `trust-and-permissions.md` §11.*
-- **§4.6 — amendment content is not fully ledgered.** `amend-task.sh` records the
-  version bump (`task_spec_amended`) but the substantive spec edit is a hand edit
-  to the instantiated task file. A recovered lead sees *that* an amendment
-  happened, not its full content. *Disposition: code follow-up (record the spec
-  delta to the ledger); tracked in `roadmap.md` later-enhancements.*
+- **§4.6 — amendment content is partially ledgered** (improved v0.6.8.1–0.6.8.3,
+  not closed). `task_spec_amended` now records the version bump, delivery, and
+  the amendment reason, and the amended spec (including any `amendment_check`
+  list) is atomically rewritten and mirrored into the worktree's read-only
+  `.hydra-task.yaml` — but a substantive hand edit to other spec fields is
+  still not captured as a ledger delta. *Disposition: code follow-up (record
+  the full spec delta); tracked in `roadmap.md` later-enhancements.*
+- **§4.6 / §4.7 — review verdicts and revision evidence (v0.6.8.3).** The
+  authoritative verdict record moved from a ledger-telemetry event to the
+  append-only store `authoritative/reviews/<task>/<seq>-<reviewed_head>.json`
+  (highest valid generation wins; full history retained), and revise-round
+  workers receive verdict evidence through the `.hydra-context/` bundle
+  described in §4.6 — as data, never instructions. No new promote-side gate
+  shipped in 0.6.8.3; the promote gate sequence is unchanged.
 - **§7 — the run state machine is inferred, not asserted.** `run-init.sh` writes
   `state: planning` and no script advances it through
   executing/branch_review/integrating/…; task/run state is *reconstructed from
