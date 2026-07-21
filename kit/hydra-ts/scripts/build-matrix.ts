@@ -9,6 +9,7 @@
 // Targets (glibc Linux; musl is explicitly OUT of scope — see the stage-3
 // doc's follow-ups):
 //   bun-darwin-arm64  bun-darwin-x64  bun-linux-x64  bun-linux-arm64
+//   bun-windows-arm64 bun-windows-x64
 //
 // Bun resolution matches the hydra_resolve_node() "pin/resolve/assert" spirit
 // (kit/hydra/scripts/lib.sh): only controlled, explicit locations are probed
@@ -30,7 +31,8 @@
 // summary marks it FAILED, and the script exits non-zero.
 //
 // Stale-artifact hygiene (stage-4 review finding 3): before each target's
-// build, any prior-run dist/<target>/hydra-cli and dist/<target>/manifest.json
+// build, any prior-run binary (hydra-cli on Unix, hydra-cli.exe on Windows)
+// and dist/<target>/manifest.json
 // are removed, and the binary is built into a temporary path that is
 // atomically renamed into place only on success (manifests are written the
 // same way). A failed or interrupted build therefore never leaves a stale or
@@ -43,7 +45,7 @@
 //   node --experimental-strip-types scripts/build-matrix.ts [--targets=a,b,...]
 //
 // Output layout:
-//   dist/<target>/hydra-cli       compiled executable
+//   dist/<target>/hydra-cli[.exe] compiled executable
 //   dist/<target>/manifest.json   per-artifact manifest (plan: "one manifest
 //                                 per artifact")
 //   dist/manifest.json            aggregate manifest for the whole run
@@ -56,26 +58,28 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HYDRA_TS_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const DIST_DIR = join(HYDRA_TS_ROOT, 'dist');
 const ENTRYPOINT = 'src/cli.ts';
-const OUTFILE_NAME = 'hydra-cli';
 const BUILD_FLAGS = ['--compile', '--no-compile-autoload-dotenv', '--no-compile-autoload-bunfig'];
 
-const DEFAULT_TARGETS = [
+export const DEFAULT_TARGETS = [
   'bun-darwin-arm64',
   'bun-darwin-x64',
   'bun-linux-x64',
   'bun-linux-arm64',
+  'bun-windows-arm64',
+  'bun-windows-x64',
 ] as const;
 
 interface ArtifactManifest {
@@ -180,7 +184,7 @@ function writeFileAtomic(path: string, data: string): void {
   renameSync(tmp, path);
 }
 
-function parseTargets(argv: string[]): string[] {
+export function parseTargets(argv: string[]): string[] {
   const flag = argv.find((arg) => arg.startsWith('--targets='));
   const unknown = argv.filter((arg) => !arg.startsWith('--targets='));
   if (unknown.length > 0) {
@@ -196,16 +200,66 @@ function parseTargets(argv: string[]): string[] {
   return requested;
 }
 
-function buildTarget(
+export function outfileNameForTarget(target: string): string {
+  return target.startsWith('bun-windows-') ? 'hydra-cli.exe' : 'hydra-cli';
+}
+
+export function artifactPaths(
+  target: string,
+  distDir = DIST_DIR,
+): { outDir: string; outfile: string; manifestPath: string } {
+  const outDir = join(distDir, target);
+  return {
+    outDir,
+    outfile: join(outDir, outfileNameForTarget(target)),
+    manifestPath: join(outDir, 'manifest.json'),
+  };
+}
+
+interface BuildTargetOptions {
+  distDir?: string;
+  hydraRoot?: string;
+  executeBuild?: (bunPath: string, args: string[], cwd: string) => void;
+}
+
+function executeBunBuild(bunPath: string, args: string[], cwd: string): void {
+  execFileSync(bunPath, args, { cwd, stdio: 'inherit' });
+}
+
+/** Remove every published or temporary artifact that could be mistaken for this run. */
+function cleanTargetArtifacts(outDir: string): void {
+  if (!existsSync(outDir)) return;
+  for (const name of readdirSync(outDir)) {
+    if (
+      name === 'hydra-cli'
+      || name === 'hydra-cli.exe'
+      || name === 'manifest.json'
+      || name.startsWith('hydra-cli.tmp-')
+      || name.startsWith('hydra-cli.exe.tmp-')
+      || name.startsWith('manifest.json.tmp-')
+    ) {
+      rmSync(join(outDir, name), { force: true });
+    }
+  }
+}
+
+export function buildTarget(
   target: string,
   bun: { path: string; version: string },
   sha: string,
   builtAt: string,
+  options: BuildTargetOptions = {},
 ): ArtifactManifest | null {
-  const outDir = join(DIST_DIR, target);
-  const outfile = join(outDir, OUTFILE_NAME);
-  const manifestPath = join(outDir, 'manifest.json');
-  const tmpOutfile = `${outfile}.tmp-${process.pid}`;
+  const distDir = options.distDir ?? DIST_DIR;
+  const hydraRoot = options.hydraRoot ?? HYDRA_TS_ROOT;
+  const executeBuild = options.executeBuild ?? executeBunBuild;
+  const { outDir, outfile, manifestPath } = artifactPaths(target, distDir);
+  // Keep .exe last even on the unpublished temporary path. Bun's Windows
+  // compiler expects an executable extension and may otherwise append one,
+  // which would make the subsequent atomic rename look for the wrong file.
+  const tmpOutfile = target.startsWith('bun-windows-')
+    ? join(outDir, `hydra-cli.tmp-${process.pid}.exe`)
+    : `${outfile}.tmp-${process.pid}`;
   mkdirSync(outDir, { recursive: true });
 
   // Stale-artifact hygiene (stage-4 review finding 3): remove any prior-run
@@ -213,21 +267,19 @@ function buildTarget(
   // temp path that is renamed into place only on success. A failed or
   // interrupted build never leaves a stale or partial artifact that looks
   // like a fresh product of this run — the target directory is left empty.
-  rmSync(outfile, { force: true });
-  rmSync(manifestPath, { force: true });
-  rmSync(tmpOutfile, { force: true }); // leftover from a killed earlier run
+  cleanTargetArtifacts(outDir);
 
-  process.stdout.write(`\n[build] ${target} -> ${relative(HYDRA_TS_ROOT, outfile)}\n`);
+  process.stdout.write(`\n[build] ${target} -> ${relative(hydraRoot, outfile)}\n`);
   // execFileSync returns normally only on exit 0; a non-zero exit throws with
   // the child's status attached. stdio: inherit keeps bun's own progress and
   // error output (including the one-time runtime `Downloading [...]` line for
   // cross-compiles) visible in the build log.
   let status = 0;
   try {
-    execFileSync(
+    executeBuild(
       bun.path,
       ['build', ...BUILD_FLAGS, `--target=${target}`, '--outfile', tmpOutfile, ENTRYPOINT],
-      { cwd: HYDRA_TS_ROOT, stdio: 'inherit' },
+      hydraRoot,
     );
   } catch (error) {
     status = (error as { status?: number }).status ?? 1;
@@ -257,7 +309,7 @@ function buildTarget(
     entrypoint: ENTRYPOINT,
     build_flags: [...BUILD_FLAGS, `--target=${target}`],
     target,
-    outfile: `${relative(HYDRA_TS_ROOT, outfile)}`,
+    outfile: `${relative(hydraRoot, outfile)}`,
     size_bytes: statSync(outfile).size,
     sha256: sha256File(outfile),
   };
@@ -326,4 +378,6 @@ function main(argv: string[]): number {
   return 0;
 }
 
-process.exitCode = main(process.argv.slice(2));
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.exitCode = main(process.argv.slice(2));
+}
