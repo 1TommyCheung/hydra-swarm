@@ -66,6 +66,55 @@ interface StatusJson {
   ledger_events: Array<Record<string, unknown>>;
 }
 
+/**
+ * Launcher-parity comparison that excludes only the wall-clock-derived
+ * `elapsed_seconds` field. The two routes are spawned sequentially, so their
+ * observations of "now" can straddle a one-second boundary; comparing the
+ * complete JSON strings then fails on a one-second elapsed_seconds difference
+ * even though both routes are byte-identical in every other field.
+ *
+ * The clock field is NOT ignored: each value must be a finite, non-negative
+ * number, and the pair may differ by no more than `maxClockDeltaSeconds` —
+ * the real interval between the two sequential observations. Every other
+ * field is strict deep-equality checked, so a route that diverges anywhere
+ * else still fails.
+ */
+function assertLauncherParity(
+  tsStdout: string,
+  unsetStdout: string,
+  maxClockDeltaSeconds: number,
+): void {
+  const tsJson = JSON.parse(tsStdout) as Record<string, unknown>;
+  const unsetJson = JSON.parse(unsetStdout) as Record<string, unknown>;
+
+  const elapsedValues: number[] = [];
+  for (const [label, doc] of [['ts', tsJson], ['unset', unsetJson]] as const) {
+    const elapsed = doc.elapsed_seconds;
+    if (typeof elapsed !== 'number') {
+      assert.fail(`${label} route: elapsed_seconds must be a number, got ${String(elapsed)}`);
+    }
+    assert.equal(Number.isFinite(elapsed), true, `${label} route: elapsed_seconds must be finite`);
+    assert.ok(elapsed >= 0, `${label} route: elapsed_seconds must be non-negative, got ${elapsed}`);
+    elapsedValues.push(elapsed);
+  }
+  const clockDelta = Math.abs(elapsedValues[0] - elapsedValues[1]);
+  assert.ok(
+    clockDelta <= maxClockDeltaSeconds,
+    `elapsed_seconds differs by ${clockDelta}s, beyond the sequential observation interval of ${maxClockDeltaSeconds}s`,
+  );
+
+  const stripClock = (doc: Record<string, unknown>): Record<string, unknown> => {
+    const copy = { ...doc };
+    delete copy.elapsed_seconds;
+    return copy;
+  };
+  assert.deepEqual(
+    stripClock(unsetJson),
+    stripClock(tsJson),
+    'unset HYDRA_HARNESS must route identically to ts in every non-clock field',
+  );
+}
+
 describe('status.sh launcher routing', () => {
   before(() => {
     cleanTmp();
@@ -177,10 +226,55 @@ describe('status.sh launcher routing', () => {
       HYDRA_REPO_ID: `test-${f.runId}`,
     };
     delete unsetEnv.HYDRA_HARNESS;
+    // Time both spawns: each route derives elapsed_seconds from its own
+    // observation of the wall clock, so their values may legitimately differ
+    // by the interval between the two observations (plus one second of
+    // floor() quantization) — but by no more.
+    const startMs = Date.now();
     const explicit = spawnSync('bash', [STATUS_SH, f.runId, 'task-a', '--json'], { encoding: 'utf8', env: tsEnv });
     const unset = spawnSync('bash', [STATUS_SH, f.runId, 'task-a', '--json'], { encoding: 'utf8', env: unsetEnv });
+    const maxClockDeltaSeconds = Math.ceil((Date.now() - startMs) / 1000) + 1;
     assert.equal(unset.status, 0, `unset route failed: ${unset.stderr}`);
     assert.equal(explicit.status, 0, `ts route failed: ${explicit.stderr}`);
-    assert.equal(unset.stdout, explicit.stdout, 'unset HYDRA_HARNESS must route identically to ts');
+    assertLauncherParity(explicit.stdout, unset.stdout, maxClockDeltaSeconds);
+  });
+
+  it('parity normalization cannot hide differences outside the clock field', () => {
+    const base = {
+      state: 'completed',
+      agent_run_id: 'run-x-task-a-v1',
+      vendor: 'claude',
+      elapsed_seconds: 100,
+      timeout_minutes: 45,
+      ledger_events: [{ event: 'task_started' }, { event: 'agent_exited' }],
+    };
+    const baseOut = JSON.stringify(base);
+
+    // In-bound clock drift with otherwise identical documents passes.
+    assert.doesNotThrow(() => assertLauncherParity(
+      baseOut,
+      JSON.stringify({ ...base, elapsed_seconds: 101 }),
+      2,
+    ));
+
+    // A difference in any non-clock field still fails the parity check.
+    assert.throws(
+      () => assertLauncherParity(baseOut, JSON.stringify({ ...base, state: 'failed' }), 2),
+      /non-clock field/,
+    );
+
+    // Clock drift beyond the sequential observation interval still fails.
+    assert.throws(
+      () => assertLauncherParity(baseOut, JSON.stringify({ ...base, elapsed_seconds: 200 }), 2),
+      /elapsed_seconds differs by/,
+    );
+
+    // A route that stops reporting elapsed_seconds altogether still fails.
+    const missing: Record<string, unknown> = { ...base };
+    delete missing.elapsed_seconds;
+    assert.throws(
+      () => assertLauncherParity(baseOut, JSON.stringify(missing), 2),
+      /elapsed_seconds must be a number/,
+    );
   });
 });
