@@ -63,7 +63,12 @@ No instruction reaches a running agent outside a versioned task specification re
 
 The lead (Claude Code) invokes harness scripts via its shell; since lead and scripts run as the same OS user, the lead *could* technically bypass the scripts. This is therefore a **protocol boundary for the lead** and a **real boundary for workers** — with one vendor-asymmetric exception: the state store is a separate path that is never handed to a worker, and for Codex (`workspace-write` sandbox) and Kimi (`srt`) the OS sandbox structurally confines writes to the worktree, so those workers cannot reach the state store at the OS level. Claude workers, however, run under `--permission-mode bypassPermissions` with **no OS sandbox**, so a Claude worker *could* read/write `~/.local/state/...` at the OS level. Today the real boundaries for the Claude case are: the state store is not in the worker's known paths, the post-hoc ownership audit, and no remote credentials in the worker env (see `state-and-worktrees.md` and the drift note in §9). This is honest and sufficient for Wave 0: the threat model treats workers as untrusted and the lead as a trusted-but-audited coordinator whose every state mutation flows through logged script invocations.
 
-**Hardening milestone (roadmap):** a harness daemon owning the state directory under separated privileges, exposing narrow operations (`create-run`, `register-task`, `record-dispatch`, `promote-result`, `record-verification`, `record-review`, `close-run`), with the lead holding read-only access to promoted views. Deferred until the core loop is proven.
+**Hardening milestone (roadmap):** a harness daemon owning the state directory under separated privileges, exposing narrow operations (`create-run`, `register-task`, `record-dispatch`, `promote-result`, `record-verification`, `record-review`, `close-run`), with the lead holding read-only access to promoted views.
+
+**As of v0.6.8.1:** the first daemon MVP exists behind `HYDRA_DAEMON_SOCKET`.
+`run-init`, `dispatch`, `promote`, and `record-review` can route through the
+daemon boundary while preserving direct-script compatibility when the socket is
+unset. This is an opt-in transition step, not yet full write-path enforcement.
 
 ## 5. System model
 

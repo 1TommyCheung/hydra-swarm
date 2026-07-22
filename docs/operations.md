@@ -95,12 +95,40 @@ A lower-level `HYDRA_ADAPTER_RUNTIME` override (`ts` or `compiled`) takes
 precedence inside TypeScript dispatch for the adapter only; leave it unset for
 normal operation.
 
+## Optional daemon boundary (Hermes integration)
+
+Hydra ships an opt-in local daemon for authoritative mutation operations.
+When `HYDRA_DAEMON_SOCKET` is set, these write paths route through the daemon
+over a Unix socket JSON protocol:
+
+- `run-init` -> `create-run`
+- `dispatch` -> `record-dispatch`
+- `promote` -> `promote-result`
+- `record-review` -> `record-review`
+
+Start and query it with the launcher:
+
+```bash
+HYDRA_DAEMON_SOCKET="$HOME/.local/state/hydra/hydra-daemon.sock" \
+  bash kit/hydra/scripts/daemon.sh start
+
+HYDRA_DAEMON_SOCKET="$HOME/.local/state/hydra/hydra-daemon.sock" \
+  bash kit/hydra/scripts/daemon.sh health
+
+HYDRA_DAEMON_SOCKET="$HOME/.local/state/hydra/hydra-daemon.sock" \
+  bash kit/hydra/scripts/daemon.sh stop
+```
+
+When `HYDRA_DAEMON_SOCKET` is unset, command behavior remains direct/script
+based (no daemon required).
+
 ## Environment variables (the operational surface)
 
 | Var | Purpose |
 |---|---|
 | `HYDRA_HARNESS` | Harness runtime. Unset: prefer `bin`, silently fall back to `ts` if no binary is resolvable. `ts`: force the Node lane. `bin`: force the pinned compiled-binary rollback (`HYDRA_BIN`), hard error if unusable. `bash` is **retired** and fails loudly. |
 | `HYDRA_BIN` | Absolute, regular, executable compiled binary for the `bin` lane (implicit or explicit); defaults to `kit/hydra-ts/dist/hydra-cli`. Pinned rollback artifact: `~/.local/share/hydra-pinned-binaries/v2/hydra-cli-v2-darwin-arm64`. |
+| `HYDRA_DAEMON_SOCKET` | Optional Unix socket path for daemon-backed mutation operations (`run-init`, `dispatch`, `promote`, `record-review`). Unset means direct mode. |
 | `HYDRA_ADAPTER_RUNTIME` | Advanced adapter-only override for TypeScript dispatch: `ts` or `compiled`. `bash` is **retired** (rejected); any other unrecognized value is also rejected. Normally leave unset. |
 | `HYDRA_WAVE` | Wave level; ≥1 activates the `wave_1` bootstrap (gitnexus analyze). Or set `kit/hydra/WAVE`. |
 | `HYDRA_STATE_ROOT` | Override the external state root entirely (takes precedence over `XDG_STATE_HOME` and the default). |

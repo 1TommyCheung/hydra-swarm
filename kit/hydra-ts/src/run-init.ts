@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { daemonRequest, daemonSocketPath } from './daemon/client.ts';
 import { log, die, warn, runDir, repoId, repoRoot, now, ledgerAppend } from './lib.ts';
 import { availableHeadNames, detectHeads, type HeadsSnapshot } from './detect-heads.ts';
 import { isCompiledBinary } from './kit-assets.ts';
@@ -100,9 +101,17 @@ tasks: []
 
 export default runInit;
 
-export function main(args: string[] = process.argv.slice(2)): number {
+export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
   try {
     if (!args[0]) die('usage: run-init.sh <run_id> [base_commit]');
+    const socket = daemonSocketPath();
+    if (socket) {
+      const payload: Record<string, unknown> = { run_id: args[0] };
+      if (args[1]) payload.base_commit = args[1];
+      const response = await daemonRequest('create-run', payload, { socketPath: socket });
+      process.stdout.write(`${String(response.run_dir ?? '')}\n`);
+      return 0;
+    }
     runInit(args[0], args[1], { detectHeads: () => detectHeads() });
     return 0;
   } catch (error) {
@@ -116,5 +125,5 @@ const isMain = !isCompiledBinary() && process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {
-  process.exitCode = main();
+  process.exitCode = await main();
 }

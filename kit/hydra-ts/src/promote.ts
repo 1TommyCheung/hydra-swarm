@@ -8,6 +8,7 @@ import {
   type AuditOwnershipResult,
 } from './audit-ownership.ts';
 import { isCompiledBinary, kitAssetPath, kitAssetText } from './kit-assets.ts';
+import { daemonRequest, daemonSocketPath } from './daemon/client.ts';
 import {
   ledgerAppend,
   log,
@@ -543,6 +544,23 @@ export async function main(
   options: PromoteOptions = {},
 ): Promise<number> {
   try {
+    const socket = daemonSocketPath();
+    if (socket) {
+      if (!args[0] || !args[1] || !args[2]) {
+        internal('usage: promote(run_id, task_id, inbox_result.json)');
+      }
+      const response = await daemonRequest(
+        'promote-result',
+        {
+          run_id: args[0],
+          task_id: args[1],
+          drop_path: args[2],
+        },
+        { socketPath: socket },
+      );
+      process.stdout.write(`${String(response.promoted_path ?? '')}\n`);
+      return 0;
+    }
     const result = await promote(args[0] ?? '', args[1] ?? '', args[2] ?? '', options);
     process.stdout.write(`${result.promoted}\n`);
     return 0;

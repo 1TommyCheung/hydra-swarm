@@ -32,6 +32,7 @@ import { main as buildWorkerPromptMain } from './build-worker-prompt.ts';
 import { main as cancelTaskMain } from './cancel-task.ts';
 import { main as codeIntelMain } from './code-intel.ts';
 import { main as createWorktreeMain } from './create-worktree.ts';
+import { main as daemonMain } from './daemon.ts';
 import { main as detectHeadsMain } from './detect-heads.ts';
 import { main as dispatchMain } from './dispatch.ts';
 import { main as freshnessGateMain } from './freshness-gate.ts';
@@ -111,6 +112,7 @@ export const routes: Readonly<Record<string, MainFn>> = {
 // this table only when the default registry is in play, and usage() lists
 // both. (run 0047: detect-heads; run 0048: gc, run-log.)
 const extensionRoutes: Readonly<Record<string, MainFn>> = {
+  'daemon': daemonMain,
   'detect-heads': detectHeadsMain,
   'gc': gcMain,
   'run-log': runLogMain,
@@ -143,6 +145,7 @@ const SIGNATURES: Readonly<Record<string, string>> = {
   'cancel-task': '<run_id> <task_id> [--wait-seconds N]',
   'code-intel': 'changed [--base <ref>] | impact <symbol> | query "<q>" | drift',
   'create-worktree': '<run_id> <task_id> [base_commit]',
+  'daemon': 'start|health|stop [--socket <path>]',
   'detect-heads': '[--json]',
   'dispatch': '<run_id> <task_id> [--background]',
   'freshness-gate': '<run_id> <task_id>',

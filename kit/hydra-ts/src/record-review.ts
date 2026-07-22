@@ -1,6 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { daemonRequest, daemonSocketPath } from './daemon/client.ts';
 import { isCompiledBinary, kitAssetText } from './kit-assets.ts';
 import { die, ledgerAppend, log, repoRoot, runDir, warn } from './lib.ts';
 
@@ -218,11 +219,25 @@ export default {
   RecordReviewError,
 };
 
-export function main(args: string[] = process.argv.slice(2)): number {
+export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
   try {
     const [runId, taskId, verdictPath] = args;
     if (!runId || !taskId || !verdictPath) {
       die('usage: record-review.sh <run_id> <task_id> <verdict.json>');
+    }
+    const socket = daemonSocketPath();
+    if (socket) {
+      const response = await daemonRequest(
+        'record-review',
+        {
+          run_id: runId,
+          task_id: taskId,
+          verdict_path: verdictPath,
+        },
+        { socketPath: socket },
+      );
+      process.stdout.write(`${String(response.review_path ?? '')}\n`);
+      return 0;
     }
     recordReview(runId, taskId, verdictPath);
     return 0;
@@ -238,5 +253,5 @@ const isMain = !isCompiledBinary() && process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {
-  process.exitCode = main();
+  process.exitCode = await main();
 }

@@ -612,6 +612,20 @@ every mutation already flows through script interfaces (`run-init`, `promote`,
 `squash`, `integrate`, `record-review`, `record-usage`, `amend-task`), this
 migration changes the *owner* of the scripts, not their callers.
 
+**Progress update (v0.6.8.1):**
+- Implemented local Unix-socket daemon and JSON request/response protocol.
+- Added operation handlers for all seven daemon operations above.
+- Added opt-in command routing via `HYDRA_DAEMON_SOCKET` for `run-init`,
+  `dispatch`, `promote`, and `record-review`.
+- Added `kit/hydra/scripts/daemon.sh` for `start`, `health`, `stop`.
+
+**Remaining to complete the milestone:**
+- Migrate the rest of authoritative write paths (`integrate`, `squash`,
+  `record-usage`, `amend-task`, and other ledger-mutating flows) so daemon mode
+  is comprehensive.
+- Enforce daemon-only authoritative writes (remove direct-write fallback) after
+  rollout and operational burn-in.
+
 ### Later enhancements
 - Standalone `hydra` CLI (moves the caller; scripts/schemas/state survive).
 - OpenCode **warm server** (`opencode serve` + `--attach`) for TUI-free, cold-

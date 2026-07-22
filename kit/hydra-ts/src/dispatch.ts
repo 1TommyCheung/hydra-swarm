@@ -28,6 +28,7 @@ import {
   type HeadsSnapshot,
   type KnownHead,
 } from './detect-heads.ts';
+import { daemonRequest, daemonSocketPath } from './daemon/client.ts';
 import {
   codexEventText,
   die,
@@ -1709,6 +1710,21 @@ export default { dispatch };
 
 export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
   try {
+    const socket = daemonSocketPath();
+    if (socket) {
+      if (!args[0] || !args[1]) die('usage: dispatch <run_id> <task_id> [--background]');
+      const response = await daemonRequest(
+        'record-dispatch',
+        {
+          run_id: args[0],
+          task_id: args[1],
+          background: args[2] === '--background',
+        },
+        { socketPath: socket },
+      );
+      process.stdout.write(`${String(response.agent_run_id ?? '')}\n`);
+      return 0;
+    }
     await dispatch(args[0] ?? '', args[1] ?? '', {
       background: args[2] === '--background',
     });
