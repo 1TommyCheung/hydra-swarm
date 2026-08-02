@@ -15,6 +15,7 @@ import {
   repoRoot,
   runDir as libRunDir,
   stateRoot as libStateRoot,
+  unescapeYamlDoubleQuoted,
   warn,
   yamlList,
   yamlScalar,
@@ -35,6 +36,132 @@ function defaultVerifyPolicyPath(): string {
   // Per-project active config — resolve checkout-relative (spike §9 verdict
   // #5). HYDRA_VERIFY_POLICY and options.verifyPolicy keep precedence.
   return kitAssetPath('policies/verification.yaml');
+}
+
+// ---------------------------------------------------------------------------
+// Verification-honesty signals (issue #38).
+//
+// Two blind spots let a promotion print a reassuring "passed" while nothing
+// meaningful was checked:
+//
+//   1. The claims-vs-observed divergence check below is INTERSECTION based: it
+//      only fires for a command present in both the worker's claims and the
+//      policy's observations. A worker that substituted its own weaker checks
+//      for the task spec's mandated commands overlaps neither set, so
+//      divergence stays false and the substitution is invisible.
+//   2. The active verification policy may still be the kit template's
+//      illustrative placeholder, which matches no files in this repo, exits 0,
+//      and is reported as "passed" having verified nothing.
+//
+// Both are disclosed loudly here. Neither blocks promotion — that is a policy
+// decision an operator has not signed off on.
+// ---------------------------------------------------------------------------
+
+/** The illustrative command shipped in the kit's policies/verification.yaml. */
+const TEMPLATE_PLACEHOLDER_VERIFY_COMMAND =
+  /^find\s+src\s+-name\s+'\*\.js'\s+-print0\s*\|\s*xargs\s+-0\s+-I\{\}\s+node\s+--check\s+\{\}$/;
+
+/** Whitespace-insensitive form used to compare command strings. */
+function normalizeCommand(command: string): string {
+  return command.trim().replace(/\s+/g, ' ');
+}
+
+/**
+ * The task spec's own declared `verification:` list.
+ *
+ * yamlList() needs a bare key line, but the shipped task template writes
+ * `verification:            # advisory to the worker; the MANDATORY gate` — a
+ * trailing comment is legal YAML and common in hand-authored specs. Falling
+ * back to a comment-tolerant scan keeps this disclosure from silently
+ * no-op'ing on exactly the shape operators copy from the template.
+ */
+function taskSpecVerification(taskSpec: string): string[] {
+  const direct = yamlList(taskSpec, 'verification').filter(Boolean);
+  if (direct.length > 0) return direct;
+
+  const items: string[] = [];
+  let grab = false;
+  for (const rawLine of readFileSync(taskSpec, 'utf8').split('\n')) {
+    const line = rawLine.replace(/\r$/, '');
+    if (/^verification:\s*(#.*)?$/.test(line)) {
+      grab = true;
+      continue;
+    }
+    if (!grab) continue;
+    const item = line.match(/^\s*-\s*(.*)$/);
+    if (item) {
+      const quoted = item[1].trim().match(/^"((?:\\.|[^"\\])*)"/);
+      const value = quoted
+        ? unescapeYamlDoubleQuoted(quoted[1])
+        : item[1].replace(/\s+#.*$/, '').trim();
+      if (value) items.push(value);
+      continue;
+    }
+    if (/^\S/.test(line)) grab = false;
+  }
+  return items;
+}
+
+/**
+ * The match must begin where a shell would start a command: at the start of the
+ * claim, or right after a separator (`&&`, `||`, `;`, `|`, `(`, `{`). This is
+ * what stops `echo pnpm test` from counting as having run `pnpm test`.
+ */
+const COMMAND_POSITION = /(?:^|[;&|({]\s*)$/;
+
+/** ...and it must end on a word boundary, so `pnpm testfoo` does not match. */
+const COMMAND_BOUNDARY = /^(?:\s|[;&|)}]|$)/;
+
+/**
+ * True when a mandated command appears among the worker's claimed commands,
+ * either as-is (modulo whitespace) or wrapped by a claim that runs it (e.g.
+ * `cd pkg && <cmd>`). Deliberately forgiving about wrapping and trailing
+ * arguments — this signal exists to catch a WHOLESALE substitution, not to
+ * nitpick a reworded invocation — but not so forgiving that the mandated
+ * command counts when it is merely an ARGUMENT to some other command.
+ */
+function mandatedCommandRan(mandated: string, claimed: string[]): boolean {
+  const needle = normalizeCommand(mandated);
+  if (needle === '') return true;
+  return claimed.some((command) => {
+    const haystack = normalizeCommand(command);
+    for (let from = 0; ; from += 1) {
+      const at = haystack.indexOf(needle, from);
+      if (at < 0) return false;
+      if (
+        COMMAND_POSITION.test(haystack.slice(0, at))
+        && COMMAND_BOUNDARY.test(haystack.slice(at + needle.length))
+      ) {
+        return true;
+      }
+      from = at;
+    }
+  });
+}
+
+/** The commands the active verification policy would run, if it is readable. */
+function policyCommands(policyPath: string): string[] {
+  // Same two lookups verify.ts performs: nested under verification_policy, or
+  // declared at column 0.
+  let commands = yamlList(policyPath, '  commands');
+  if (commands.length === 0) commands = yamlList(policyPath, 'commands');
+  return commands.filter(Boolean);
+}
+
+/**
+ * True when every command in the active policy is still the kit template's
+ * illustrative placeholder. An unreadable policy is not this signal's problem
+ * (verify() rejects on it), so it reports false.
+ */
+function isTemplatePlaceholderPolicy(policyPath: string): boolean {
+  let commands: string[];
+  try {
+    commands = policyCommands(policyPath);
+  } catch {
+    return false;
+  }
+  return commands.length > 0
+    && commands.every((command) => TEMPLATE_PLACEHOLDER_VERIFY_COMMAND.test(command.trim()));
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +210,10 @@ export interface PromoteResult {
   promoted: string;
   /** Whether the worker's verification claims diverged from harness observation. */
   divergence: boolean;
+  /** True when NONE of the task spec's declared verification commands appear in the worker's claims. */
+  mandatedVerificationMissing: boolean;
+  /** True when the active verification policy is still the kit template's placeholder. */
+  placeholderVerifyPolicy: boolean;
 }
 
 /** Rejection error carrying the bash exit code 5 and the ledger reason. */
@@ -508,6 +639,63 @@ export async function promote(
     }
   }
 
+  // --- 6b. Spec-mandated verification vs the worker's claims (issue #38) ----
+  // Additive to (and independent of) the intersection-based divergence check
+  // above: this compares the TASK SPEC's declared commands against the claims,
+  // which is the pair with zero overlap when a worker substitutes its own
+  // weaker checks.
+  const mandatedCommands = taskSpecVerification(taskSpec);
+  const claimedCommands = [...claimsMap.keys()];
+  const mandatedNotClaimed = mandatedCommands.filter(
+    (command) => !mandatedCommandRan(command, claimedCommands),
+  );
+  const mandatedVerificationMissing = mandatedCommands.length > 0
+    && mandatedNotClaimed.length === mandatedCommands.length;
+
+  if (mandatedVerificationMissing) {
+    const detail = mandatedNotClaimed.join(' ;; ');
+    appendLedger(
+      stateRoot,
+      runId,
+      'mandated_verification_missing',
+      'task_id',
+      taskId,
+      'commands',
+      detail,
+    );
+    warn(
+      `MANDATED VERIFICATION MISSING [${taskId}]: the worker's verification_claims name NONE `
+      + `of the ${mandatedCommands.length} verification command(s) declared in its task spec `
+      + `— never run: ${detail}`,
+    );
+    warn(
+      `[${taskId}] promoting anyway (this is disclosure, not a block) — treat this result's `
+      + 'verification as UNPROVEN and re-check it by hand before integrating',
+    );
+  }
+
+  // --- 6c. Is the active mandatory gate still the shipped placeholder? ------
+  const placeholderVerifyPolicy = isTemplatePlaceholderPolicy(verifyPolicy);
+  if (placeholderVerifyPolicy) {
+    appendLedger(
+      stateRoot,
+      runId,
+      'verification_policy_placeholder',
+      'task_id',
+      taskId,
+      'policy',
+      verifyPolicy,
+    );
+    warn(
+      `PLACEHOLDER VERIFICATION POLICY [${taskId}]: ${verifyPolicy} still contains only the kit `
+      + "template's illustrative command — no repo-specific mandatory gate is configured",
+    );
+    warn(
+      `[${taskId}] the verification "passed" status above therefore means NOTHING WAS ACTUALLY `
+      + `VERIFIED; put this repo's real commands in ${verifyPolicy}`,
+    );
+  }
+
   const promotedDir = join(rDir, 'authoritative', 'results');
   mkdirSync(promotedDir, { recursive: true });
   const promoted = join(promotedDir, `${taskId}.json`);
@@ -516,6 +704,9 @@ export async function promote(
     claims,
     harness_observed: { verification: observed },
     divergence,
+    mandated_verification_missing: mandatedVerificationMissing,
+    mandated_verification_not_claimed: mandatedNotClaimed,
+    verification_policy_placeholder: placeholderVerifyPolicy,
     promoted_at: now(),
   };
   writeFileSync(promoted, `${JSON.stringify(promotedDoc)}\n`, 'utf8');
@@ -530,11 +721,24 @@ export async function promote(
     fullClaimed,
     'divergence',
     String(divergence),
+    'mandated_verification_missing',
+    String(mandatedVerificationMissing),
+    'verification_policy_placeholder',
+    String(placeholderVerifyPolicy),
   );
 
-  log(`PROMOTED [${taskId}] head=${fullClaimed} divergence=${divergence}`);
+  log(
+    `PROMOTED [${taskId}] head=${fullClaimed} divergence=${divergence}`
+    + ` mandated_verification_missing=${mandatedVerificationMissing}`
+    + ` verification_policy_placeholder=${placeholderVerifyPolicy}`,
+  );
 
-  return { promoted, divergence };
+  return {
+    promoted,
+    divergence,
+    mandatedVerificationMissing,
+    placeholderVerifyPolicy,
+  };
 }
 
 /** CLI entry point preserving promote.sh's 0/2/5 exit-code contract. */

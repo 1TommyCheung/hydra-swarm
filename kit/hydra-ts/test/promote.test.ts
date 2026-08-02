@@ -16,6 +16,7 @@ import {
   main,
   promote,
   type PromoteOptions,
+  type PromoteResult,
 } from '../src/promote.ts';
 
 const TEST_TMP = join(import.meta.dirname, 'tmp-promote');
@@ -836,6 +837,188 @@ writable_paths:
     const promotedEvent = events.find((ev) => ev.event === 'result_promoted');
     assert.ok(promotedEvent);
     assert.equal(promotedEvent.divergence, 'true');
+  });
+
+  // --- issue #38: verification-honesty disclosure --------------------------
+
+  function withTaskSpecVerification(f: Fixture, verificationBlock: string): void {
+    writeFileSync(
+      f.taskSpec,
+      `task_id: ${f.taskId}
+run_id: ${f.runId}
+spec_version: 1
+worktree: ${f.worktree}
+branch: ${f.branch}
+base_commit: ${f.base}
+writable_paths:
+  - src/**
+${verificationBlock}`,
+      'utf8',
+    );
+  }
+
+  function withClaimedCommands(f: Fixture, commands: string[]): void {
+    const claims = JSON.parse(readFileSync(f.drop, 'utf8'));
+    claims.verification_claims = commands.map((command) => ({ command, status: 'passed' }));
+    writeFileSync(f.drop, JSON.stringify(claims), 'utf8');
+  }
+
+  async function promoteCapturingStderr(
+    f: Fixture,
+  ): Promise<{ result: PromoteResult; stderr: string }> {
+    const chunks: string[] = [];
+    const original = process.stderr.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      chunks.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const result = await promote(f.runId, f.taskId, f.drop, baseOptions(f));
+      return { result, stderr: chunks.join('') };
+    } finally {
+      process.stderr.write = original;
+    }
+  }
+
+  it('flags and warns when none of the spec-mandated verification commands were claimed', async () => {
+    const f = makeFixture();
+    withTaskSpecVerification(f, 'verification:\n  - "pnpm test"\n  - "pnpm typecheck"\n');
+    // The exact substitution from issue #38: the worker ran its own weaker
+    // checks, so its claims overlap NEITHER the spec's commands nor the
+    // policy's — the intersection-based divergence check stays blind.
+    withClaimedCommands(f, ['git diff --check', 'node --check src/app.js']);
+
+    const { result, stderr } = await promoteCapturingStderr(f);
+
+    assert.equal(result.mandatedVerificationMissing, true);
+    const promoted = JSON.parse(readFileSync(result.promoted, 'utf8'));
+    assert.equal(promoted.mandated_verification_missing, true);
+    assert.deepEqual(promoted.mandated_verification_not_claimed, ['pnpm test', 'pnpm typecheck']);
+    // Disclosure, not a block: the result is still promoted.
+    assert.equal(existsSync(result.promoted), true);
+    // The pre-existing divergence check is untouched by this.
+    assert.equal(promoted.divergence, false);
+
+    assert.match(stderr, /MANDATED VERIFICATION MISSING \[.*\]/);
+    assert.match(stderr, /pnpm test ;; pnpm typecheck/);
+
+    const events = readJsonl(ledgerPath(f.stateRoot, f.runId));
+    const flagged = events.find((ev) => ev.event === 'mandated_verification_missing');
+    assert.ok(flagged, 'expected a mandated_verification_missing ledger event');
+    assert.equal(flagged.task_id, f.taskId);
+    assert.match(flagged.commands, /pnpm test/);
+    const promotedEvent = events.find((ev) => ev.event === 'result_promoted');
+    assert.equal(promotedEvent?.mandated_verification_missing, 'true');
+  });
+
+  it('does not flag when at least one mandated command appears in the claims', async () => {
+    const f = makeFixture();
+    withTaskSpecVerification(f, 'verification:\n  - "pnpm test"\n  - "pnpm typecheck"\n');
+    // A claim that WRAPS a mandated command counts as having run it.
+    withClaimedCommands(f, ['cd kit/hydra-ts && pnpm test', 'git diff --check']);
+
+    const result = await promote(f.runId, f.taskId, f.drop, baseOptions(f));
+
+    assert.equal(result.mandatedVerificationMissing, false);
+    const promoted = JSON.parse(readFileSync(result.promoted, 'utf8'));
+    assert.equal(promoted.mandated_verification_missing, false);
+    assert.deepEqual(promoted.mandated_verification_not_claimed, ['pnpm typecheck']);
+  });
+
+  it('does not count a mandated command that is merely an argument to another command', async () => {
+    // Unrestricted substring matching let `echo pnpm test` satisfy a mandated
+    // `pnpm test`; the match must sit where a shell would start a command.
+    const f = makeFixture();
+    withTaskSpecVerification(f, 'verification:\n  - "pnpm test"\n');
+    withClaimedCommands(f, ['echo pnpm test', 'pnpm testfoo']);
+
+    const result = await promote(f.runId, f.taskId, f.drop, baseOptions(f));
+
+    assert.equal(result.mandatedVerificationMissing, true);
+    const promoted = JSON.parse(readFileSync(result.promoted, 'utf8'));
+    assert.deepEqual(promoted.mandated_verification_not_claimed, ['pnpm test']);
+  });
+
+  it('still counts a mandated command run after a separator or with extra arguments', async () => {
+    const f = makeFixture();
+    withTaskSpecVerification(f, 'verification:\n  - "pnpm test"\n');
+    withClaimedCommands(f, ['git diff --check && pnpm test --filter hydra-ts']);
+
+    const result = await promote(f.runId, f.taskId, f.drop, baseOptions(f));
+
+    assert.equal(result.mandatedVerificationMissing, false);
+  });
+
+  it('reads a mandated verification list whose key line carries a trailing comment', async () => {
+    const f = makeFixture();
+    // The shape the shipped task template uses.
+    withTaskSpecVerification(f, 'verification:   # advisory to the worker\n  - "pnpm test"\n');
+    withClaimedCommands(f, ['git diff --check']);
+
+    const result = await promote(f.runId, f.taskId, f.drop, baseOptions(f));
+    assert.equal(result.mandatedVerificationMissing, true);
+  });
+
+  it('does not flag when the task spec declares no verification commands', async () => {
+    const f = makeFixture();
+    const result = await promote(f.runId, f.taskId, f.drop, baseOptions(f));
+
+    assert.equal(result.mandatedVerificationMissing, false);
+    const promoted = JSON.parse(readFileSync(result.promoted, 'utf8'));
+    assert.equal(promoted.mandated_verification_missing, false);
+    assert.deepEqual(promoted.mandated_verification_not_claimed, []);
+    const events = readJsonl(ledgerPath(f.stateRoot, f.runId));
+    assert.ok(!events.some((ev) => ev.event === 'mandated_verification_missing'));
+  });
+
+  it('warns when the active verification policy is still the shipped placeholder', async () => {
+    const f = makeFixture();
+    writeFileSync(
+      f.verifyPolicy,
+      `verification_policy:
+  commands:
+    - "find src -name '*.js' -print0 | xargs -0 -I{} node --check {}"
+  network: false
+  timeout_minutes: 15
+`,
+      'utf8',
+    );
+
+    const { result, stderr } = await promoteCapturingStderr(f);
+
+    assert.equal(result.placeholderVerifyPolicy, true);
+    // Detection alone must not block promotion.
+    assert.equal(existsSync(result.promoted), true);
+    const promoted = JSON.parse(readFileSync(result.promoted, 'utf8'));
+    assert.equal(promoted.verification_policy_placeholder, true);
+
+    assert.match(stderr, /PLACEHOLDER VERIFICATION POLICY/);
+    assert.match(stderr, /NOTHING WAS ACTUALLY VERIFIED/);
+
+    const events = readJsonl(ledgerPath(f.stateRoot, f.runId));
+    const flagged = events.find((ev) => ev.event === 'verification_policy_placeholder');
+    assert.ok(flagged, 'expected a verification_policy_placeholder ledger event');
+    assert.equal(flagged.policy, f.verifyPolicy);
+  });
+
+  it('does not warn about a placeholder policy when real commands are configured', async () => {
+    const f = makeFixture();
+    writeFileSync(
+      f.verifyPolicy,
+      `verification_policy:
+  commands:
+    - "test pass"
+    - "find src -name '*.js' -print0 | xargs -0 -I{} node --check {}"
+`,
+      'utf8',
+    );
+
+    const { result, stderr } = await promoteCapturingStderr(f);
+
+    assert.equal(result.placeholderVerifyPolicy, false);
+    assert.ok(!stderr.includes('PLACEHOLDER VERIFICATION POLICY'));
+    const events = readJsonl(ledgerPath(f.stateRoot, f.runId));
+    assert.ok(!events.some((ev) => ev.event === 'verification_policy_placeholder'));
   });
 
   it('appends result_dropped ledger event on entry', async () => {

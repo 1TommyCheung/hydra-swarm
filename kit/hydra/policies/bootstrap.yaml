@@ -12,8 +12,15 @@
 # trust worker-created graph artifacts.
 bootstrap:
   common:
-    # No-op when the project has no lockfile (true for this repo today).
-    - "test -f pnpm-lock.yaml && pnpm install --frozen-lockfile || true"
+    # No-op when the project has no lockfile (true for this repo today), but a
+    # REAL install failure must propagate. The former
+    # `test -f ... && pnpm install ... || true` swallowed every install error
+    # at the shell level, so `worktree_bootstrapped status=ok` was appended for
+    # a worktree that never got its dependencies (issue #38); an `if` guard
+    # keeps the no-lockfile no-op while letting the install's own exit status
+    # through. create-worktree.ts additionally asserts that a lockfile-present
+    # worktree really does have node_modules afterwards.
+    - "if test -f pnpm-lock.yaml; then pnpm install --frozen-lockfile; fi"
   wave_1:
     - "gitnexus analyze --skip-agents-md --skip-skills --name hydra-boot-$HYDRA_TASK_ID --allow-duplicate-name . >/dev/null 2>&1 || true"
 env_per_worktree:

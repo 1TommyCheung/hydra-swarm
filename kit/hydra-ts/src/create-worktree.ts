@@ -100,6 +100,35 @@ function resolveRoots(options: CreateWorktreeOptions): ResolvedRoots {
   };
 }
 
+/** Lockfile whose presence makes the bootstrap policy's install step run. */
+const PNPM_LOCKFILE = 'pnpm-lock.yaml';
+
+/**
+ * Path to the bootstrap policy.
+ *
+ * Previously hardcoded to `<repoRoot>/kit/hydra/policies/bootstrap.yaml`, which
+ * only ever resolves in a dev checkout: in the installed-plugin layout the kit
+ * lives at `<repoRoot>/hydra/...` (packaging.md §2), the file was never found,
+ * and bootstrap silently became a total no-op — the likely root cause of the
+ * two same-run worktrees in issue #38 bootstrapping inconsistently.
+ *
+ * The candidates and their order are exactly kitAssetPath()'s (installed
+ * layout first, then this dev checkout), which is what promote.ts relies on for
+ * policies/verification.yaml. They are tried under the repo the worktree is
+ * being created FROM — callers (and tests) inject that root via
+ * options.repoRoot, whereas kitAssetPath() always anchors on cwd's repo; in
+ * production the two are the same repo, so this is kitAssetPath() semantics.
+ * kitAssetPath() itself is the fallback, so an installed plugin whose kit sits
+ * outside the target repo still finds its policy.
+ */
+function resolveBootstrapPolicy(repoRootPath: string): string {
+  for (const base of ['hydra', 'kit/hydra']) {
+    const candidate = join(repoRootPath, base, 'policies', 'bootstrap.yaml');
+    if (existsSync(candidate)) return candidate;
+  }
+  return kitAssetPath('policies/bootstrap.yaml');
+}
+
 function defaultWavePath(): string {
   // WAVE is per-install state written by the installer — resolve it
   // checkout-relative (spike §9 verdict #2). HYDRA_WAVE and options.wavePath
@@ -113,6 +142,31 @@ function resolvedRunDir(runId: string, roots: ResolvedRoots): string {
   return join(roots.stateRoot, 'runs', `run-${runId}`);
 }
 
+/** Outcome of one bootstrap phase: which step failed, and why. */
+type BootstrapStepResult =
+  | { ok: true }
+  | { ok: false; phase: string; step: string; error: string };
+
+/** Human-readable cause of an execFileSync rejection, for the failure detail. */
+function describeExecFailure(error: unknown): string {
+  // Steps run with stdio 'inherit' so a long install streams live to the lead's
+  // terminal; that means there is no captured stderr on the exception and the
+  // message + exit status are the diagnostics we can carry forward. Both are
+  // still far more actionable than the boolean this used to collapse to.
+  if (error instanceof Error) {
+    const status = (error as { status?: number | null }).status;
+    const signal = (error as { signal?: string | null }).signal;
+    const stderr = (error as { stderr?: Buffer | string | null }).stderr;
+    const parts = [error.message.trim() || String(error)];
+    if (typeof status === 'number') parts.push(`exit status ${status}`);
+    if (signal) parts.push(`signal ${signal}`);
+    const stderrText = stderr === null || stderr === undefined ? '' : String(stderr).trim();
+    if (stderrText) parts.push(`stderr: ${stderrText}`);
+    return parts.join('; ');
+  }
+  return String(error);
+}
+
 function runBootstrapSteps(
   worktree: string,
   runId: string,
@@ -121,7 +175,7 @@ function runBootstrapSteps(
   bootstrapPolicy: string,
   exec: typeof execFileSync,
   env: Record<string, string> | undefined,
-): boolean {
+): BootstrapStepResult {
   const steps = yamlList(bootstrapPolicy, `  ${key}`);
   for (const step of steps) {
     if (!step) continue;
@@ -137,11 +191,15 @@ function runBootstrapSteps(
         timeout: 600_000,
         stdio: 'inherit',
       } as ExecFileSyncOptions);
-    } catch {
-      return false;
+    } catch (error) {
+      // Preserve the diagnostics instead of reducing every failure mode to
+      // `false`: the caller threads these into bootstrapDetail, the ledger
+      // event and the die() message, so a genuine command failure is as
+      // specific as the lockfile-present-but-no-node_modules case.
+      return { ok: false, phase: key, step, error: describeExecFailure(error) };
     }
   }
-  return true;
+  return { ok: true };
 }
 
 function readWaveLevel(waveFile: string, env: Record<string, string> | undefined): number {
@@ -278,16 +336,37 @@ export function createWorktree(
 
   // Bootstrap phase.
   let bootstrapStatus = 'ok';
-  const bootstrapPolicy = join(roots.repoRoot, 'kit', 'hydra', 'policies', 'bootstrap.yaml');
+  let bootstrapDetail = '';
+  const bootstrapPolicy = resolveBootstrapPolicy(roots.repoRoot);
   const waveFile = options.wavePath ?? defaultWavePath();
   const waveLevel = readWaveLevel(waveFile, options.env);
 
+  // Detail for the "a step exited nonzero" failure mode specifically, kept
+  // apart from bootstrapDetail so the two failure modes get distinct messages.
+  let stepFailureDetail = '';
+  const describeStepFailure = (result: BootstrapStepResult): string => (
+    result.ok
+      ? ''
+      : `bootstrap step failed (${result.phase}): \`${result.step}\` — ${result.error}`
+  );
+
   if (existsSync(bootstrapPolicy)) {
-    if (!runBootstrapSteps(worktree, runId, taskId, 'common', bootstrapPolicy, exec, options.env)) {
+    const common = runBootstrapSteps(
+      worktree,
+      runId,
+      taskId,
+      'common',
+      bootstrapPolicy,
+      exec,
+      options.env,
+    );
+    if (!common.ok) {
       bootstrapStatus = 'failed';
+      stepFailureDetail = describeStepFailure(common);
+      bootstrapDetail = stepFailureDetail;
     }
     if (bootstrapStatus === 'ok' && waveLevel >= 1) {
-      if (!runBootstrapSteps(
+      const wave1 = runBootstrapSteps(
         worktree,
         runId,
         taskId,
@@ -295,11 +374,31 @@ export function createWorktree(
         bootstrapPolicy,
         exec,
         options.env,
-      )) {
+      );
+      if (!wave1.ok) {
         bootstrapStatus = 'failed';
+        stepFailureDetail = describeStepFailure(wave1);
+        bootstrapDetail = stepFailureDetail;
       }
       log(`wave_1 bootstrap steps executed (wave level ${waveLevel})`);
     }
+  }
+
+  // Post-bootstrap determinism check (issue #38). Every bootstrap step can exit
+  // 0 and still leave the worktree without its dependencies — that is exactly
+  // how two worktrees from the same run ended up bootstrapped differently, one
+  // of them silently substituting a weaker check for its mandated verification.
+  // A lockfile in the worktree means the policy's install step was supposed to
+  // run, so node_modules must exist afterwards. Fail here rather than letting a
+  // lead discover it mid-dispatch. No lockfile => nothing was ever going to be
+  // installed, so the pre-existing no-op behaviour is unchanged.
+  if (
+    bootstrapStatus === 'ok'
+    && existsSync(join(worktree, PNPM_LOCKFILE))
+    && !existsSync(join(worktree, 'node_modules'))
+  ) {
+    bootstrapStatus = 'failed';
+    bootstrapDetail = `${PNPM_LOCKFILE} is present but node_modules is missing after bootstrap`;
   }
 
   // Persist operational fields back into the instantiated task spec.
@@ -312,9 +411,31 @@ export function createWorktree(
     'status', bootstrapStatus,
     'worktree', worktree,
     'port', String(port),
+    'detail', bootstrapDetail,
   );
 
   if (bootstrapStatus !== 'ok') {
+    // Both failure modes name the worktree, the underlying cause and the policy
+    // that produced it. `bootstrap incomplete` is the steps-all-exited-0 case
+    // (the install claimed success but left no node_modules); `bootstrap failed`
+    // is a step that genuinely exited nonzero. The generic fallback only fires
+    // if a failure ever reaches here without a captured detail.
+    if (stepFailureDetail) {
+      die(
+        `bootstrap failed for ${taskId}: worktree ${worktree} — ${stepFailureDetail}`
+        + ` (policy ${bootstrapPolicy}). The worktree is NOT usable: a worker`
+        + ' dispatched into it cannot run the project\'s real verification'
+        + ' commands. Fix the failing step and recreate the worktree.',
+      );
+    }
+    if (bootstrapDetail) {
+      die(
+        `bootstrap incomplete for ${taskId}: worktree ${worktree} — ${bootstrapDetail}`
+        + ` (policy ${bootstrapPolicy}). The worktree is NOT usable: a worker`
+        + ' dispatched into it cannot run the project\'s real verification'
+        + ' commands. Fix the install and recreate the worktree.',
+      );
+    }
     die(`bootstrap failed for ${taskId}`);
   }
 

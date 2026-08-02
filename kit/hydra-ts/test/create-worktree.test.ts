@@ -64,19 +64,28 @@ interface RepoFixture {
   headCommit: string;
 }
 
-function createGitRepo(name: string): RepoFixture {
+function createGitRepo(name: string, extraFiles: Record<string, string> = {}): RepoFixture {
   const repoRoot = join(TEST_TMP, 'repos', name);
   mkdirSync(repoRoot, { recursive: true });
   execFileSync('git', ['init'], { cwd: repoRoot });
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoRoot });
   execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoRoot });
   writeFileSync(join(repoRoot, 'README.md'), `# ${name}\n`, 'utf8');
-  execFileSync('git', ['add', 'README.md'], { cwd: repoRoot });
+  for (const [relative, content] of Object.entries(extraFiles)) {
+    writeFileSync(join(repoRoot, relative), content, 'utf8');
+  }
+  execFileSync('git', ['add', '-A', '.'], { cwd: repoRoot });
   execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoRoot });
   const headCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
     cwd: repoRoot,
     encoding: 'utf8',
   }).trim();
+  // Every fixture repo gets a harmless bootstrap policy of its own. The
+  // implementation now resolves the policy the way kitAssetPath() does and
+  // falls back to the real checkout's policy when the fixture repo has none —
+  // without this, unrelated tests would execute this repo's actual bootstrap
+  // steps (including the wave_1 gitnexus index, since the checkout's WAVE is 2).
+  writeBootstrapPolicy(repoRoot, ['true'], ['true']);
   return { repoRoot, headCommit };
 }
 
@@ -384,50 +393,236 @@ describe('createWorktree', () => {
     assert.equal(readAllocatedPort(runId, taskId), expectedPortFromCksum(runId, taskId));
   });
 
-  it('executes the bootstrap policy only when it exists at the correct kit/hydra/policies path', () => {
-    const { repoRoot, headCommit } = createGitRepo('bootstrap-path');
-
-    // Deliberately write the policy at the OLD (wrong) path to prove the
-    // implementation does not silently skip a missing-at-correct-path policy.
-    const oldDir = join(repoRoot, 'hydra', 'policies');
-    mkdirSync(oldDir, { recursive: true });
-    writeFileSync(
-      join(oldDir, 'bootstrap.yaml'),
-      'bootstrap:\n  common:\n    - "echo old_path_step"\n',
-      'utf8',
-    );
-
-    // Write the real policy at the current repo layout path.
-    writeBootstrapPolicy(repoRoot, ['echo correct_path_step'], []);
-
-    const runId = 'bootstrap-path';
-    const taskId = 'task-bootstrap-path';
+  function recordedBootstrapSteps(
+    repoRoot: string,
+    runId: string,
+    taskId: string,
+    headCommit: string,
+  ): string[] {
     writeTaskSpec(runId, taskId, `task_id: ${taskId}\nrun_id: ${runId}\nbase_commit: ${headCommit}\n`);
-
-    const commonSteps: string[] = [];
+    const steps: string[] = [];
     const mockExec = ((
       command: string,
       args: string[] = [],
       options?: ExecFileSyncOptions,
     ): string | Buffer => {
       if (command === 'bash') {
-        commonSteps.push(args[1] ?? '');
+        steps.push(args[1] ?? '');
         return '';
       }
       return execFileSync(command, args, options);
     }) as typeof execFileSync;
 
     createWorktree(runId, taskId, undefined, { repoRoot, exec: mockExec });
+    return steps;
+  }
 
-    // The implementation must find and run the policy at the new path, not the
-    // old one. A file-exists-only test would miss a stale-path bug.
+  it('runs the dev-checkout kit/hydra/policies bootstrap policy', () => {
+    const { repoRoot, headCommit } = createGitRepo('bootstrap-path-dev');
+    writeBootstrapPolicy(repoRoot, ['echo dev_checkout_step'], []);
+
+    const steps = recordedBootstrapSteps(repoRoot, 'bootstrap-path-dev', 'task-dev', headCommit);
+
     assert.ok(
-      commonSteps.some((step) => step.includes('correct_path_step')),
-      'expected the common bootstrap step from kit/hydra/policies/bootstrap.yaml to execute',
+      steps.some((step) => step.includes('dev_checkout_step')),
+      'expected the common step from kit/hydra/policies/bootstrap.yaml to execute',
+    );
+  });
+
+  it('prefers the installed-plugin hydra/policies layout over kit/hydra/policies', () => {
+    // Regression for issue #38: the old hardcoded
+    // join(repoRoot, 'kit', 'hydra', 'policies', 'bootstrap.yaml') never
+    // resolved in an installed-plugin layout, where the kit lives at
+    // <repo>/hydra/... — bootstrap silently became a total no-op there. The
+    // policy is now resolved with kitAssetPath()'s candidates and order
+    // (installed layout first, dev checkout second), matching how promote.ts
+    // resolves policies/verification.yaml.
+    const { repoRoot, headCommit } = createGitRepo('bootstrap-path-installed');
+    writeBootstrapPolicy(repoRoot, ['echo dev_checkout_step'], []);
+
+    const installedDir = join(repoRoot, 'hydra', 'policies');
+    mkdirSync(installedDir, { recursive: true });
+    writeFileSync(
+      join(installedDir, 'bootstrap.yaml'),
+      'bootstrap:\n  common:\n    - "echo installed_layout_step"\n',
+      'utf8',
+    );
+
+    const steps = recordedBootstrapSteps(
+      repoRoot,
+      'bootstrap-path-installed',
+      'task-installed',
+      headCommit,
+    );
+
+    assert.ok(
+      steps.some((step) => step.includes('installed_layout_step')),
+      'expected the installed-layout hydra/policies/bootstrap.yaml to execute',
     );
     assert.ok(
-      !commonSteps.some((step) => step.includes('old_path_step')),
-      'did not expect the stale hydra/policies/bootstrap.yaml path to be used',
+      !steps.some((step) => step.includes('dev_checkout_step')),
+      'did not expect kit/hydra/policies to win over the installed layout',
+    );
+  });
+
+  it('fails loudly when a lockfile is present but bootstrap left no node_modules', () => {
+    // Issue #38: every step exited 0, so worktree_bootstrapped status=ok was
+    // appended for a worktree that never got its dependencies; the worker then
+    // silently substituted a weaker check for its mandated verification.
+    const { repoRoot, headCommit } = createGitRepo('bootstrap-no-node-modules', {
+      'pnpm-lock.yaml': 'lockfileVersion: 9\n',
+    });
+    writeBootstrapPolicy(repoRoot, ['true'], []);
+
+    const runId = 'bootstrap-no-node-modules';
+    const taskId = 'task-no-node-modules';
+    writeTaskSpec(runId, taskId, `task_id: ${taskId}\nrun_id: ${runId}\nbase_commit: ${headCommit}\n`);
+
+    const worktree = join(process.env.HYDRA_WORKTREE_ROOT!, `run-${runId}-${taskId}`);
+    assert.throws(
+      () => createWorktree(runId, taskId, undefined, { repoRoot }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /bootstrap incomplete for task-no-node-modules/);
+        assert.ok(error.message.includes(worktree), 'message must name the worktree');
+        assert.match(error.message, /node_modules is missing/);
+        return true;
+      },
+    );
+
+    const bootstrapped = readLedgerEvents(runId).find((e) => e.event === 'worktree_bootstrapped');
+    assert.ok(bootstrapped);
+    assert.notEqual(bootstrapped.status, 'ok');
+  });
+
+  it('reports the failing install command and its error when a bootstrap step exits nonzero', () => {
+    // Companion to the case above: there the install exits 0 and leaves no
+    // node_modules; here the install itself fails. runBootstrapSteps() used to
+    // collapse ANY step failure to `false`, so this path died with only the
+    // generic "bootstrap failed for <task>" and discarded which command failed
+    // and why. The failure detail must now be as specific as the other case.
+    const { repoRoot, headCommit } = createGitRepo('bootstrap-install-fails', {
+      'pnpm-lock.yaml': 'lockfileVersion: 9\n',
+    });
+    const installStep = 'test -f pnpm-lock.yaml && pnpm install --frozen-lockfile';
+    writeBootstrapPolicy(repoRoot, [installStep], []);
+
+    const runId = 'bootstrap-install-fails';
+    const taskId = 'task-install-fails';
+    writeTaskSpec(runId, taskId, `task_id: ${taskId}\nrun_id: ${runId}\nbase_commit: ${headCommit}\n`);
+
+    // A failing `pnpm` stand-in, injected through the exec override the sibling
+    // bootstrap tests already use; the shape mirrors an execFileSync rejection.
+    const stderrText = 'ERR_PNPM_OUTDATED_LOCKFILE Cannot install with frozen-lockfile';
+    const mockExec = ((
+      command: string,
+      args: string[] = [],
+      options?: ExecFileSyncOptions,
+    ): string | Buffer => {
+      if (command === 'bash' && (args[1] ?? '').includes('pnpm install')) {
+        const failure = new Error(`Command failed: bash -c ${args[1]}`) as Error & {
+          status?: number;
+          stderr?: string;
+        };
+        failure.status = 1;
+        failure.stderr = stderrText;
+        throw failure;
+      }
+      return execFileSync(command, args, options);
+    }) as typeof execFileSync;
+
+    const worktree = join(process.env.HYDRA_WORKTREE_ROOT!, `run-${runId}-${taskId}`);
+    assert.throws(
+      () => createWorktree(runId, taskId, undefined, { repoRoot, exec: mockExec }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.ok(
+          error.message !== `bootstrap failed for ${taskId}`,
+          'the generic message must not be all the operator gets',
+        );
+        assert.ok(error.message.includes(worktree), 'message must name the worktree');
+        assert.ok(
+          error.message.includes('pnpm install --frozen-lockfile'),
+          'message must name the failed command',
+        );
+        assert.ok(error.message.includes(stderrText), 'message must carry the underlying error');
+        assert.match(error.message, /exit status 1/);
+        return true;
+      },
+    );
+
+    const bootstrapped = readLedgerEvents(runId).find((e) => e.event === 'worktree_bootstrapped');
+    assert.ok(bootstrapped);
+    assert.equal(bootstrapped.status, 'failed');
+    assert.match(String(bootstrapped.detail), /pnpm install --frozen-lockfile/);
+    assert.match(String(bootstrapped.detail), /ERR_PNPM_OUTDATED_LOCKFILE/);
+  });
+
+  it('accepts a lockfile-present worktree once bootstrap produced node_modules', () => {
+    const { repoRoot, headCommit } = createGitRepo('bootstrap-node-modules-ok', {
+      'pnpm-lock.yaml': 'lockfileVersion: 9\n',
+    });
+    writeBootstrapPolicy(repoRoot, ['mkdir -p node_modules'], []);
+
+    const runId = 'bootstrap-node-modules-ok';
+    const taskId = 'task-node-modules-ok';
+    writeTaskSpec(runId, taskId, `task_id: ${taskId}\nrun_id: ${runId}\nbase_commit: ${headCommit}\n`);
+
+    const worktree = createWorktree(runId, taskId, undefined, { repoRoot });
+
+    assert.ok(existsSync(join(worktree, 'node_modules')));
+    const bootstrapped = readLedgerEvents(runId).find((e) => e.event === 'worktree_bootstrapped');
+    assert.equal(bootstrapped?.status, 'ok');
+  });
+
+  it('does not require node_modules when the repo has no lockfile', () => {
+    // The no-lockfile case must behave exactly as before the node_modules
+    // assertion existed: nothing to install, nothing to check.
+    const { repoRoot, headCommit } = createGitRepo('bootstrap-no-lockfile');
+    writeBootstrapPolicy(repoRoot, ['true'], []);
+
+    const runId = 'bootstrap-no-lockfile';
+    const taskId = 'task-no-lockfile';
+    writeTaskSpec(runId, taskId, `task_id: ${taskId}\nrun_id: ${runId}\nbase_commit: ${headCommit}\n`);
+
+    const worktree = createWorktree(runId, taskId, undefined, { repoRoot });
+
+    assert.ok(!existsSync(join(worktree, 'node_modules')));
+    const bootstrapped = readLedgerEvents(runId).find((e) => e.event === 'worktree_bootstrapped');
+    assert.equal(bootstrapped?.status, 'ok');
+  });
+
+  it('shipped bootstrap policy no-ops without a lockfile and propagates install failure', () => {
+    // The tracked policy's install step must stay a no-op when there is no
+    // lockfile (no new failure mode for repos without one) while no longer
+    // swallowing a real install failure behind `|| true`.
+    const policy = resolve(import.meta.dirname, '..', '..', 'hydra', 'policies', 'bootstrap.yaml');
+    const step = readFileSync(policy, 'utf8')
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.startsWith('- "') && line.includes('pnpm install'));
+    assert.ok(step, 'expected a pnpm install step in the shipped bootstrap policy');
+    assert.ok(!step.includes('|| true'), 'the install step must not swallow failures');
+
+    const command = step.slice(3, step.lastIndexOf('"'));
+    const noLockfileDir = join(TEST_TMP, 'shipped-policy-no-lockfile');
+    mkdirSync(noLockfileDir, { recursive: true });
+    // Exits 0 with no lockfile present; `pnpm` is never invoked.
+    execFileSync('bash', ['-c', command], { cwd: noLockfileDir, stdio: 'ignore' });
+
+    const failingDir = join(TEST_TMP, 'shipped-policy-install-fails');
+    mkdirSync(failingDir, { recursive: true });
+    writeFileSync(join(failingDir, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n', 'utf8');
+    const fakeBin = join(failingDir, 'bin');
+    mkdirSync(fakeBin, { recursive: true });
+    writeFileSync(join(fakeBin, 'pnpm'), '#!/usr/bin/env bash\nexit 7\n', { mode: 0o755 });
+    assert.throws(
+      () => execFileSync('bash', ['-c', command], {
+        cwd: failingDir,
+        stdio: 'ignore',
+        env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ''}` },
+      }),
+      /Command failed|status 7/,
     );
   });
 
@@ -444,11 +639,13 @@ describe('createWorktree', () => {
       /bootstrap failed/,
     );
 
-    // A failed bootstrap still records a ledger event.
+    // A failed bootstrap still records a ledger event — now carrying the step
+    // that failed, from a real (unmocked) nonzero exit.
     const events = readLedgerEvents(runId);
     const bootstrapped = events.find((e) => e.event === 'worktree_bootstrapped');
     assert.ok(bootstrapped);
     assert.equal(bootstrapped.status, 'failed');
+    assert.match(String(bootstrapped.detail), /bootstrap step failed \(common\): `false`/);
   });
 
   it('runs wave_1 bootstrap steps when wave level is >= 1', () => {
