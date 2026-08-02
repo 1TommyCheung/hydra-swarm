@@ -15,6 +15,7 @@ import {
   explore,
   review,
   start,
+  resume,
   buildWorkerPrompt,
   type OpencodeSpawn,
 } from '../src/adapter-opencode.ts';
@@ -911,6 +912,193 @@ ${extraSpecLines}`,
     const { capturedModel } = await captureStartModel(ctx, { model: 'override/model' });
 
     assert.equal(capturedModel, 'override/model');
+  });
+});
+
+describe('opencode resume (issue #33)', () => {
+  before(() => mkdirSync(TEST_TMP, { recursive: true }));
+  after(() => {
+    cleanTmp();
+    restoreEnv();
+  });
+
+  function setupResume() {
+    const agentRunId = `ar-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const worktree = join(TEST_TMP, 'resume-worktrees', agentRunId);
+    const inbox = join(TEST_TMP, 'resume-inbox', agentRunId);
+    const sessions = join(TEST_TMP, 'resume-sessions', agentRunId);
+    const spec = join(TEST_TMP, 'resume-specs', `${agentRunId}.yaml`);
+    mkdirSync(worktree, { recursive: true });
+    mkdirSync(inbox, { recursive: true });
+    mkdirSync(sessions, { recursive: true });
+    mkdirSync(dirname(spec), { recursive: true });
+    writeFileSync(
+      spec,
+      `task_id: adapter-opencode
+run_id: 0068
+spec_version: 2
+branch: hydra/0068/adapter-opencode
+base_commit: 71bcbcf9acf0aeadc5d8eb5d1c0d3868b45b6070
+objective: >
+  Do the thing.
+writable_paths:
+  - kit/hydra-ts/src/adapter-opencode.ts
+read_only_paths: []
+acceptance_criteria:
+  - pass
+`,
+      'utf8',
+    );
+    return { agentRunId, worktree, inbox, sessions, spec };
+  }
+
+  it('continues the prior session with `run -s <id>` and never forks it', async () => {
+    const { agentRunId, worktree, inbox, sessions, spec } = setupResume();
+    const stdout = eventsStdout({ sessionID: 'sess-prior-1', type: 'text', text: 'ok' });
+
+    let capturedArgs: string[] = [];
+    const spawn = makeSpawn(stdout, {
+      onSpawn: (_command, args) => { capturedArgs = args; },
+    });
+
+    const { output: stderr } = await captureStderr(() =>
+      captureStdout(() =>
+        resume(spec, worktree, inbox, sessions, agentRunId, 'sess-prior-1', {
+          spawn,
+          deriveDropFromGit: () => false,
+          stateRoot: join(TEST_TMP, 'missing-state', agentRunId),
+        }),
+      ),
+    );
+
+    // `opencode run -s <id>` — verified against the installed CLI's
+    // `opencode run --help`.
+    const sessionFlagIndex = capturedArgs.indexOf('-s');
+    assert.notEqual(sessionFlagIndex, -1, `expected -s in: ${capturedArgs.join(' ')}`);
+    assert.equal(capturedArgs[sessionFlagIndex + 1], 'sess-prior-1');
+    assert.equal(capturedArgs[0], 'run');
+    // --fork would branch away from the reviewed session history instead of
+    // continuing it; an amendment resume must never use it.
+    assert.equal(capturedArgs.includes('--fork'), false);
+    // The resume flag sits ahead of --dir, and the prompt stays last.
+    assert.ok(sessionFlagIndex < capturedArgs.indexOf('--dir'));
+    assert.equal(capturedArgs.at(-2), worktree);
+    assert.match(capturedArgs.at(-1) ?? '', /Task adapter-opencode/);
+    // The implementer profile and diagnostics flags are shared with start().
+    assert.ok(capturedArgs.includes('hydra-implementer'));
+    assert.ok(capturedArgs.includes('--print-logs'));
+
+    assert.ok(stderr.includes('opencode resume from session sess-prior-1'));
+  });
+
+  it('keeps the cold-start argv free of any session flag', async () => {
+    const { agentRunId, worktree, inbox, sessions, spec } = setupResume();
+    const stdout = eventsStdout({ sessionID: 'impl-cold', type: 'text', text: 'ok' });
+
+    let capturedArgs: string[] = [];
+    const spawn = makeSpawn(stdout, {
+      onSpawn: (_command, args) => { capturedArgs = args; },
+    });
+
+    await captureStdout(() =>
+      start(spec, worktree, inbox, sessions, agentRunId, {
+        spawn,
+        deriveDropFromGit: () => false,
+        stateRoot: join(TEST_TMP, 'missing-state', agentRunId),
+      }),
+    );
+
+    assert.equal(capturedArgs.includes('-s'), false);
+    assert.equal(capturedArgs.includes('--session'), false);
+    assert.equal(capturedArgs.includes('--fork'), false);
+  });
+
+  it('falls back to the cold-start argv when the prior session id is empty', async () => {
+    const { agentRunId, worktree, inbox, sessions, spec } = setupResume();
+    const stdout = eventsStdout({ sessionID: 'impl-empty', type: 'text', text: 'ok' });
+
+    let capturedArgs: string[] = [];
+    const spawn = makeSpawn(stdout, {
+      onSpawn: (_command, args) => { capturedArgs = args; },
+    });
+
+    await captureStdout(() =>
+      resume(spec, worktree, inbox, sessions, agentRunId, '', {
+        spawn,
+        deriveDropFromGit: () => false,
+        stateRoot: join(TEST_TMP, 'missing-state', agentRunId),
+      }),
+    );
+
+    assert.equal(capturedArgs.includes('-s'), false);
+  });
+
+  it('captures the session id and bridges the worker result on the resume path', async () => {
+    const { agentRunId, worktree, inbox, sessions, spec } = setupResume();
+    const stdout = eventsStdout(
+      { sessionID: 'sess-prior-2', type: 'text', text: 'resumed' },
+      { sessionID: 'sess-prior-2', type: 'step_finish', part: { tokens: { input: 3, output: 4 }, cost: 0.5 } },
+    );
+
+    const spawn = makeSpawn(stdout, {
+      onSpawn: () => {
+        writeFileSync(
+          join(worktree, '.hydra-result.json'),
+          JSON.stringify({
+            task_id: 'adapter-opencode',
+            run_id: '0068',
+            spec_version: 2,
+            vendor: 'codex',
+            status: 'completed',
+            branch: 'hydra/0068/adapter-opencode',
+            base_commit: '71bcbcf9acf0aeadc5d8eb5d1c0d3868b45b6070',
+            head_commit: 'feed0068',
+            summary: 'resumed and done',
+            files_changed: ['kit/hydra-ts/src/adapter-opencode.ts'],
+            verification_claims: [],
+            risks: [],
+            unresolved_questions: [],
+            suggested_additional_checks: [],
+          }),
+          'utf8',
+        );
+      },
+    });
+
+    const { result } = await captureStderr(() =>
+      captureStdout(() =>
+        resume(spec, worktree, inbox, sessions, agentRunId, 'sess-prior-2', {
+          spawn,
+          stateRoot: join(TEST_TMP, 'missing-state', agentRunId),
+        }),
+      ),
+    );
+
+    assert.equal(result.result, agentRunId);
+
+    // The same capture/session/bridge machinery as start().
+    const session = readJson(`${sessions}/${agentRunId}.json`) as Record<string, unknown>;
+    assert.equal(session.vendor, 'opencode');
+    assert.equal(session.session_id, 'sess-prior-2');
+
+    const drop = readJson(join(inbox, 'result.json')) as Record<string, unknown>;
+    assert.equal(drop.vendor, 'opencode');
+    assert.equal(drop.session_id, 'sess-prior-2');
+    assert.equal(drop.summary, 'resumed and done');
+    assert.equal(drop.head_commit, 'feed0068');
+  });
+
+  it('rejects a resume that is missing its required arguments', async () => {
+    const { agentRunId, worktree, inbox, sessions, spec } = setupResume();
+
+    await assert.rejects(
+      resume('', worktree, inbox, sessions, agentRunId, 'sess-prior-3'),
+      /usage: opencode\.ts resume/,
+    );
+    await assert.rejects(
+      resume(spec, worktree, inbox, sessions, '', 'sess-prior-3'),
+      /usage: opencode\.ts resume/,
+    );
   });
 });
 

@@ -426,20 +426,28 @@ export function buildWorkerPrompt(taskSpec: string): string {
   return buildSharedWorkerPrompt(taskSpec);
 }
 
-/** Implementer role: run a worker in its own worktree and bridge the result drop. */
-export async function start(
+/**
+ * Implementer role: run a worker in its own worktree and bridge the result
+ * drop. Shared by both write verbs — only the resume flag differs:
+ *   start  <task_spec> <worktree> <inbox> <sessions> <agent_run_id>
+ *   resume <task_spec> <worktree> <inbox> <sessions> <agent_run_id> <prior_session_id>
+ */
+async function runImplementer(
+  verb: 'start' | 'resume',
   taskSpec: string,
   worktree: string,
   inbox: string,
   sessions: string,
   agentRunId: string,
+  priorSessionId?: string,
   options?: OpencodeRunOptions,
 ): Promise<string> {
-  if (!taskSpec) die('usage: opencode.ts start <task_spec> <worktree> <inbox> <sessions> <agent_run_id>');
-  if (!worktree) die('usage: opencode.ts start <task_spec> <worktree> <inbox> <sessions> <agent_run_id>');
-  if (!inbox) die('usage: opencode.ts start <task_spec> <worktree> <inbox> <sessions> <agent_run_id>');
-  if (!sessions) die('usage: opencode.ts start <task_spec> <worktree> <inbox> <sessions> <agent_run_id>');
-  if (!agentRunId) die('usage: opencode.ts start <task_spec> <worktree> <inbox> <sessions> <agent_run_id>');
+  const usage = `usage: opencode.ts ${verb} <task_spec> <worktree> <inbox> <sessions> <agent_run_id>`;
+  if (!taskSpec) die(usage);
+  if (!worktree) die(usage);
+  if (!inbox) die(usage);
+  if (!sessions) die(usage);
+  if (!agentRunId) die(usage);
 
   // The task-spec opencode_model pin travels with the spec file itself: dispatch
   // hands this adapter the spec path, and the pin outranks HYDRA_OPENCODE_MODEL
@@ -460,28 +468,38 @@ export async function start(
 
   const prompt = buildWorkerPrompt(taskSpec);
 
+  const opencodeArgs = [
+    'run',
+    '--model',
+    model,
+    '--agent',
+    'hydra-implementer',
+    '--format',
+    'json',
+    '--auto',
+    // Global flags: surface the vendor CLI's own diagnostics (e.g. "stream
+    // error" usage-limit records) on stderr, where the .stderr capture file
+    // already tails them for the usage detector. ERROR level keeps the
+    // stream sparse enough to not disturb stall detection.
+    '--print-logs',
+    '--log-level',
+    'ERROR',
+  ];
+  if (verb === 'resume' && priorSessionId) {
+    // OpenCode's resume flag is `-s, --session <id>` (verified against the
+    // installed CLI's `opencode run --help`; docs/vendor-adapters.md §3).
+    // Deliberately NOT `--fork`: forking branches away from the session the
+    // reviewer actually read, while an amendment must continue the reviewed
+    // history in place. Inserted ahead of --dir, where adapter-kimi.ts
+    // appends its own -S.
+    opencodeArgs.push('-s', priorSessionId);
+    log(`opencode resume from session ${priorSessionId}`);
+  }
+  opencodeArgs.push('--dir', worktree, prompt);
+
   const { exitCode } = await runStreaming(
     'opencode',
-    [
-      'run',
-      '--model',
-      model,
-      '--agent',
-      'hydra-implementer',
-      '--format',
-      'json',
-      '--auto',
-      // Global flags: surface the vendor CLI's own diagnostics (e.g. "stream
-      // error" usage-limit records) on stderr, where the .stderr capture file
-      // already tails them for the usage detector. ERROR level keeps the
-      // stream sparse enough to not disturb stall detection.
-      '--print-logs',
-      '--log-level',
-      'ERROR',
-      '--dir',
-      worktree,
-      prompt,
-    ],
+    opencodeArgs,
     { stdoutPath: eventsPath, stderrPath, spawn: spawnFn },
   );
 
@@ -567,21 +585,58 @@ export async function start(
   return agentRunId;
 }
 
-export default { explore, review, start, buildWorkerPrompt };
+/** Implementer role, cold start. */
+export async function start(
+  taskSpec: string,
+  worktree: string,
+  inbox: string,
+  sessions: string,
+  agentRunId: string,
+  options?: OpencodeRunOptions,
+): Promise<string> {
+  return runImplementer('start', taskSpec, worktree, inbox, sessions, agentRunId, undefined, options);
+}
+
+/**
+ * Implementer role, continuing a prior opencode session in place instead of
+ * cold-restarting it (issue #33).
+ */
+export async function resume(
+  taskSpec: string,
+  worktree: string,
+  inbox: string,
+  sessions: string,
+  agentRunId: string,
+  priorSessionId: string,
+  options?: OpencodeRunOptions,
+): Promise<string> {
+  return runImplementer(
+    'resume',
+    taskSpec,
+    worktree,
+    inbox,
+    sessions,
+    agentRunId,
+    priorSessionId,
+    options,
+  );
+}
+
+export default { explore, review, start, resume, buildWorkerPrompt };
 
 export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
   try {
     const [verb, ...rest] = args;
-    if (!verb) die('usage: opencode.sh explore|review|start ...');
+    if (!verb) die('usage: opencode.sh explore|review|start|resume ...');
 
-    if (verb === 'start') {
-      const [taskSpec, worktree, inbox, sessions, agentRunId] = rest;
+    if (verb === 'start' || verb === 'resume') {
+      const [taskSpec, worktree, inbox, sessions, agentRunId, priorSessionId] = rest;
       if (!taskSpec) die('task_spec required');
       if (!worktree) die('worktree required');
       if (!inbox) die('inbox required');
       if (!sessions) die('sessions required');
       if (!agentRunId) die('agent_run_id required');
-      await start(taskSpec, worktree, inbox, sessions, agentRunId);
+      await runImplementer(verb, taskSpec, worktree, inbox, sessions, agentRunId, priorSessionId);
       return 0;
     }
 

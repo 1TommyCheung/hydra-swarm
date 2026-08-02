@@ -270,19 +270,71 @@ function deriveDropFromGitWithExec(
 // ---------------------------------------------------------------------------
 
 /**
+ * Build the codex argv for one dispatch.
+ *
+ * The cold-start form is `codex exec --json -C <worktree> -s workspace-write`.
+ * The resume form is the vendor's own `codex exec resume [SESSION_ID] [PROMPT]`
+ * subcommand (verified against the installed CLI's `codex exec resume --help`;
+ * `codex resume` without `exec` is the INTERACTIVE picker/TUI, which would
+ * never terminate in a headless worker). That subcommand accepts neither `-C`
+ * nor `-s`, so their config-file equivalents travel through the `-c` overrides
+ * it does accept (`sandbox_mode`; both keys confirmed against
+ * `--strict-config`, which rejects unknown fields), and the working directory
+ * comes from the spawn's own `cwd` — which is already the worktree on both
+ * paths.
+ */
+function buildCodexArgs(
+  verb: 'start' | 'resume',
+  worktree: string,
+  gitCommon: string,
+  prompt: string,
+  priorSessionId: string,
+): string[] {
+  const writableRoots = `sandbox_workspace_write.writable_roots=["${gitCommon}"]`;
+  if (verb === 'resume' && priorSessionId) {
+    return [
+      'exec',
+      'resume',
+      '--json',
+      '-c',
+      'sandbox_mode="workspace-write"',
+      '-c',
+      writableRoots,
+      priorSessionId,
+      prompt,
+    ];
+  }
+  return [
+    'exec',
+    '--json',
+    '-C',
+    worktree,
+    '-s',
+    'workspace-write',
+    '-c',
+    writableRoots,
+    prompt,
+  ];
+}
+
+/**
  * Codex CLI worker adapter — TypeScript port of hydra/adapters/codex.sh.
  *
- * Runs `codex exec --json` in the assigned worktree with a workspace-write
- * sandbox, adds the git-common-dir as a writable root, captures the thread_id
- * from the JSONL event stream, and bridges the worker's `.hydra-result.json`
- * into the run inbox.
+ * Runs the codex CLI in JSONL mode in the assigned worktree with a
+ * workspace-write sandbox, adds the git-common-dir as a writable root,
+ * captures the thread_id from the JSONL event stream, and bridges the worker's
+ * `.hydra-result.json` into the run inbox. Everything except the vendor argv
+ * is shared between the two verbs:
+ *   start  <task_spec> <worktree> <inbox> <sessions> <agent_run_id>
+ *   resume <task_spec> <worktree> <inbox> <sessions> <agent_run_id> <prior_session_id>
  *
- * @param verb - must be "start"
+ * @param verb - "start" or "resume"
  * @param taskSpec - path to the task specification YAML
  * @param worktree - path to the assigned worktree
  * @param inbox - path to the adapter-owned inbox directory
  * @param sessions - path to the session capture directory
  * @param agentRunId - unique id for this agent run
+ * @param priorSessionId - session to resume (resume verb only)
  * @param options - optional overrides for cwd/exec/spawn
  * @returns the agent_run_id
  */
@@ -293,13 +345,14 @@ export async function adapterCodex(
   inbox: string,
   sessions: string,
   agentRunId: string,
+  priorSessionId?: string,
   options: AdapterCodexOptions = {},
 ): Promise<string> {
   if (!verb) {
-    die('usage: codex.sh start <task_spec> <worktree> <inbox> <sessions> <agent_run_id>');
+    die('usage: codex.sh start|resume <task_spec> <worktree> <inbox> <sessions> <agent_run_id> [prior_session_id]');
   }
-  if (verb !== 'start') {
-    die(`codex.sh: only 'start' is implemented in Wave 0 (got '${verb}')`);
+  if (verb !== 'start' && verb !== 'resume') {
+    die(`codex.sh: unknown verb '${verb}'`);
   }
   if (!taskSpec) die('task_spec required');
   if (!worktree) die('worktree required');
@@ -336,20 +389,15 @@ export async function adapterCodex(
   const cliJsonl = resolve(resolvedSessions, `${agentRunId}.cli.jsonl`);
   const cliStderr = resolve(resolvedSessions, `${agentRunId}.stderr`);
 
+  const codexArgs = buildCodexArgs(verb, resolvedWorktree, gitCommon, prompt, priorSessionId ?? '');
+  if (verb === 'resume' && priorSessionId) {
+    log(`codex resume from session ${priorSessionId}`);
+  }
+
   try {
     await runSpawn(
       'codex',
-      [
-        'exec',
-        '--json',
-        '-C',
-        resolvedWorktree,
-        '-s',
-        'workspace-write',
-        '-c',
-        `sandbox_workspace_write.writable_roots=["${gitCommon}"]`,
-        prompt,
-      ],
+      codexArgs,
       {
         cwd: resolvedWorktree,
         stdin: 'ignore',
@@ -436,14 +484,48 @@ export async function adapterCodex(
   return agentRunId;
 }
 
+/** Convenience wrapper for the `start` verb. */
+export async function start(
+  taskSpec: string,
+  worktree: string,
+  inbox: string,
+  sessions: string,
+  agentRunId: string,
+  options: AdapterCodexOptions = {},
+): Promise<string> {
+  return adapterCodex('start', taskSpec, worktree, inbox, sessions, agentRunId, undefined, options);
+}
+
+/** Convenience wrapper for the `resume` verb (mirrors adapter-kimi.ts's `resume()`). */
+export async function resume(
+  taskSpec: string,
+  worktree: string,
+  inbox: string,
+  sessions: string,
+  agentRunId: string,
+  priorSessionId: string,
+  options: AdapterCodexOptions = {},
+): Promise<string> {
+  return adapterCodex(
+    'resume',
+    taskSpec,
+    worktree,
+    inbox,
+    sessions,
+    agentRunId,
+    priorSessionId,
+    options,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // CLI entry point.
 // ---------------------------------------------------------------------------
 
 export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
   try {
-    const [verb, taskSpec, worktree, inbox, sessions, agentRunId] = args;
-    await adapterCodex(verb, taskSpec, worktree, inbox, sessions, agentRunId);
+    const [verb, taskSpec, worktree, inbox, sessions, agentRunId, priorSessionId] = args;
+    await adapterCodex(verb, taskSpec, worktree, inbox, sessions, agentRunId, priorSessionId);
     return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

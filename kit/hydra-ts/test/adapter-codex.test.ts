@@ -10,6 +10,7 @@ import {
 import { dirname, join } from 'node:path';
 import {
   adapterCodex,
+  resume,
   type AdapterCodexOptions,
   type ExecLike,
   type SpawnLike,
@@ -142,6 +143,24 @@ async function captureStdout<T>(
   }
 }
 
+async function captureStderr<T>(
+  fn: () => T | Promise<T>,
+): Promise<{ output: string; result: T }> {
+  const chunks: string[] = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    chunks.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+
+  try {
+    const result = await fn();
+    return { output: chunks.join(''), result };
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+}
+
 describe('adapterCodex', () => {
   before(() => {
     cleanTmp();
@@ -152,17 +171,17 @@ describe('adapterCodex', () => {
     cleanTmp();
   });
 
-  it('rejects a missing or non-start verb', async () => {
+  it('rejects a missing or unknown verb', async () => {
     const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
     writeTaskSpec(taskSpec);
 
     await assert.rejects(
       adapterCodex('', taskSpec, worktree, inbox, sessions, 'run-1'),
-      /usage: codex\.sh start/,
+      /usage: codex\.sh start\|resume/,
     );
     await assert.rejects(
       adapterCodex('stop', taskSpec, worktree, inbox, sessions, 'run-1'),
-      /only 'start' is implemented in Wave 0 \(got 'stop'\)/,
+      /codex\.sh: unknown verb 'stop'/,
     );
   });
 
@@ -225,7 +244,7 @@ describe('adapterCodex', () => {
     };
 
     const { output, result } = await captureStdout(() =>
-      adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-1', options),
+      adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-1', undefined, options),
     );
 
     assert.equal(result, 'run-1');
@@ -264,7 +283,7 @@ describe('adapterCodex', () => {
       spawn: makeSpawn(jsonl),
     };
 
-    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-2', options);
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-2', undefined, options);
 
     const sessionJson = join(sessions, 'run-2.json');
     assert.equal(existsSync(sessionJson), true);
@@ -286,7 +305,7 @@ describe('adapterCodex', () => {
       spawn: makeSpawn(jsonl),
     };
 
-    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-3', options);
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-3', undefined, options);
 
     const resultPath = join(inbox, 'result.json');
     const result = JSON.parse(readFileSync(resultPath, 'utf8'));
@@ -302,7 +321,7 @@ describe('adapterCodex', () => {
       msg: { session_id: 'msg-session' },
       session_id: 'top-session',
     });
-    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-null', {
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-null', undefined, {
       exec: makeExec(join(worktree, '.git')),
       spawn: makeSpawn(jsonl),
     });
@@ -326,7 +345,7 @@ describe('adapterCodex', () => {
       spawn: makeSpawn(''),
     };
 
-    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-4', options);
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-4', undefined, options);
 
     const resultPath = join(inbox, 'result.json');
     const result = JSON.parse(readFileSync(resultPath, 'utf8'));
@@ -346,7 +365,7 @@ describe('adapterCodex', () => {
       spawn: makeSpawn(''),
     };
 
-    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-5', options);
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-5', undefined, options);
 
     const resultPath = join(inbox, 'result.json');
     const result = JSON.parse(readFileSync(resultPath, 'utf8'));
@@ -365,7 +384,7 @@ describe('adapterCodex', () => {
       return { exitCode: 0, signal: null };
     };
 
-    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-invalid', {
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-invalid', undefined, {
       exec: makeExec(join(worktree, '.git')),
       spawn,
     });
@@ -379,7 +398,7 @@ describe('adapterCodex', () => {
     const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
     writeTaskSpec(taskSpec);
 
-    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-throw', {
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-throw', undefined, {
       exec: makeExec(join(worktree, '.git')),
       spawn: () => {
         throw new Error('injected codex failure');
@@ -396,7 +415,7 @@ describe('adapterCodex', () => {
     let spawnCalled = false;
 
     await assert.rejects(
-      adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-git-fail', {
+      adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-git-fail', undefined, {
         exec: () => {
           throw new Error('injected git failure');
         },
@@ -416,7 +435,7 @@ describe('adapterCodex', () => {
     writeTaskSpec(taskSpec, { spec_version: 'not-a-json-number' });
 
     await assert.rejects(
-      adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-bad-version', {
+      adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-bad-version', undefined, {
         exec: makeExec(join(worktree, '.git')),
         spawn: makeSpawn(''),
       }),
@@ -442,7 +461,7 @@ describe('adapterCodex', () => {
       spawn: makeSpawn(jsonl, undefined, workerResult),
     };
 
-    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-6', options);
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-6', undefined, options);
 
     const resultPath = join(inbox, 'result.json');
     const result = JSON.parse(readFileSync(resultPath, 'utf8'));
@@ -469,7 +488,7 @@ describe('adapterCodex', () => {
       },
     };
 
-    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-7', options);
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-7', undefined, options);
 
     assert.match(capturedPrompt, /Task my-task/);
     assert.match(capturedPrompt, /Do the thing\./);
@@ -491,8 +510,158 @@ describe('adapterCodex', () => {
       },
     };
 
-    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-8', options);
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-8', undefined, options);
     assert.equal(codexCalled, true);
+  });
+});
+
+describe('codex resume (issue #33)', () => {
+  before(() => {
+    mkdirSync(TEST_TMP, { recursive: true });
+  });
+
+  after(() => {
+    cleanTmp();
+  });
+
+  it('invokes the vendor `codex exec resume <id>` subcommand instead of a fresh exec', async () => {
+    const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
+    writeTaskSpec(taskSpec);
+    const gitCommon = join(worktree, '.git');
+
+    const capture: { command?: string; args?: string[]; options?: SpawnOptions } = {};
+    const { output: stderr } = await captureStderr(() =>
+      adapterCodex('resume', taskSpec, worktree, inbox, sessions, 'run-resume-1', 'sess-prior-1', {
+        exec: makeExec(gitCommon),
+        spawn: makeSpawn('', capture),
+      }),
+    );
+
+    assert.equal(capture.command, 'codex');
+    // `codex exec resume [SESSION_ID] [PROMPT]` — verified against the
+    // installed CLI's `codex exec resume --help`. The bare `codex resume`
+    // form is the interactive picker/TUI and must never be used headlessly.
+    assert.deepEqual(capture.args?.slice(0, 3), ['exec', 'resume', '--json']);
+    const args = capture.args ?? [];
+    assert.equal(args.at(-2), 'sess-prior-1', `session id must precede the prompt: ${args.join(' ')}`);
+    assert.match(args.at(-1) ?? '', /Task adapter-codex/);
+
+    // `codex exec resume` accepts neither -C nor -s, so the sandbox policy
+    // travels as -c config overrides and the cwd comes from the spawn.
+    assert.equal(args.includes('-C'), false);
+    assert.equal(args.includes('-s'), false);
+    assert.ok(args.includes('sandbox_mode="workspace-write"'));
+    assert.ok(args.includes(`sandbox_workspace_write.writable_roots=["${gitCommon}"]`));
+    assert.equal(capture.options?.cwd, worktree);
+    assert.equal(capture.options?.stdin, 'ignore');
+
+    assert.ok(stderr.includes('codex resume from session sess-prior-1'));
+  });
+
+  it('keeps the cold-start argv free of the resume subcommand and any session id', async () => {
+    const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
+    writeTaskSpec(taskSpec);
+    const gitCommon = join(worktree, '.git');
+
+    const capture: { command?: string; args?: string[]; options?: SpawnOptions } = {};
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-resume-2', undefined, {
+      exec: makeExec(gitCommon),
+      spawn: makeSpawn('', capture),
+    });
+
+    const args = capture.args ?? [];
+    assert.deepEqual(args.slice(0, 2), ['exec', '--json']);
+    assert.equal(args.includes('resume'), false);
+    assert.ok(args.includes('-C'));
+    assert.ok(args.includes('workspace-write'));
+    assert.equal(args.some((a) => a.includes('sess-')), false);
+  });
+
+  it('falls back to the cold-start argv when the prior session id is empty', async () => {
+    const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
+    writeTaskSpec(taskSpec);
+
+    const capture: { command?: string; args?: string[]; options?: SpawnOptions } = {};
+    await adapterCodex('resume', taskSpec, worktree, inbox, sessions, 'run-resume-3', '', {
+      exec: makeExec(join(worktree, '.git')),
+      spawn: makeSpawn('', capture),
+    });
+
+    const args = capture.args ?? [];
+    assert.deepEqual(args.slice(0, 2), ['exec', '--json']);
+    assert.equal(args.includes('resume'), false);
+  });
+
+  it('captures the new thread id and bridges the worker result on the resume path', async () => {
+    const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
+    writeTaskSpec(taskSpec);
+
+    const jsonl = JSON.stringify({ type: 'thread.started', thread_id: 'thread-resumed' });
+    const workerResult = {
+      task_id: 'adapter-codex',
+      run_id: '0019',
+      spec_version: 1,
+      status: 'completed',
+      branch: 'hydra/0019/adapter-codex',
+      base_commit: '71bcbcf9acf0aeadc5d8eb5d1c0d3868b45b6070',
+      head_commit: 'cafe1234',
+      summary: 'resumed and done',
+      files_changed: ['kit/hydra-ts/src/adapter-codex.ts'],
+      verification_claims: [],
+      risks: [],
+      unresolved_questions: [],
+      suggested_additional_checks: [],
+    };
+
+    await captureStderr(() =>
+      adapterCodex('resume', taskSpec, worktree, inbox, sessions, 'run-resume-4', 'sess-prior-2', {
+        exec: makeExec(join(worktree, '.git')),
+        spawn: makeSpawn(jsonl, undefined, workerResult),
+      }),
+    );
+
+    // Same capture/session/bridge machinery as start: the session file records
+    // the NEW thread id the vendor reported, not the one we resumed from.
+    const session = JSON.parse(readFileSync(join(sessions, 'run-resume-4.json'), 'utf8'));
+    assert.equal(session.vendor, 'codex');
+    assert.equal(session.session_id, 'thread-resumed');
+
+    const bridged = JSON.parse(readFileSync(join(inbox, 'result.json'), 'utf8'));
+    assert.equal(bridged.vendor, 'codex');
+    assert.equal(bridged.session_id, 'thread-resumed');
+    assert.equal(bridged.summary, 'resumed and done');
+    assert.equal(bridged.head_commit, 'cafe1234');
+  });
+
+  it('exposes a resume() wrapper that dispatch can detect and call', async () => {
+    const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
+    writeTaskSpec(taskSpec);
+
+    const capture: { command?: string; args?: string[]; options?: SpawnOptions } = {};
+    const result = await captureStderr(() =>
+      resume(taskSpec, worktree, inbox, sessions, 'run-resume-5', 'sess-prior-3', {
+        exec: makeExec(join(worktree, '.git')),
+        spawn: makeSpawn('', capture),
+      }),
+    );
+
+    assert.equal(result.result, 'run-resume-5');
+    assert.deepEqual(capture.args?.slice(0, 2), ['exec', 'resume']);
+    assert.equal(capture.args?.at(-2), 'sess-prior-3');
+  });
+
+  it('rejects a resume that is missing its required arguments', async () => {
+    const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
+    writeTaskSpec(taskSpec);
+
+    await assert.rejects(
+      adapterCodex('resume', '', worktree, inbox, sessions, 'run-resume-6', 'sess-prior-4'),
+      /task_spec required/,
+    );
+    await assert.rejects(
+      adapterCodex('resume', taskSpec, worktree, inbox, sessions, '', 'sess-prior-4'),
+      /agent_run_id required/,
+    );
   });
 });
 

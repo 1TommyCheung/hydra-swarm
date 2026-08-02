@@ -18,6 +18,7 @@ import { dirname, join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
+  COMPILED_ADAPTERS,
   buildAmendmentGate,
   claimDispatchAttempt,
   detectAmendmentNoop,
@@ -875,21 +876,26 @@ describe('dispatch Bash parity', () => {
     assert.equal(capableMock.calls[0].args[1], 'resume');
     assert.equal(capableMock.calls[0].args.at(-1), 'session-compiled');
 
-    // adapter-codex has no resume verb: cold restart with start (prior
-    // session still forwarded, exactly like the ts/bash runtimes).
-    const incapable = fixture(runId(), { vendor: 'codex' });
+    // The registry — not the source file — decides: the on-disk adapter here
+    // exports only `start`, which the ts lane would read as resume-less, yet
+    // the compiled lane still selects resume because COMPILED_ADAPTERS says
+    // codex is capable (issue #33).
+    const registryDriven = fixture(runId(), {
+      vendor: 'codex',
+      tsAdapterContent: 'export function start(): void {}\n',
+    });
     writeFileSync(
-      join(incapable.sessionsDir, `${incapable.runId}-task-a-v1.json`),
+      join(registryDriven.sessionsDir, `${registryDriven.runId}-task-a-v1.json`),
       JSON.stringify({ vendor: 'codex', session_id: 'session-compiled' }),
     );
-    const incapableMock = fakeSpawn();
-    await dispatch(incapable.runId, 'task-a', injectedOptions(incapable, incapableMock.spawn, {
+    const registryMock = fakeSpawn();
+    await dispatch(registryDriven.runId, 'task-a', injectedOptions(registryDriven, registryMock.spawn, {
       adapterRuntime: 'compiled',
       env: { HYDRA_DELIVERY: 'resume' },
     }));
-    assert.equal(incapableMock.calls[0].args[0], 'adapter-codex');
-    assert.equal(incapableMock.calls[0].args[1], 'start');
-    assert.equal(incapableMock.calls[0].args.at(-1), 'session-compiled');
+    assert.equal(registryMock.calls[0].args[0], 'adapter-codex');
+    assert.equal(registryMock.calls[0].args[1], 'resume');
+    assert.equal(registryMock.calls[0].args.at(-1), 'session-compiled');
   });
 
   it('compiled runtime builds the self-reexec pane command when herdr-hosted', async () => {
@@ -1182,9 +1188,11 @@ describe('dispatch Bash parity', () => {
     assert.equal(supportedMock.calls[0].args[2], 'resume');
     assert.equal(supportedMock.calls[0].args.at(-1), 'session-ts');
 
+    // A vendor adapter that exports only `start` is still detected as
+    // resume-less and cold-restarts while preserving the discovered session.
     const unsupported = fixture(runId(), {
       vendor: 'codex',
-      tsAdapterContent: readFileSync(join(import.meta.dirname, '../src/adapter-codex.ts'), 'utf8'),
+      tsAdapterContent: 'export function start(): void {}\n',
     });
     writeFileSync(
       join(unsupported.sessionsDir, `${unsupported.runId}-task-a-v1.json`),
@@ -1196,6 +1204,100 @@ describe('dispatch Bash parity', () => {
     }));
     assert.equal(unsupportedMock.calls[0].args[2], 'start');
     assert.equal(unsupportedMock.calls[0].args.at(-1), 'session-ts');
+  });
+
+  it('returns verb=resume for codex and opencode with a prior session (issue #33)', async () => {
+    // Both vendors grew real resume verbs in run 0068 (`codex exec resume
+    // <id>` / `opencode run -s <id>`). The ts-runtime detection greps each
+    // REAL adapter source, so determineDelivery must now select resume rather
+    // than the cold-restart fallback, and forward the prior session id as the
+    // 7th adapter arg.
+    for (const vendor of ['codex', 'opencode']) {
+      const f = fixture(runId(), {
+        vendor,
+        tsAdapterContent: readFileSync(join(import.meta.dirname, `../src/adapter-${vendor}.ts`), 'utf8'),
+      });
+      writeFileSync(
+        join(f.sessionsDir, `${f.runId}-task-a-v1.json`),
+        JSON.stringify({ vendor, session_id: `session-${vendor}-prior` }),
+      );
+      const mock = fakeSpawn();
+      const { output } = await captureStderr(() =>
+        dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+          env: { HYDRA_ADAPTER_RUNTIME: 'ts', HYDRA_DELIVERY: 'resume' },
+        })),
+      );
+      assert.equal(mock.calls[0].args[2], 'resume', `${vendor} should resume`);
+      assert.equal(mock.calls[0].args.at(-1), `session-${vendor}-prior`);
+      assert.equal(ledger(f)[0].delivery, 'resume');
+      assert.doesNotMatch(output, /FULL COLD RESTART/);
+      assert.doesNotMatch(output, /NO REAL RESUME SUPPORT/);
+    }
+  });
+
+  it('compiled runtime takes codex/opencode resume capability from the static registry (issue #33)', async () => {
+    // COMPILED_ADAPTERS.codex.resume and .opencode.resume are now true, so the
+    // compiled runtime — which cannot grep an adapter source file — also
+    // selects the resume verb for both vendors via the self-reexec route.
+    for (const vendor of ['codex', 'opencode']) {
+      assert.equal(COMPILED_ADAPTERS[vendor].resume, true);
+      const f = fixture(runId(), { vendor });
+      writeFileSync(
+        join(f.sessionsDir, `${f.runId}-task-a-v1.json`),
+        JSON.stringify({ vendor, session_id: `session-${vendor}-compiled` }),
+      );
+      const mock = fakeSpawn();
+      await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, {
+        adapterRuntime: 'compiled',
+        env: { HYDRA_DELIVERY: 'resume' },
+      }));
+      assert.equal(mock.calls[0].args[0], `adapter-${vendor}`);
+      assert.equal(mock.calls[0].args[1], 'resume');
+      assert.equal(mock.calls[0].args.at(-1), `session-${vendor}-compiled`);
+    }
+  });
+
+  it('still cold-restarts codex/opencode when the resume preconditions do not hold (issue #33)', async () => {
+    // determineDelivery is untouched by the adapter change: a capable adapter
+    // must not turn a missing or foreign-vendor session into a resume.
+    const real = (vendor: string) =>
+      readFileSync(join(import.meta.dirname, `../src/adapter-${vendor}.ts`), 'utf8');
+
+    // No prior session at all.
+    const none = fixture(runId(), { vendor: 'codex', tsAdapterContent: real('codex') });
+    const noneMock = fakeSpawn();
+    await captureStderr(() => dispatch(none.runId, 'task-a', injectedOptions(none, noneMock.spawn, {
+      env: { HYDRA_ADAPTER_RUNTIME: 'ts', HYDRA_DELIVERY: 'resume' },
+    })));
+    assert.equal(noneMock.calls[0].args[2], 'start');
+    assert.equal(noneMock.calls[0].args.at(-1), '');
+
+    // Session recorded by a DIFFERENT vendor: cold restart AND the foreign id
+    // is dropped rather than handed to the now-capable adapter.
+    const crossed = fixture(runId(), { vendor: 'opencode', tsAdapterContent: real('opencode') });
+    writeFileSync(
+      join(crossed.sessionsDir, `${crossed.runId}-task-a-v1.json`),
+      JSON.stringify({ vendor: 'kimi', session_id: 'session-from-kimi' }),
+    );
+    const crossedMock = fakeSpawn();
+    await captureStderr(() => dispatch(crossed.runId, 'task-a', injectedOptions(crossed, crossedMock.spawn, {
+      env: { HYDRA_ADAPTER_RUNTIME: 'ts', HYDRA_DELIVERY: 'resume' },
+    })));
+    assert.equal(crossedMock.calls[0].args[2], 'start');
+    assert.equal(crossedMock.calls[0].args.at(-1), '');
+
+    // HYDRA_DELIVERY unset (a first dispatch) never resumes.
+    const first = fixture(runId(), { vendor: 'codex', tsAdapterContent: real('codex') });
+    writeFileSync(
+      join(first.sessionsDir, `${first.runId}-task-a-v1.json`),
+      JSON.stringify({ vendor: 'codex', session_id: 'session-unused' }),
+    );
+    const firstMock = fakeSpawn();
+    await dispatch(first.runId, 'task-a', injectedOptions(first, firstMock.spawn, {
+      env: { HYDRA_ADAPTER_RUNTIME: 'ts' },
+    }));
+    assert.equal(firstMock.calls[0].args[2], 'start');
+    assert.equal(firstMock.calls[0].args.at(-1), '');
   });
 
   it('emits a distinct loud warning when resume is requested but no prior session exists (issue #20)', async () => {
