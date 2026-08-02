@@ -306,6 +306,134 @@ describe('auditOwnership', () => {
     assert.ok(result.violations.some((v) => v.includes('symlink escapes worktree: dist/leak')));
   });
 
+  // --- real node_modules vs. swapped node_modules (issue #43 follow-up) -------
+  //
+  // `git ls-files --others` does not recurse into a directory that is itself a
+  // symlink, so the reported path tells the two cases apart: a swapped
+  // dependency directory is reported as ONE entry ending in `node_modules`,
+  // while an ordinary package-manager symlink inside a real node_modules is
+  // reported with path content AFTER the `node_modules` segment.
+
+  /** Lay out a real node_modules with the standard npm `.bin` symlink. */
+  function installRealNodeModules(worktree: string, prefix: string): void {
+    const nm = prefix ? join(worktree, prefix, 'node_modules') : join(worktree, 'node_modules');
+    mkdirSync(join(nm, 'typescript', 'bin'), { recursive: true });
+    writeFileSync(join(nm, 'typescript', 'bin', 'tsc'), '#!/usr/bin/env node\n', 'utf8');
+    mkdirSync(join(nm, '.bin'), { recursive: true });
+    symlinkSync('../typescript/bin/tsc', join(nm, '.bin', 'tsc'));
+  }
+
+  /** The wider, gitignore-inclusive listing the symlink guard consumes. */
+  function widerUntrackedListing(worktree: string): string[] {
+    return execFileSync('git', ['-C', worktree, 'ls-files', '--others'], { encoding: 'utf8' })
+      .split('\n')
+      .filter((line) => line !== '');
+  }
+
+  it('does not flag ordinary npm .bin symlinks inside a real node_modules directory', () => {
+    const worktree = makeTempDir('worktree');
+    initGitRepo(worktree);
+    commitFile(worktree, '.gitignore', 'node_modules\n');
+    const base = commitFile(worktree, 'src/anchor.js', 'hello');
+    installRealNodeModules(worktree, '');
+    const head = base;
+
+    // Precondition: git recursed INTO the real directory, so the reported path
+    // has content after the `node_modules` segment.
+    assert.ok(widerUntrackedListing(worktree).includes('node_modules/.bin/tsc'));
+    assert.ok(lstatSync(join(worktree, 'node_modules', '.bin', 'tsc')).isSymbolicLink());
+
+    const result = audit(worktree, base, head, ['src/**']);
+    assert.equal(result.clean, true, `unexpected violations: ${result.violations.join(', ')}`);
+  });
+
+  it('does not flag a real node_modules nested under a writable subtree (live repro)', () => {
+    const worktree = makeTempDir('worktree');
+    initGitRepo(worktree);
+    commitFile(worktree, '.gitignore', 'node_modules\n');
+    const base = commitFile(worktree, 'kit/hydra-ts/src/anchor.ts', 'hello');
+    installRealNodeModules(worktree, join('kit', 'hydra-ts'));
+    const head = base;
+
+    assert.ok(widerUntrackedListing(worktree).includes('kit/hydra-ts/node_modules/.bin/tsc'));
+
+    const result = audit(worktree, base, head, ['kit/hydra-ts/src/**']);
+    assert.equal(result.clean, true, `unexpected violations: ${result.violations.join(', ')}`);
+  });
+
+  it('still flags a swapped node_modules while ignoring a sibling real one', () => {
+    const worktree = makeTempDir('worktree');
+    initGitRepo(worktree);
+    commitFile(worktree, '.gitignore', 'node_modules\n');
+    const base = commitFile(worktree, 'src/anchor.js', 'hello');
+    installRealNodeModules(worktree, join('packages', 'app'));
+    const outside = makeTempDir('operator-checkout');
+    symlinkSync(outside, join(worktree, 'node_modules'));
+    const head = base;
+
+    const result = audit(worktree, base, head, ['src/**']);
+    assert.equal(result.clean, false);
+    assert.ok(result.violations.some((v) => v.includes('symlink escapes worktree: node_modules')));
+    assert.ok(!result.violations.some((v) => v.includes('packages/app/node_modules/.bin/tsc')));
+  });
+
+  it("still flags a workspace package's node_modules replaced by an escaping symlink", () => {
+    const worktree = makeTempDir('worktree');
+    initGitRepo(worktree);
+    commitFile(worktree, '.gitignore', 'node_modules\n');
+    const base = commitFile(worktree, 'packages/app/src/anchor.js', 'hello');
+    const outside = makeTempDir('operator-checkout');
+    mkdirSync(join(worktree, 'packages', 'app'), { recursive: true });
+    symlinkSync(outside, join(worktree, 'packages', 'app', 'node_modules'));
+    const head = base;
+
+    // Precondition: git did NOT recurse — one entry, final segment is the
+    // symlinked directory's own name.
+    assert.ok(widerUntrackedListing(worktree).includes('packages/app/node_modules'));
+
+    const result = audit(worktree, base, head, ['packages/app/src/**']);
+    assert.equal(result.clean, false);
+    assert.ok(
+      result.violations.some((v) =>
+        v.includes('symlink escapes worktree: packages/app/node_modules'),
+      ),
+    );
+  });
+
+  it('still flags a swapped node_modules resolving inside the worktree but outside writable_paths', () => {
+    const worktree = makeTempDir('worktree');
+    initGitRepo(worktree);
+    commitFile(worktree, '.gitignore', 'node_modules\n');
+    const base = commitFile(worktree, 'src/anchor.js', 'hello');
+    installRealNodeModules(worktree, join('packages', 'app'));
+    symlinkSync('docs', join(worktree, 'node_modules'));
+    const head = base;
+
+    const result = audit(worktree, base, head, ['src/**']);
+    assert.equal(result.clean, false);
+    assert.ok(
+      result.violations.some((v) =>
+        v.includes('symlink target outside writable_paths: node_modules -> docs'),
+      ),
+    );
+  });
+
+  it('leaves section 2 untouched when node_modules is not gitignored', () => {
+    const worktree = makeTempDir('worktree');
+    initGitRepo(worktree);
+    const base = commitFile(worktree, 'src/anchor.js', 'hello');
+    installRealNodeModules(worktree, '');
+    const head = base;
+
+    const result = audit(worktree, base, head, ['src/**']);
+    assert.equal(result.clean, false);
+    assert.ok(
+      result.violations.some((v) =>
+        v.includes('untracked outside writable_paths: node_modules/typescript/bin/tsc'),
+      ),
+    );
+  });
+
   it('flags absolute paths reported by git', () => {
     const worktree = makeTempDir('worktree');
     initGitRepo(worktree);

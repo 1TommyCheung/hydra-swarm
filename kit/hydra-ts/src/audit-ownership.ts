@@ -71,6 +71,42 @@ function parseNullDelimited(output: string): string[] {
 }
 
 /**
+ * Directory names whose *contents* a package manager routinely populates with
+ * internal symlinks (npm/pnpm/yarn `.bin/<tool> -> ../<pkg>/bin/<tool>`, pnpm's
+ * content-addressed `.pnpm` links). Symlinks nested inside one of these are
+ * ordinary install output, not a sandbox escape.
+ *
+ * Deliberately minimal: every name added here widens a blind spot in the
+ * symlink guard, so only add a name when the "package manager creates internal
+ * symlinks inside it" pattern genuinely applies.
+ */
+const VENDOR_DIR_NAMES = new Set(['node_modules']);
+
+/**
+ * True when `path` sits *inside* a vendor directory rather than being one.
+ *
+ * `git ls-files --others` does not recurse into a directory that is itself a
+ * symlink, so path shape alone distinguishes the two cases:
+ *
+ * - `node_modules` (last segment) — git did NOT recurse, so `node_modules` is
+ *   itself the symlink: the dangerous swapped-dependency-directory case from
+ *   issue #43. Returns false; the guard must still check it.
+ * - `node_modules/.bin/tsc` — git DID recurse, proving `node_modules` is a real
+ *   directory and only the nested entry is a link. Returns true; benign.
+ *
+ * Git always reports `/`-separated, worktree-relative paths.
+ */
+function insideVendorDir(path: string): boolean {
+  const segments = path.split('/');
+  // Stop before the final segment: a vendor-named *final* segment is the
+  // candidate being checked for symlink-ness, not a directory git traversed.
+  for (let i = 0; i < segments.length - 1; i++) {
+    if (VENDOR_DIR_NAMES.has(segments[i])) return true;
+  }
+  return false;
+}
+
+/**
  * Audit a candidate worktree for ownership violations.
  *
  * @param worktree - Path to the git worktree to audit.
@@ -225,6 +261,13 @@ export function auditOwnership(
   // section 2's untracked-file check: ordinary gitignored build output (dist/,
   // coverage/, .cache/) that a worker legitimately produces would then flood the
   // report with false positives.
+  //
+  // It is also the only list filtered by insideVendorDir(): dropping the .gitignore
+  // filter exposes the entire contents of a real dependency install, and every
+  // `node_modules/.bin/*` entry there is a symlink pointing at a sibling package
+  // — flagged as "target outside writable_paths" despite escaping nothing. The
+  // swapped-directory case issue #43 targets is unaffected, because git reports
+  // that as a single entry whose final segment IS `node_modules`.
   let ignoredUntrackedOutput = '';
   try {
     ignoredUntrackedOutput = String(
@@ -243,7 +286,7 @@ export function auditOwnership(
   const candidatePaths = new Set<string>([
     ...parseNullDelimited(diffNameOnlyOutput),
     ...untrackedPaths,
-    ...parseNullDelimited(ignoredUntrackedOutput),
+    ...parseNullDelimited(ignoredUntrackedOutput).filter((p) => !insideVendorDir(p)),
   ]);
 
   for (const link of candidatePaths) {
