@@ -26,6 +26,12 @@ import {
 
 const TEST_TMP = join(import.meta.dirname, 'tmp-adapter-kimi');
 
+// The model-provenance probe shells out to the real `kimi provider list`; a
+// unit run must never invoke a vendor CLI (issue #42).
+process.env.HYDRA_VENDOR_PROBE = '0';
+delete process.env.HYDRA_KIMI_MODEL;
+delete process.env.HYDRA_KIMI_EFFORT;
+
 function cleanTmp(): void {
   if (existsSync(TEST_TMP)) {
     rmSync(TEST_TMP, { recursive: true, force: true });
@@ -1239,5 +1245,190 @@ describe('worker prompt parity (issue #26)', () => {
     } finally {
       removeR(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Model provenance and pinning (issue #42).
+// ---------------------------------------------------------------------------
+
+describe('kimi model provenance (issue #42)', () => {
+  before(() => mkdirSync(TEST_TMP, { recursive: true }));
+  after(cleanTmp);
+
+  type Probe = () => { model: string | null; provider: string | null; cliVersion: string | null };
+
+  const PROBE: Probe = () => ({
+    model: 'kimi-code/k3',
+    provider: 'managed:kimi-code',
+    cliVersion: '0.29.1',
+  });
+
+  async function run(
+    label: string,
+    specExtra: string,
+    probe: Probe = PROBE,
+    /** Model written into a machine-local `<stateRoot>/kimi-model.json`. */
+    stateModel?: string,
+  ): Promise<{ session: Record<string, any>; command: string; stderr: string }> {
+    const dir = makeTempDir(label);
+    const repoRoot = join(dir, 'repo');
+    initGitRepo(repoRoot);
+    const baseCommit = commitFile(repoRoot, 'README.md', '# hi\n');
+    const worktree = join(dir, 'worktree');
+    execFileSync('git', ['-C', repoRoot, 'worktree', 'add', '--quiet', worktree, baseCommit], {
+      encoding: 'utf8',
+      stdio: 'ignore',
+    });
+
+    const taskSpec = join(dir, 'task.yaml');
+    writeTaskSpec(taskSpec, { base_commit: baseCommit });
+    if (specExtra) writeFileSync(taskSpec, `${readFileSync(taskSpec, 'utf8')}${specExtra}`, 'utf8');
+
+    const inbox = join(dir, 'inbox');
+    const sessions = join(dir, 'sessions');
+    const recording: SpawnRecording = {};
+
+    let stateRoot: string | undefined;
+    if (stateModel !== undefined) {
+      stateRoot = join(dir, 'state');
+      mkdirSync(stateRoot, { recursive: true });
+      writeFileSync(
+        join(stateRoot, 'kimi-model.json'),
+        JSON.stringify({ model: stateModel }),
+        'utf8',
+      );
+    }
+
+    const { stderr } = await captureStderr(async () => {
+      await kimiStart(taskSpec, worktree, inbox, sessions, 'agent-prov', {
+        spawn: fakeSpawn(recording, {
+          stdout: `${JSON.stringify({ session_id: 'sess-prov' })}\n`,
+        }),
+        exec: adapterExec([]),
+        commandExists: commandLookup(),
+        prepareWorkerEnv: stubPrepareWorkerEnv,
+        sandboxDomainsPath: writeBaselineDomains(dir),
+        probe,
+        stateRoot,
+      });
+    });
+
+    const args = recording.args ?? [];
+    return {
+      session: JSON.parse(readFileSync(join(sessions, 'agent-prov.json'), 'utf8')),
+      command: args[args.indexOf('-c') + 1] ?? '',
+      stderr,
+    };
+  }
+
+  it('records the account default with source=vendor_default when nothing is pinned', async () => {
+    const { session, command } = await run('prov-default', '');
+
+    assert.equal(session.model, 'kimi-code/k3');
+    assert.equal(session.provider, 'managed:kimi-code');
+    assert.equal(session.cli_version, '0.29.1');
+    // Kimi's CLI has no effort flag at all — structurally unrecoverable.
+    assert.equal(session.effort, null);
+    assert.equal(session.source, 'vendor_default');
+    assert.equal(session.model_source, 'vendor_default');
+    assert.equal(session.effort_source, 'unavailable');
+    assert.ok(!command.includes("'-m'"), 'no pin means no -m reaches the CLI');
+  });
+
+  it('honors a task-spec model: pin via the real -m flag', async () => {
+    const { session, command } = await run('prov-pinned', 'model: kimi-code/k2\n');
+
+    assert.match(command, /'-m' 'kimi-code\/k2'/);
+    assert.equal(session.model, 'kimi-code/k2');
+    assert.equal(session.source, 'pinned');
+    assert.equal(session.model_source, 'pinned');
+    // No effort flag exists for this vendor, so the field stays honest.
+    assert.equal(session.effort_source, 'unavailable');
+  });
+
+  it('warns loudly that an effort: pin cannot be honored, and records effort=null', async () => {
+    const { session, command, stderr } = await run('prov-effort', 'effort: high\n');
+
+    // Kimi exposes no reasoning-effort flag; the pin must never be silent.
+    assert.match(stderr, /kimi adapter cannot pin reasoning effort/);
+    assert.match(stderr, /'high' requested/);
+    assert.ok(!command.includes('high'), 'nothing effort-shaped may reach the CLI');
+    assert.equal(session.effort, null, 'never claim an effort that did not apply');
+    // A pin the adapter could NOT honor is not a pin: labelling it `pinned`
+    // would assert an operator choice that never reached the model.
+    assert.equal(session.effort_source, 'unavailable');
+    assert.equal(session.source, 'vendor_default');
+  });
+
+  it('reports source=unavailable when nothing is pinned and the probe finds nothing', async () => {
+    const { session } = await run(
+      'prov-unavailable',
+      '',
+      () => ({ model: null, provider: null, cliVersion: null }),
+    );
+
+    for (const key of ['model', 'provider', 'cli_version', 'effort']) {
+      assert.ok(key in session, `${key} must be present`);
+      assert.equal(session[key], null);
+    }
+    assert.equal(session.source, 'unavailable');
+    assert.equal(session.model_source, 'unavailable');
+    assert.equal(session.effort_source, 'unavailable');
+  });
+
+  it('does not pair a machine-local state model with the probe\'s account-default provider', async () => {
+    // The regression: the state file selected the alias that actually ran, but
+    // `provider` still came from the probe, which reports the DEFAULT alias's
+    // provider. A state-selected alias can be backed by a different provider
+    // entirely, so that pairing recorded a provider unrelated to the model
+    // sitting beside it in the same record.
+    const { session, command } = await run(
+      'prov-state-mismatch',
+      '',
+      () => ({ model: 'account/model', provider: 'account-provider', cliVersion: '0.29.1' }),
+      'state/model',
+    );
+
+    assert.match(command, /'-m' 'state\/model'/, 'the state file selects the alias that runs');
+    assert.equal(session.model, 'state/model');
+    assert.equal(
+      session.provider,
+      null,
+      'account-provider describes account/model, not state/model',
+    );
+    // A machine-local default is not a per-task pin.
+    assert.equal(session.model_source, 'vendor_default');
+    // The CLI version is a fact about the CLI, so the probe still supplies it.
+    assert.equal(session.cli_version, '0.29.1');
+  });
+
+  it('still attaches the probed provider when the state model matches the probe', async () => {
+    // Guard against over-correcting into "state config involved => provider
+    // null": when the state file names the alias the probe reported, the
+    // probe's provider genuinely describes it.
+    const { session } = await run('prov-state-match', '', PROBE, 'kimi-code/k3');
+
+    assert.equal(session.model, 'kimi-code/k3');
+    assert.equal(session.provider, 'managed:kimi-code');
+    assert.equal(session.model_source, 'vendor_default');
+  });
+
+  it('records a null provider when the probe reports a provider but no model', async () => {
+    // `provider list` output is parsed field-by-field, so a partial/malformed
+    // report can name a provider while the default alias itself is unreadable.
+    // With nothing pinned the resolved model is null too, and a bare
+    // `resolvedModel === probe.model` equality made `null === null` true —
+    // recording an ORPHAN provider for an attempt with no known model.
+    const { session } = await run(
+      'prov-orphan',
+      '',
+      () => ({ model: null, provider: 'managed:kimi-code', cliVersion: '0.29.1' }),
+    );
+
+    assert.equal(session.model, null);
+    assert.equal(session.provider, null, 'no resolved model means no provider to attach it to');
+    assert.equal(session.model_source, 'unavailable');
+    assert.equal(session.cli_version, '0.29.1');
   });
 });

@@ -9,6 +9,7 @@ import {
   readFileSync,
   rmSync,
   writeFileSync,
+  type Dirent,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
@@ -37,6 +38,9 @@ function cleanTmp(): void {
   }
 }
 
+/** Sibling test files' scratch roots — all of `test/tmp-*`, incl. TEST_TMP. */
+const SIBLING_TMP_ROOT = import.meta.dirname;
+
 function worktreeEntriesOutsideTestTmp(): string[] {
   const top = execFileSync('git', ['rev-parse', '--show-toplevel'], {
     encoding: 'utf8',
@@ -44,9 +48,24 @@ function worktreeEntriesOutsideTestTmp(): string[] {
   const entries: string[] = [];
 
   function visit(dir: string): void {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    let contents: Dirent[];
+    try {
+      contents = readdirSync(dir, { withFileTypes: true });
+    } catch (error) {
+      // The node test runner runs each test FILE in its own process, so a
+      // sibling file's scratch dir can be removed while this walk is inside
+      // it. That is churn from another test, never a promote leak, so a
+      // vanished directory is skipped rather than aborting the whole suite.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    for (const entry of contents) {
       const path = join(dir, entry.name);
-      if (path === TEST_TMP) continue;
+      // Skip every `test/tmp-*` root: this file's own TEST_TMP by design, and
+      // the other adapters' roots because they are created and torn down
+      // concurrently — snapshotting them yields phantom "leaks" from whichever
+      // sibling happened to be mid-run.
+      if (dir === SIBLING_TMP_ROOT && entry.name.startsWith('tmp-')) continue;
       entries.push(relative(top, path));
       if (entry.isDirectory()) visit(path);
     }
@@ -1117,5 +1136,315 @@ ${verificationBlock}`,
       .filter((entry) => !initialSet.has(entry));
 
     assert.deepEqual(leaked, [], `unexpected paths leaked outside TEST_TMP:\n${leaked.join('\n')}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Model provenance in the promoted document (issue #42).
+// ---------------------------------------------------------------------------
+
+describe('promoted worker_model provenance (issue #42)', () => {
+  before(() => mkdirSync(TEST_TMP, { recursive: true }));
+  after(cleanTmp);
+
+  /** Give the drop a session_id and write the matching adapter session capture. */
+  function linkSession(
+    f: Fixture,
+    sessionId: string,
+    capture: Record<string, unknown> | null,
+  ): void {
+    const drop = JSON.parse(readFileSync(f.drop, 'utf8')) as Record<string, unknown>;
+    drop.session_id = sessionId;
+    writeFileSync(f.drop, JSON.stringify(drop), 'utf8');
+
+    if (capture === null) return;
+    const sessions = join(f.stateRoot, 'runs', `run-${f.runId}`, 'sessions');
+    mkdirSync(sessions, { recursive: true });
+    writeFileSync(join(sessions, 'agent-1.json'), `${JSON.stringify(capture)}\n`, 'utf8');
+  }
+
+  it('mirrors the attempt model into the promoted document', async () => {
+    const f = makeFixture();
+    linkSession(f, 'sess-42', {
+      agent_run_id: 'agent-1',
+      vendor: 'codex',
+      session_id: 'sess-42',
+      model: 'gpt-5.6-sol',
+      provider: 'openai',
+      cli_version: '0.144.6',
+      effort: 'high',
+      source: 'pinned',
+    });
+
+    const result = await promote(f.runId, f.taskId, f.drop, baseOptions(f));
+    const promoted = JSON.parse(readFileSync(result.promoted, 'utf8'));
+
+    // Self-describing: no ledger cross-reference needed.
+    assert.deepEqual(promoted.worker_model, {
+      model: 'gpt-5.6-sol',
+      provider: 'openai',
+      cli_version: '0.144.6',
+      effort: 'high',
+      source: 'pinned',
+      // The capture predates the per-field keys, so the model inherits the
+      // single `source` and the effort is graded only on being known.
+      model_source: 'pinned',
+      effort_source: 'vendor_default',
+    });
+  });
+
+  it('records an all-null unavailable record when no session capture matches', async () => {
+    const f = makeFixture();
+
+    const result = await promote(f.runId, f.taskId, f.drop, baseOptions(f));
+    const promoted = JSON.parse(readFileSync(result.promoted, 'utf8'));
+
+    // Honest "not recoverable" beats a fabricated model.
+    assert.deepEqual(promoted.worker_model, {
+      model: null,
+      provider: null,
+      cli_version: null,
+      effort: null,
+      source: 'unavailable',
+      model_source: 'unavailable',
+      effort_source: 'unavailable',
+    });
+  });
+
+  it('keeps null for a vendor that cannot report effort', async () => {
+    const f = makeFixture();
+    linkSession(f, 'sess-kimi', {
+      vendor: 'kimi',
+      session_id: 'sess-kimi',
+      model: 'kimi-code/k3',
+      provider: 'managed:kimi-code',
+      cli_version: '0.29.1',
+      effort: null,
+      source: 'vendor_default',
+    });
+
+    const result = await promote(f.runId, f.taskId, f.drop, baseOptions(f));
+    const promoted = JSON.parse(readFileSync(result.promoted, 'utf8'));
+
+    assert.equal(promoted.worker_model.model, 'kimi-code/k3');
+    assert.equal(promoted.worker_model.effort, null);
+    assert.equal(promoted.worker_model.source, 'vendor_default');
+  });
+
+  it('does not attribute another attempt session to this drop', async () => {
+    const f = makeFixture();
+    linkSession(f, 'sess-mine', {
+      vendor: 'codex',
+      session_id: 'sess-someone-else',
+      model: 'wrong/model',
+      provider: null,
+      cli_version: null,
+      effort: null,
+      source: 'pinned',
+    });
+
+    const result = await promote(f.runId, f.taskId, f.drop, baseOptions(f));
+    const promoted = JSON.parse(readFileSync(result.promoted, 'utf8'));
+
+    assert.equal(promoted.worker_model.model, null);
+    assert.equal(promoted.worker_model.source, 'unavailable');
+  });
+
+  it('attributes provenance per attempt when a resume reuses the same session', async () => {
+    // A resume legitimately continues the SAME vendor session, so several
+    // attempts of an amended task share one session_id. Identity therefore has
+    // to come from the agent_run_id (the inbox directory), not the session.
+    const f = makeFixture();
+    const rDir = join(f.stateRoot, 'runs', `run-${f.runId}`);
+    const sessions = join(rDir, 'sessions');
+    mkdirSync(sessions, { recursive: true });
+
+    const original = `${f.runId}-${f.taskId}-v1`;
+    const resumed = `${original}-a2`;
+
+    const capture = (agentRunId: string, model: string, effort: string): void => {
+      writeFileSync(
+        join(sessions, `${agentRunId}.json`),
+        `${JSON.stringify({
+          agent_run_id: agentRunId,
+          vendor: 'codex',
+          session_id: 'sess-shared',
+          model,
+          provider: null,
+          cli_version: '0.144.6',
+          effort,
+          source: 'pinned',
+          model_source: 'pinned',
+          effort_source: 'pinned',
+        })}\n`,
+        'utf8',
+      );
+    };
+    capture(original, 'gpt-5.6-sol', 'low');
+    capture(resumed, 'o3', 'high');
+
+    /** The canonical inbox layout: inbox/<agent_run_id>/result.json. */
+    const dropFor = (agentRunId: string): string => {
+      const inbox = join(rDir, 'inbox', agentRunId);
+      mkdirSync(inbox, { recursive: true });
+      const path = join(inbox, 'result.json');
+      const claims = JSON.parse(readFileSync(f.drop, 'utf8')) as Record<string, unknown>;
+      claims.session_id = 'sess-shared';
+      writeFileSync(path, JSON.stringify(claims), 'utf8');
+      return path;
+    };
+
+    const modelOf = async (agentRunId: string): Promise<Record<string, any>> => {
+      const result = await promote(f.runId, f.taskId, dropFor(agentRunId), baseOptions(f));
+      return JSON.parse(readFileSync(result.promoted, 'utf8')).worker_model;
+    };
+
+    // Both attempts must report THEIR OWN values. A session_id-keyed scan
+    // cannot: it returns one capture for both, so one of these is wrong.
+    const first = await modelOf(original);
+    assert.equal(first.model, 'gpt-5.6-sol');
+    assert.equal(first.effort, 'low');
+
+    const second = await modelOf(resumed);
+    assert.equal(second.model, 'o3');
+    assert.equal(second.effort, 'high');
+  });
+
+  it('reports unavailable for a known attempt with no capture of its own', async () => {
+    // Knowing WHICH attempt this is and finding no capture is a real "not
+    // recoverable" — never licence to borrow a sibling attempt's model.
+    const f = makeFixture();
+    const rDir = join(f.stateRoot, 'runs', `run-${f.runId}`);
+    const sessions = join(rDir, 'sessions');
+    mkdirSync(sessions, { recursive: true });
+    const original = `${f.runId}-${f.taskId}-v1`;
+    writeFileSync(
+      join(sessions, `${original}.json`),
+      `${JSON.stringify({
+        agent_run_id: original,
+        vendor: 'codex',
+        session_id: 'sess-shared',
+        model: 'gpt-5.6-sol',
+        source: 'pinned',
+      })}\n`,
+      'utf8',
+    );
+
+    const inbox = join(rDir, 'inbox', `${original}-a2`);
+    mkdirSync(inbox, { recursive: true });
+    const drop = join(inbox, 'result.json');
+    const claims = JSON.parse(readFileSync(f.drop, 'utf8')) as Record<string, unknown>;
+    claims.session_id = 'sess-shared';
+    writeFileSync(drop, JSON.stringify(claims), 'utf8');
+
+    const result = await promote(f.runId, f.taskId, drop, baseOptions(f));
+    const promoted = JSON.parse(readFileSync(result.promoted, 'utf8'));
+
+    assert.equal(promoted.worker_model.model, null);
+    assert.equal(promoted.worker_model.source, 'unavailable');
+  });
+
+  it('does not trust a lookalike agent_run_id directory outside the inbox', async () => {
+    // A drop handed in from somewhere else whose PARENT DIRECTORY NAME merely
+    // parses as a valid agent_run_id must not be credited with that attempt's
+    // capture. Only the exact canonical path proves attempt identity.
+    const f = makeFixture();
+    const rDir = join(f.stateRoot, 'runs', `run-${f.runId}`);
+    const sessions = join(rDir, 'sessions');
+    mkdirSync(sessions, { recursive: true });
+
+    const impersonated = `${f.runId}-${f.taskId}-v1`;
+    const capture = (agentRunId: string, sessionId: string, model: string): void => {
+      writeFileSync(
+        join(sessions, `${agentRunId}.json`),
+        `${JSON.stringify({
+          agent_run_id: agentRunId,
+          vendor: 'codex',
+          session_id: sessionId,
+          model,
+          provider: null,
+          cli_version: null,
+          effort: null,
+          source: 'pinned',
+          model_source: 'pinned',
+          effort_source: 'unavailable',
+        })}\n`,
+        'utf8',
+      );
+    };
+    // The attempt whose identity the lookalike directory borrows...
+    capture(impersonated, 'sess-not-mine', 'impersonated/model');
+    // ...and the capture this drop's own session really points at.
+    capture('agent-1', 'sess-mine', 'session/model');
+
+    // Same directory NAME as the canonical inbox entry, entirely different path.
+    const elsewhere = join(f.stateRoot, 'handed-in', impersonated);
+    mkdirSync(elsewhere, { recursive: true });
+    const drop = join(elsewhere, 'result.json');
+    const claims = JSON.parse(readFileSync(f.drop, 'utf8')) as Record<string, unknown>;
+    claims.session_id = 'sess-mine';
+    writeFileSync(drop, JSON.stringify(claims), 'utf8');
+
+    const result = await promote(f.runId, f.taskId, drop, baseOptions(f));
+    const promoted = JSON.parse(readFileSync(result.promoted, 'utf8'));
+
+    // Fell through to the session-based fallback, which is the only evidence
+    // this drop actually carries.
+    assert.equal(promoted.worker_model.model, 'session/model');
+  });
+
+  it('orders same-session captures by their own spec version, then retry', async () => {
+    // An amended task's earlier-version captures share its session_id. Keying
+    // "latest wins" off the CURRENT spec version makes every earlier-version
+    // capture rank identically, so the pick degrades to readdir order — for
+    // exactly the amended/resumed case this lookup exists to handle.
+    const f = makeFixture();
+    const rDir = join(f.stateRoot, 'runs', `run-${f.runId}`);
+    const sessions = join(rDir, 'sessions');
+    mkdirSync(sessions, { recursive: true });
+
+    // The task has since been amended to v3; no v3 capture exists yet.
+    const taskSpec = join(rDir, 'tasks', `${f.taskId}.yaml`);
+    writeFileSync(
+      taskSpec,
+      readFileSync(taskSpec, 'utf8').replace('spec_version: 1', 'spec_version: 3'),
+      'utf8',
+    );
+
+    const capture = (suffix: string, model: string): void => {
+      const agentRunId = `${f.runId}-${f.taskId}-${suffix}`;
+      writeFileSync(
+        join(sessions, `${agentRunId}.json`),
+        `${JSON.stringify({
+          agent_run_id: agentRunId,
+          vendor: 'codex',
+          session_id: 'sess-amended',
+          model,
+          provider: null,
+          cli_version: null,
+          effort: null,
+          source: 'vendor_default',
+          model_source: 'vendor_default',
+          effort_source: 'unavailable',
+        })}\n`,
+        'utf8',
+      );
+    };
+    // Written oldest-last so creation order cannot stand in for the right answer.
+    capture('v2-a2', 'v2-a2/model');
+    capture('v2', 'v2/model');
+    capture('v1-a2', 'v1-a2/model');
+    capture('v1', 'v1/model');
+
+    const claims = JSON.parse(readFileSync(f.drop, 'utf8')) as Record<string, unknown>;
+    claims.session_id = 'sess-amended';
+    claims.spec_version = 3;
+    writeFileSync(f.drop, JSON.stringify(claims), 'utf8');
+
+    const result = await promote(f.runId, f.taskId, f.drop, baseOptions(f));
+    const promoted = JSON.parse(readFileSync(result.promoted, 'utf8'));
+
+    // Genuinely latest: highest version, then highest retry within it.
+    assert.equal(promoted.worker_model.model, 'v2-a2/model');
   });
 });

@@ -14,7 +14,19 @@ import {
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { die, deriveDropFromGit, log, yamlList, yamlScalar } from './lib.ts';
+import { die, deriveDropFromGit, log, warn, yamlList, yamlScalar } from './lib.ts';
+import {
+  aggregateSource,
+  classifyPinSource,
+  providerForModel,
+  readVendorStateDefault,
+  resolveVendorPin,
+  vendorProbeEnabled,
+  vendorSpecPins,
+  type ModelProvenance,
+  type VendorProbe,
+  type VendorProbeResult,
+} from './adapter-codex.ts';
 import { buildWorkerPrompt as buildSharedWorkerPrompt } from './build-worker-prompt.ts';
 import { isCompiledBinary } from './kit-assets.ts';
 import { deriveEnvironmentDomainsDetailed, formatDerivedDomainsLog, persistDerivedDomains } from './env-domains.ts';
@@ -49,7 +61,7 @@ export type SrtSettingsFactory = (
 export interface KimiAdapterOptions {
   /** Working directory used to resolve relative paths (tests). */
   cwd?: string;
-  /** Unused by this module; kept for compatibility with sibling options bags. */
+  /** Directory containing the optional machine-local kimi-model.json default. */
   stateRoot?: string;
   /** Injected exec implementation for git and synchronous CLIs. */
   exec?: typeof execFileSync;
@@ -63,6 +75,141 @@ export interface KimiAdapterOptions {
   makeSrtSettings?: SrtSettingsFactory;
   /** Injected worker dev-environment preflight (tests). */
   prepareWorkerEnv?: typeof prepareWorkerEnv;
+  /** Explicit model override for injected callers and tests (outranks the spec pin). */
+  model?: string;
+  /** Explicit effort override; recorded but NOT honorable — see resolveKimiModel. */
+  effort?: string;
+  /** Injected vendor probe so tests never shell out to the real kimi CLI. */
+  probe?: VendorProbe;
+}
+
+// ---------------------------------------------------------------------------
+// Model / effort provenance (issue #42).
+//
+// INVESTIGATION (kimi 0.29.1, verified against the installed CLI):
+//
+//   * The `--output-format stream-json` NDJSON this adapter already captures to
+//     `<agent_run_id>.cli.jsonl` carries NO model information. A full run emits
+//     only `{"role":"assistant","content":...}` records plus the single
+//     `{"role":"meta","type":"session.resume_hint",...}` event the resume path
+//     already consumes — that meta event has session_id/command/content and no
+//     model-shaped field, so the existing meta-event pattern cannot be
+//     extended to carry it without a vendor change.
+//   * `kimi doctor` only validates config-file syntax; it reports no model.
+//   * `kimi provider list` DOES print the resolved account default as a
+//     `Default model: <alias>` line, and `kimi provider list --json` emits the
+//     alias -> {provider, model} map. Both are supported non-interactive
+//     config queries — no private session state is read. (The `--json` form
+//     omits the default alias, hence the two-call probe below.)
+//   * `kimi --version` gives the CLI version.
+//
+// Pinning: `-m/--model <alias>` is real ("LLM model alias to use for this
+// invocation. Defaults to default_model in config.toml"). There is NO
+// reasoning-effort flag anywhere in `kimi --help` or its subcommands, so an
+// `effort:` pin CANNOT be honored for this vendor and is warned about loudly
+// rather than silently dropped.
+// ---------------------------------------------------------------------------
+
+const KIMI_DEFAULT_MODEL_RE = /^\s*Default model:\s*(\S+)\s*$/m;
+
+/** `kimi provider list [--json]` — supported config queries, not session state. */
+export function probeKimi(): VendorProbeResult {
+  if (!vendorProbeEnabled()) return { model: null, provider: null, cliVersion: null };
+
+  const run = (args: string[]): string | null => {
+    try {
+      return String(execFileSync('kimi', args, {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }));
+    } catch {
+      return null;
+    }
+  };
+
+  const version = run(['--version']);
+  const listing = run(['provider', 'list']);
+  const model = listing ? (KIMI_DEFAULT_MODEL_RE.exec(listing)?.[1] ?? null) : null;
+
+  let provider: string | null = null;
+  if (model !== null) {
+    const raw = run(['provider', 'list', '--json']);
+    if (raw !== null) {
+      try {
+        const parsed = JSON.parse(raw) as Record<string, any>;
+        const entry = parsed?.models?.[model];
+        if (entry && typeof entry.provider === 'string') provider = entry.provider;
+      } catch {
+        // A shape change must degrade to null, never break the dispatch.
+      }
+    }
+  }
+
+  return { model, provider, cliVersion: version ? version.trim() : null };
+}
+
+interface KimiResolution {
+  provenance: ModelProvenance;
+  /** Extra argv the pin contributes. */
+  pinArgs: string[];
+}
+
+/**
+ * Same precedence shape as adapter-opencode's resolveModel(): explicit
+ * injection > task-spec `model:` pin > HYDRA_KIMI_MODEL > machine-local
+ * kimi-model.json > the vendor's own default.
+ */
+function resolveKimiModel(taskSpec: string, options: KimiAdapterOptions): KimiResolution {
+  const pins = vendorSpecPins(taskSpec);
+  const model = resolveVendorPin(
+    options.model,
+    pins.model,
+    process.env.HYDRA_KIMI_MODEL,
+    readVendorStateDefault(options.stateRoot, 'kimi-model.json', 'model'),
+  );
+  const effort = resolveVendorPin(
+    options.effort,
+    pins.effort,
+    process.env.HYDRA_KIMI_EFFORT,
+    readVendorStateDefault(options.stateRoot, 'kimi-model.json', 'effort'),
+  );
+
+  // A pin that cannot take effect must be loud, never silently ignored.
+  if (effort.value) {
+    warn(
+      `kimi adapter cannot pin reasoning effort ('${effort.value}' requested): the kimi CLI `
+      + 'exposes no effort/reasoning flag — inheriting the account default. '
+      + 'Recorded as effort=null so the ledger does not claim an effort that never applied.',
+    );
+  }
+
+  const pinArgs = model.value ? ['-m', model.value] : [];
+  const probe = (options.probe ?? probeKimi)();
+  const resolvedModel = model.value ?? probe.model;
+
+  const modelSource = classifyPinSource(model, resolvedModel);
+  // Structurally unrecoverable for this vendor: no flag to set it, and nothing
+  // in the stream or any config query reports it. An effort pin that could not
+  // be honored is therefore NOT `pinned` — classifyPinSource sees the recorded
+  // null and says `unavailable`, matching the warning emitted above.
+  const effortSource = classifyPinSource(effort, null);
+
+  return {
+    provenance: {
+      model: resolvedModel,
+      // `provider list` reports the provider of the DEFAULT alias. A pin OR a
+      // machine-local kimi-model.json default can select a different alias
+      // backed by a different provider, so the probed provider is recorded only
+      // when the alias we run is the one the probe described.
+      provider: providerForModel(resolvedModel, probe),
+      cli_version: probe.cliVersion,
+      effort: null,
+      source: aggregateSource(modelSource, effortSource),
+      model_source: modelSource,
+      effort_source: effortSource,
+    },
+    pinArgs,
+  };
 }
 
 function defaultCommandExists(command: string): boolean {
@@ -615,12 +762,18 @@ export async function kimi(
   const cliJsonl = join(sessionsAbs, `${agentRunId}.cli.jsonl`);
   const stderrPath = join(sessionsAbs, `${agentRunId}.stderr`);
 
+  const { provenance, pinArgs } = resolveKimiModel(taskSpec, options);
   const kimiArgs = [
     '-p',
     prompt,
     '--output-format',
     'stream-json',
+    // `-m <alias>` applies to this invocation on both start and resume.
+    ...pinArgs,
   ];
+  if (provenance.source === 'pinned') {
+    log(`kimi model pin honored: ${provenance.model}`);
+  }
   if (verb === 'resume' && priorSessionId) {
     // Kimi's resume flag is `-S, --session <id>` (verified against the
     // installed CLI's `kimi --help`; docs/vendor-adapters.md §3). Inserted
@@ -662,9 +815,16 @@ export async function kimi(
   }
 
   const sessionId = parseLastSessionId(cliJsonl);
+  // Provenance keys are always present (explicit null where unrecoverable);
+  // dispatch.ts reads this back to emit worker_model_resolved.
   writeFileSync(
     join(sessionsAbs, `${agentRunId}.json`),
-    `${JSON.stringify({ agent_run_id: agentRunId, vendor: 'kimi', session_id: sessionId })}\n`,
+    `${JSON.stringify({
+      agent_run_id: agentRunId,
+      vendor: 'kimi',
+      session_id: sessionId,
+      ...provenance,
+    })}\n`,
   );
 
   if (existsSync(workerResult)) {

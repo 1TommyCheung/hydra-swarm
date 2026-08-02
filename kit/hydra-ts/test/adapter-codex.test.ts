@@ -19,6 +19,12 @@ import {
 const TEST_TMP = join(import.meta.dirname, 'tmp-adapter-codex');
 type SpawnOptions = Parameters<SpawnLike>[2];
 
+// The model-provenance probe shells out to the real `codex doctor --json`; a
+// unit run must never invoke a vendor CLI (issue #42).
+process.env.HYDRA_VENDOR_PROBE = '0';
+delete process.env.HYDRA_CODEX_MODEL;
+delete process.env.HYDRA_CODEX_EFFORT;
+
 function cleanTmp(): void {
   if (existsSync(TEST_TMP)) {
     rmSync(TEST_TMP, { recursive: true, force: true });
@@ -735,6 +741,296 @@ describe('worker prompt parity (issue #26)', () => {
       assert.ok(!prompt.includes('PARITY-VERDICT-MARKER'), 'verdict body must not be inlined');
     } finally {
       removeR(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Model / effort provenance and pinning (issue #42).
+// ---------------------------------------------------------------------------
+
+describe('codex model provenance (issue #42)', () => {
+  before(cleanTmp);
+  after(cleanTmp);
+
+  const PROBE = () => ({
+    model: 'gpt-5.6-sol',
+    provider: 'openai',
+    cliVersion: '0.144.6',
+  });
+
+  function session(sessions: string, agentRunId: string): Record<string, any> {
+    return JSON.parse(readFileSync(join(sessions, `${agentRunId}.json`), 'utf8'));
+  }
+
+  it('records the account default with source=vendor_default when nothing is pinned', async () => {
+    const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
+    writeTaskSpec(taskSpec);
+    const capture: { args?: string[] } = {};
+
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-prov-1', undefined, {
+      exec: makeExec(join(worktree, '.git')),
+      spawn: makeSpawn('{"thread_id":"t-1"}\n', capture),
+      probe: PROBE,
+    });
+
+    const s = session(sessions, 'run-prov-1');
+    assert.equal(s.model, 'gpt-5.6-sol');
+    assert.equal(s.provider, 'openai');
+    assert.equal(s.cli_version, '0.144.6');
+    // Effort is only in codex's PRIVATE rollout when unpinned — honest null.
+    assert.equal(s.effort, null);
+    assert.equal(s.source, 'vendor_default');
+    // No pin was requested, so no -m reaches the CLI.
+    assert.ok(!capture.args?.includes('-m'));
+  });
+
+  it('honors a task-spec model: and effort: pin via real codex flags', async () => {
+    const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
+    writeTaskSpec(taskSpec);
+    writeFileSync(taskSpec, `${readFileSync(taskSpec, 'utf8')}model: o3\neffort: high\n`, 'utf8');
+    const capture: { args?: string[] } = {};
+
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-prov-2', undefined, {
+      exec: makeExec(join(worktree, '.git')),
+      spawn: makeSpawn('{"thread_id":"t-2"}\n', capture),
+      probe: PROBE,
+    });
+
+    // `-m` and `-c model_reasoning_effort` both exist on codex-cli 0.144.6.
+    const args = capture.args ?? [];
+    assert.ok(args.includes('-m'));
+    assert.equal(args[args.indexOf('-m') + 1], 'o3');
+    assert.ok(args.includes('model_reasoning_effort="high"'));
+    // Flags must precede the positional prompt.
+    assert.ok(args.indexOf('-m') < args.length - 1);
+
+    const s = session(sessions, 'run-prov-2');
+    assert.equal(s.model, 'o3');
+    assert.equal(s.effort, 'high');
+    assert.equal(s.source, 'pinned');
+    assert.equal(s.model_source, 'pinned');
+    assert.equal(s.effort_source, 'pinned');
+    // We did not ask which provider backs a pinned model, so we do not guess.
+    assert.equal(s.provider, null);
+  });
+
+  it('labels an effort-only pin pinned, with the inherited model vendor_default', async () => {
+    // The regression: classifying BOTH fields off model.pinned alone reported
+    // an explicitly requested — and genuinely honored — effort as an inherit.
+    const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
+    writeTaskSpec(taskSpec);
+    writeFileSync(taskSpec, `${readFileSync(taskSpec, 'utf8')}effort: high\n`, 'utf8');
+    const capture: { args?: string[] } = {};
+
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-prov-effort', undefined, {
+      exec: makeExec(join(worktree, '.git')),
+      spawn: makeSpawn('{"thread_id":"t-e"}\n', capture),
+      probe: PROBE,
+    });
+
+    // The pin really did reach the CLI, so it is a pin in every sense.
+    assert.ok((capture.args ?? []).includes('model_reasoning_effort="high"'));
+    assert.ok(!(capture.args ?? []).includes('-m'));
+
+    const s = session(sessions, 'run-prov-effort');
+    assert.equal(s.effort, 'high');
+    assert.equal(s.effort_source, 'pinned');
+    // The model was NOT chosen by the operator; only that field inherits.
+    assert.equal(s.model, 'gpt-5.6-sol');
+    assert.equal(s.model_source, 'vendor_default');
+    // Attempt-level summary: something here was chosen deliberately.
+    assert.equal(s.source, 'pinned');
+  });
+
+  it('labels a model-only pin pinned, leaving effort unavailable', async () => {
+    const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
+    writeTaskSpec(taskSpec);
+    writeFileSync(taskSpec, `${readFileSync(taskSpec, 'utf8')}model: o3\n`, 'utf8');
+
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-prov-model', undefined, {
+      exec: makeExec(join(worktree, '.git')),
+      spawn: makeSpawn('{"thread_id":"t-m"}\n'),
+      probe: PROBE,
+    });
+
+    const s = session(sessions, 'run-prov-model');
+    assert.equal(s.model, 'o3');
+    assert.equal(s.model_source, 'pinned');
+    // Unpinned effort lives only in codex's private rollout: not recoverable.
+    assert.equal(s.effort, null);
+    assert.equal(s.effort_source, 'unavailable');
+    assert.equal(s.source, 'pinned');
+  });
+
+  it('carries the pin through an exec resume too', async () => {
+    const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
+    writeTaskSpec(taskSpec);
+    writeFileSync(taskSpec, `${readFileSync(taskSpec, 'utf8')}model: o3\n`, 'utf8');
+    const capture: { args?: string[] } = {};
+
+    await resume(taskSpec, worktree, inbox, sessions, 'run-prov-3', 'prior-session', {
+      exec: makeExec(join(worktree, '.git')),
+      spawn: makeSpawn('{"thread_id":"t-3"}\n', capture),
+      probe: PROBE,
+    });
+
+    const args = capture.args ?? [];
+    assert.deepEqual(args.slice(0, 2), ['exec', 'resume']);
+    assert.ok(args.includes('-m'));
+    // The pin must sit ahead of the positional session id and prompt.
+    assert.ok(args.indexOf('-m') < args.indexOf('prior-session'));
+  });
+
+  it('reports source=unavailable when nothing is pinned and the probe finds nothing', async () => {
+    const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
+    writeTaskSpec(taskSpec);
+
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-prov-4', undefined, {
+      exec: makeExec(join(worktree, '.git')),
+      spawn: makeSpawn('{"thread_id":"t-4"}\n'),
+      probe: () => ({ model: null, provider: null, cliVersion: null }),
+    });
+
+    const s = session(sessions, 'run-prov-4');
+    // Every key present, explicitly null — never omitted.
+    for (const key of ['model', 'provider', 'cli_version', 'effort']) {
+      assert.ok(key in s, `${key} must be present`);
+      assert.equal(s[key], null);
+    }
+    assert.equal(s.source, 'unavailable');
+    assert.equal(s.model_source, 'unavailable');
+    assert.equal(s.effort_source, 'unavailable');
+  });
+
+  it('lets an explicit option outrank the task-spec pin', async () => {
+    const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
+    writeTaskSpec(taskSpec);
+    writeFileSync(taskSpec, `${readFileSync(taskSpec, 'utf8')}model: from-spec\n`, 'utf8');
+    const capture: { args?: string[] } = {};
+
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-prov-5', undefined, {
+      exec: makeExec(join(worktree, '.git')),
+      spawn: makeSpawn('{"thread_id":"t-5"}\n', capture),
+      probe: PROBE,
+      model: 'from-option',
+    });
+
+    assert.equal(session(sessions, 'run-prov-5').model, 'from-option');
+    assert.equal((capture.args ?? [])[(capture.args ?? []).indexOf('-m') + 1], 'from-option');
+  });
+
+  /** Machine-local `<stateRoot>/codex-model.json`, the unpinned default source. */
+  function writeStateModel(dir: string, model: string): string {
+    const stateRoot = join(dir, 'state');
+    mkdirSync(stateRoot, { recursive: true });
+    writeFileSync(join(stateRoot, 'codex-model.json'), JSON.stringify({ model }), 'utf8');
+    return stateRoot;
+  }
+
+  it('does not pair a machine-local state model with the probe\'s account-default provider', async () => {
+    // The regression: the state file selected the model that actually ran, but
+    // `provider` was still taken from the probe — which describes the ACCOUNT
+    // DEFAULT model. The state file can name a model from a completely
+    // different provider, so that pairing recorded a provider that may not even
+    // be valid for the model in the same record.
+    const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
+    writeTaskSpec(taskSpec);
+    const stateRoot = writeStateModel(dirname(taskSpec), 'state/model');
+
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-prov-state', undefined, {
+      exec: makeExec(join(worktree, '.git')),
+      spawn: makeSpawn('{"thread_id":"t-state"}\n'),
+      probe: () => ({ model: 'account/model', provider: 'account-provider', cliVersion: '0.144.6' }),
+      stateRoot,
+    });
+
+    const s = session(sessions, 'run-prov-state');
+    assert.equal(s.model, 'state/model', 'the state file selects the model that runs');
+    assert.equal(s.provider, null, 'the probed provider belongs to account/model, not state/model');
+    // The state file is a machine-local default, not a per-task pin.
+    assert.equal(s.model_source, 'vendor_default');
+    // cli_version is a fact about the CLI itself, so the probe still supplies it.
+    assert.equal(s.cli_version, '0.144.6');
+  });
+
+  it('still attaches the probed provider when the state model matches the probe', async () => {
+    // Guard against over-correcting into "state config involved => provider
+    // null": when the state file names the very model the probe reported, the
+    // probe's provider genuinely describes it.
+    const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
+    writeTaskSpec(taskSpec);
+    const stateRoot = writeStateModel(dirname(taskSpec), 'gpt-5.6-sol');
+
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-prov-state-match', undefined, {
+      exec: makeExec(join(worktree, '.git')),
+      spawn: makeSpawn('{"thread_id":"t-state-m"}\n'),
+      probe: PROBE,
+      stateRoot,
+    });
+
+    const s = session(sessions, 'run-prov-state-match');
+    assert.equal(s.model, 'gpt-5.6-sol');
+    assert.equal(s.provider, 'openai');
+    assert.equal(s.model_source, 'vendor_default');
+  });
+
+  it('records a null provider when the probe reports a provider but no model', async () => {
+    // The probe parser reads `model` and `provider` independently, so a
+    // partial/malformed doctor report can carry a provider with no model. With
+    // nothing pinned the resolved model is null too, and a bare
+    // `resolvedModel === probe.model` equality made `null === null` true —
+    // attaching that ORPHAN provider to an attempt whose model is unknown.
+    const { taskSpec, worktree, inbox, sessions } = setupFixture(makeRunId());
+    writeTaskSpec(taskSpec);
+
+    await adapterCodex('start', taskSpec, worktree, inbox, sessions, 'run-prov-orphan', undefined, {
+      exec: makeExec(join(worktree, '.git')),
+      spawn: makeSpawn('{"thread_id":"t-orphan"}\n'),
+      probe: () => ({ model: null, provider: 'openai', cliVersion: '0.144.6' }),
+    });
+
+    const s = session(sessions, 'run-prov-orphan');
+    assert.equal(s.model, null);
+    assert.equal(s.provider, null, 'no resolved model means no provider to attach it to');
+    assert.equal(s.model_source, 'unavailable');
+    // The CLI version is a fact about the binary, independent of the model.
+    assert.equal(s.cli_version, '0.144.6');
+  });
+});
+
+describe('probeCodex report parsing (issue #42)', () => {
+  it('reads the FLAT dotted check id, not a nested config.load object', () => {
+    // Regression guard: `codex doctor --json` keys `checks` by literal dotted
+    // check ids ("config.load"), so a nested `checks.config.load` lookup
+    // silently yields undefined and reports a null model for every run.
+    const report = {
+      schemaVersion: 1,
+      codexVersion: '0.144.6',
+      checks: {
+        'config.load': {
+          id: 'config.load',
+          details: { model: 'gpt-5.6-sol', 'model provider': 'openai' },
+        },
+      },
+    };
+
+    const details = (report.checks as Record<string, any>)['config.load']?.details ?? {};
+    assert.equal(details.model, 'gpt-5.6-sol');
+    assert.equal(details['model provider'], 'openai');
+    assert.equal((report.checks as any).config, undefined, 'there is no nested config key');
+  });
+
+  it('returns an all-null probe when the vendor opt-out is set', async () => {
+    const { probeCodex } = await import('../src/adapter-codex.ts');
+    const previous = process.env.HYDRA_VENDOR_PROBE;
+    process.env.HYDRA_VENDOR_PROBE = '0';
+    try {
+      // Never shells out, so this is safe with no codex CLI present.
+      assert.deepEqual(probeCodex(), { model: null, provider: null, cliVersion: null });
+    } finally {
+      if (previous === undefined) delete process.env.HYDRA_VENDOR_PROBE;
+      else process.env.HYDRA_VENDOR_PROBE = previous;
     }
   });
 });

@@ -128,13 +128,24 @@ function fixture(
   };
 }
 
-function ledger(f: Fixture): Array<Record<string, string>> {
+/** Every ledger entry, including per-attempt disclosure events. */
+function ledgerAll(f: Fixture): Array<Record<string, string>> {
   const path = join(f.runDir, 'authoritative', 'ledger', 'events.jsonl');
   if (!existsSync(path)) return [];
   return readFileSync(path, 'utf8')
     .split('\n')
     .filter(Boolean)
     .map((line) => JSON.parse(line) as Record<string, string>);
+}
+
+/**
+ * Attempt LIFECYCLE entries. `worker_model_resolved` (issue #42) is a
+ * per-attempt disclosure annotation rather than a lifecycle transition, so it
+ * is filtered out here and asserted directly via ledgerAll() instead — that
+ * keeps every existing task_started/agent_exited sequence assertion meaningful.
+ */
+function ledger(f: Fixture): Array<Record<string, string>> {
+  return ledgerAll(f).filter(({ event }) => event !== 'worker_model_resolved');
 }
 
 class FakeChild extends EventEmitter implements ChildProcessLike {
@@ -2839,7 +2850,9 @@ describe('dispatch opencode_model pin', () => {
       dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { headsFile })),
     );
 
-    assert.match(output, /opencode_model 'acme\/model-x' is not in the detected opencode model list/);
+    // The warning is now vendor-neutral: `model:` and `opencode_model:` are
+    // the same pin, so the message names neither spelling specifically.
+    assert.match(output, /model pin 'acme\/model-x' is not in the detected opencode model list/);
     assert.match(output, /proceeding anyway/);
     assert.equal(mock.calls.length, 1, 'dispatch proceeds despite the stale model list');
   });
@@ -3646,5 +3659,188 @@ describe('amendment no-op gate (issue #40)', () => {
     // A reader that throws outright must still fail open, not propagate.
     const hostile = { ...amended, readHead: () => { throw new Error('boom'); } };
     assert.equal(detectAmendmentNoop(hostile, 'task-a'), null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// worker_model_resolved ledger event (issue #42).
+// ---------------------------------------------------------------------------
+
+describe('worker_model_resolved (issue #42)', () => {
+  before(() => mkdirSync(TEST_TMP, { recursive: true }));
+  after(() => rmSync(TEST_TMP, { recursive: true, force: true }));
+
+  function provenanceEvent(f: Fixture): Record<string, string> | undefined {
+    return ledgerAll(f).find(({ event }) => event === 'worker_model_resolved');
+  }
+
+  /** Stand in for the adapter writing its per-attempt session capture. */
+  function writeCapture(f: Fixture, agentRunId: string, body: Record<string, unknown>): void {
+    mkdirSync(f.sessionsDir, { recursive: true });
+    writeFileSync(join(f.sessionsDir, `${agentRunId}.json`), `${JSON.stringify(body)}\n`, 'utf8');
+  }
+
+  it('fires exactly once per attempt with every field present', async () => {
+    const f = fixture(runId(), { vendor: 'codex' });
+    const mock = fakeSpawn({
+      onSpawn: (call) => {
+        writeCapture(f, String(call.args.at(-2)), {
+          agent_run_id: call.args.at(-2),
+          vendor: 'codex',
+          session_id: 's-1',
+          model: 'gpt-5.6-sol',
+          provider: 'openai',
+          cli_version: '0.144.6',
+          effort: 'high',
+          source: 'pinned',
+        });
+      },
+    });
+
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn));
+
+    const events = ledgerAll(f).filter(({ event }) => event === 'worker_model_resolved');
+    assert.equal(events.length, 1, 'exactly once per attempt');
+    const e = events[0];
+    assert.equal(e.task_id, 'task-a');
+    assert.equal(e.vendor, 'codex');
+    assert.equal(e.model, 'gpt-5.6-sol');
+    assert.equal(e.provider, 'openai');
+    assert.equal(e.cli_version, '0.144.6');
+    assert.equal(e.effort, 'high');
+    assert.equal(e.source, 'pinned');
+  });
+
+  it('reports null fields and source=unavailable when the adapter records nothing', async () => {
+    // adapter-claude.ts predates this change and writes no provenance keys.
+    const f = fixture(runId(), { vendor: 'claude' });
+    const mock = fakeSpawn();
+
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn));
+
+    const e = provenanceEvent(f);
+    assert.ok(e, 'the event fires for every vendor, even one that cannot report');
+    // 'null' is the ledger's string encoding — the key is never omitted.
+    for (const key of ['model', 'provider', 'cli_version', 'effort']) {
+      assert.equal(e?.[key], 'null', `${key} must be present and explicitly null`);
+    }
+    assert.equal(e?.source, 'unavailable');
+  });
+
+  it('distinguishes a vendor default from an explicit pin', async () => {
+    const f = fixture(runId(), { vendor: 'kimi' });
+    const mock = fakeSpawn({
+      onSpawn: (call) => {
+        writeCapture(f, String(call.args.at(-2)), {
+          vendor: 'kimi',
+          model: 'kimi-code/k3',
+          provider: 'managed:kimi-code',
+          cli_version: '0.29.1',
+          effort: null,
+          source: 'vendor_default',
+        });
+      },
+    });
+
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn));
+
+    const e = provenanceEvent(f);
+    assert.equal(e?.source, 'vendor_default');
+    assert.equal(e?.model, 'kimi-code/k3');
+    // Kimi has no effort flag; null must survive rather than become ''.
+    assert.equal(e?.effort, 'null');
+  });
+
+  it('treats a pre-issue-42 capture (model, no source) as vendor_default', async () => {
+    const f = fixture(runId(), { vendor: 'opencode' });
+    const mock = fakeSpawn({
+      onSpawn: (call) => {
+        writeCapture(f, String(call.args.at(-2)), {
+          vendor: 'opencode',
+          model: 'zai-coding-plan/glm-5.2',
+          session_id: 'legacy',
+        });
+      },
+    });
+
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn));
+
+    const e = provenanceEvent(f);
+    assert.equal(e?.model, 'zai-coding-plan/glm-5.2');
+    assert.equal(e?.source, 'vendor_default');
+    assert.equal(e?.provider, 'null');
+    // A pre-amendment capture has no per-field keys: the model inherits the
+    // single `source` it was computed from, and the absent effort cannot be
+    // graded as anything but unavailable.
+    assert.equal(e?.model_source, 'vendor_default');
+    assert.equal(e?.effort_source, 'unavailable');
+  });
+
+  it('carries per-field sources so an effort-only pin is not reported as an inherit', async () => {
+    const f = fixture(runId(), { vendor: 'codex' });
+    const mock = fakeSpawn({
+      onSpawn: (call) => {
+        writeCapture(f, String(call.args.at(-2)), {
+          vendor: 'codex',
+          model: 'gpt-5.6-sol',
+          provider: 'openai',
+          cli_version: '0.144.6',
+          effort: 'high',
+          source: 'pinned',
+          model_source: 'vendor_default',
+          effort_source: 'pinned',
+        });
+      },
+    });
+
+    await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn));
+
+    const e = provenanceEvent(f);
+    assert.equal(e?.model_source, 'vendor_default');
+    assert.equal(e?.effort_source, 'pinned');
+    assert.equal(e?.source, 'pinned');
+  });
+});
+
+describe('unhonorable model/effort pin warnings (issue #42)', () => {
+  before(() => mkdirSync(TEST_TMP, { recursive: true }));
+  after(() => rmSync(TEST_TMP, { recursive: true, force: true }));
+
+  it('warns loudly when kimi is given an effort: pin it cannot honor', async () => {
+    const f = fixture(runId(), { vendor: 'kimi' });
+    appendFileSync(f.taskSpecPath, 'effort: high\n', 'utf8');
+    const mock = fakeSpawn();
+
+    const { output } = await captureStderr(() =>
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn)),
+    );
+
+    assert.match(output, /kimi adapter cannot pin reasoning effort \('high' requested\)/);
+    assert.match(output, /the pin had NO effect/);
+    assert.equal(mock.calls.length, 1, 'a warning discloses, it does not block');
+  });
+
+  it('warns when claude is given a model: pin its adapter cannot wire', async () => {
+    const f = fixture(runId(), { vendor: 'claude' });
+    appendFileSync(f.taskSpecPath, 'model: acme/x\n', 'utf8');
+    const mock = fakeSpawn();
+
+    const { output } = await captureStderr(() =>
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn)),
+    );
+
+    assert.match(output, /claude adapter cannot pin model \('acme\/x' requested\)/);
+  });
+
+  it('stays silent for a pin the vendor can honor', async () => {
+    const f = fixture(runId(), { vendor: 'codex' });
+    appendFileSync(f.taskSpecPath, 'model: o3\neffort: high\n', 'utf8');
+    const mock = fakeSpawn();
+
+    const { output } = await captureStderr(() =>
+      dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn)),
+    );
+
+    assert.ok(!/cannot pin/.test(output), 'codex honors both halves via -m and -c');
   });
 });

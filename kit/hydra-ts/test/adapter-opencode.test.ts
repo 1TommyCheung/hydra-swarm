@@ -12,6 +12,7 @@ import { EventEmitter } from 'node:events';
 import { Readable, Writable } from 'node:stream';
 import type { ChildProcess, SpawnOptionsWithoutStdio } from 'node:child_process';
 import {
+  DEFAULT_MODEL,
   explore,
   review,
   start,
@@ -21,6 +22,11 @@ import {
 } from '../src/adapter-opencode.ts';
 
 const TEST_TMP = join(import.meta.dirname, 'tmp-adapter-opencode');
+
+// The model-provenance probe shells out to the real `opencode --version`; a
+// unit run must never invoke a vendor CLI (issue #42).
+process.env.HYDRA_VENDOR_PROBE = '0';
+delete process.env.HYDRA_OPENCODE_EFFORT;
 const ORIGINAL_OPENCODE_MODEL = process.env.HYDRA_OPENCODE_MODEL;
 
 afterEach(restoreEnv);
@@ -1173,5 +1179,157 @@ describe('worker prompt parity (issue #26)', () => {
     } finally {
       removeR(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Vendor-neutral model:/effort: pin and provenance (issue #42).
+// ---------------------------------------------------------------------------
+
+describe('opencode vendor-neutral model:/effort: pin (issue #42)', () => {
+  before(() => mkdirSync(TEST_TMP, { recursive: true }));
+  after(() => {
+    cleanTmp();
+    restoreEnv();
+  });
+
+  const PROBE = () => ({ model: null, provider: null, cliVersion: '1.18.5' });
+
+  function setupSpec(extraSpecLines = '') {
+    const agentRunId = `n42-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const worktree = join(TEST_TMP, 'worktrees', agentRunId);
+    const inbox = join(TEST_TMP, 'inbox', agentRunId);
+    const sessions = join(TEST_TMP, 'sessions', agentRunId);
+    const spec = join(TEST_TMP, 'specs', `${agentRunId}.yaml`);
+    for (const d of [worktree, inbox, sessions, dirname(spec)]) mkdirSync(d, { recursive: true });
+    writeFileSync(
+      spec,
+      `task_id: adapter-opencode
+run_id: 0068
+spec_version: 1
+branch: hydra/0068/adapter-opencode
+base_commit: 71bcbcf9acf0aeadc5d8eb5d1c0d3868b45b6070
+objective: >
+  Do the thing.
+writable_paths:
+  - hydra-ts/src/adapter-opencode.ts
+acceptance_criteria:
+  - pass
+${extraSpecLines}`,
+      'utf8',
+    );
+    return { agentRunId, worktree, inbox, sessions, spec };
+  }
+
+  async function runStart(extraSpecLines = '', options: Record<string, unknown> = {}) {
+    const ctx = setupSpec(extraSpecLines);
+    let args: string[] = [];
+    const spawn = makeSpawn(eventsStdout({ sessionID: 'n42', type: 'text', text: 'ok' }), {
+      onSpawn: (_command, spawnArgs) => { args = spawnArgs; },
+    });
+    const { output: stderr } = await captureStderr(() =>
+      start(ctx.spec, ctx.worktree, ctx.inbox, ctx.sessions, ctx.agentRunId, {
+        spawn,
+        deriveDropFromGit: () => false,
+        stateRoot: join(TEST_TMP, 'missing-state', ctx.agentRunId),
+        probe: PROBE,
+        ...options,
+      }),
+    );
+    return {
+      args,
+      stderr,
+      session: readJson(`${ctx.sessions}/${ctx.agentRunId}.json`) as Record<string, any>,
+    };
+  }
+
+  it('accepts the vendor-neutral model: field', async () => {
+    delete process.env.HYDRA_OPENCODE_MODEL;
+    const { args, session } = await runStart('model: acme/neutral-model\n');
+
+    assert.equal(args[args.indexOf('--model') + 1], 'acme/neutral-model');
+    assert.equal(session.model, 'acme/neutral-model');
+    assert.equal(session.source, 'pinned');
+    // provider comes from the provider/model alias, no query needed.
+    assert.equal(session.provider, 'acme');
+    assert.equal(session.cli_version, '1.18.5');
+  });
+
+  it('keeps opencode_model working unchanged when model: is absent', async () => {
+    delete process.env.HYDRA_OPENCODE_MODEL;
+    const { args, stderr } = await runStart('opencode_model: acme/legacy-model\n');
+
+    assert.equal(args[args.indexOf('--model') + 1], 'acme/legacy-model');
+    assert.ok(!/pins BOTH/.test(stderr), 'the alias alone is not a conflict');
+  });
+
+  it('stays silent when model: and opencode_model: agree', async () => {
+    delete process.env.HYDRA_OPENCODE_MODEL;
+    const { args, stderr } = await runStart('model: acme/same\nopencode_model: acme/same\n');
+
+    assert.equal(args[args.indexOf('--model') + 1], 'acme/same');
+    assert.ok(!/pins BOTH/.test(stderr));
+  });
+
+  it('warns loudly on a genuine model:/opencode_model: conflict and prefers model:', async () => {
+    delete process.env.HYDRA_OPENCODE_MODEL;
+    const { args, stderr } = await runStart('model: acme/neutral\nopencode_model: acme/legacy\n');
+
+    assert.match(stderr, /pins BOTH model: 'acme\/neutral' AND opencode_model: 'acme\/legacy'/);
+    assert.match(stderr, /using the vendor-neutral model:/);
+    assert.equal(args[args.indexOf('--model') + 1], 'acme/neutral');
+  });
+
+  it('honors an effort: pin through opencode --variant', async () => {
+    delete process.env.HYDRA_OPENCODE_MODEL;
+    const { args, session } = await runStart('model: acme/m\neffort: high\n');
+
+    // `--variant` is opencode's provider-specific reasoning-effort flag.
+    assert.equal(args[args.indexOf('--variant') + 1], 'high');
+    assert.equal(session.effort, 'high');
+    assert.equal(session.model_source, 'pinned');
+    assert.equal(session.effort_source, 'pinned');
+  });
+
+  it('labels an effort-only pin pinned while the model stays vendor_default', async () => {
+    // The regression: deriving BOTH fields from model.pinned alone reported an
+    // honored effort pin as a silent inherit.
+    delete process.env.HYDRA_OPENCODE_MODEL;
+    const { args, session } = await runStart('effort: high\n');
+
+    assert.equal(args[args.indexOf('--variant') + 1], 'high');
+    assert.equal(session.effort, 'high');
+    assert.equal(session.effort_source, 'pinned');
+    // The model fell through to the adapter default: nobody chose it.
+    assert.equal(session.model, DEFAULT_MODEL);
+    assert.equal(session.model_source, 'vendor_default');
+    assert.equal(session.source, 'pinned');
+  });
+
+  it('labels a model-only pin pinned while effort stays unavailable', async () => {
+    delete process.env.HYDRA_OPENCODE_MODEL;
+    const { args, session } = await runStart('model: acme/only\n');
+
+    assert.ok(!args.includes('--variant'));
+    assert.equal(session.model_source, 'pinned');
+    assert.equal(session.effort, null);
+    assert.equal(session.effort_source, 'unavailable');
+    assert.equal(session.source, 'pinned');
+  });
+
+  it('records vendor_default with a full key set when no pin is present', async () => {
+    delete process.env.HYDRA_OPENCODE_MODEL;
+    const { args, session } = await runStart();
+
+    assert.ok(!args.includes('--variant'));
+    assert.equal(session.source, 'vendor_default');
+    for (const key of [
+      'model', 'provider', 'cli_version', 'effort', 'source', 'model_source', 'effort_source',
+    ]) {
+      assert.ok(key in session, `${key} must be present`);
+    }
+    assert.equal(session.effort, null);
+    assert.equal(session.model_source, 'vendor_default');
+    assert.equal(session.effort_source, 'unavailable');
   });
 });

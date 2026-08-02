@@ -78,6 +78,7 @@ import {
 import { isCompiledBinary } from './kit-assets.ts';
 import { resolveWorkerNodeBinDir } from './resolve-node.ts';
 import { readAdapterOutcome } from './adapter-outcome.ts';
+import { vendorSpecPins, type ModelProvenance, type ModelSource } from './adapter-codex.ts';
 
 export type ExecFileSyncLike = (
   file: string,
@@ -499,21 +500,116 @@ function enforceVendorCooldown(spec: TaskSpec, options: DispatchOptions): void {
 }
 
 /**
- * Task-spec opencode_model pin (run 0047): dispatch reads the pin and the
- * opencode adapter receives it through the spec file itself (adapter-opencode
- * resolveModel gives it precedence over HYDRA_OPENCODE_MODEL). When the pin
- * is absent from the detected opencode model list in heads.json, warn but
- * proceed — the snapshot may simply be stale.
+ * Task-spec model pin (run 0047, generalized for issue #42): dispatch reads the
+ * pin and the opencode adapter receives it through the spec file itself
+ * (adapter-opencode resolveModel gives it precedence over
+ * HYDRA_OPENCODE_MODEL). `opencode_model:` stays a backward-compatible alias
+ * for the vendor-neutral `model:`. When the pin is absent from the detected
+ * opencode model list in heads.json, warn but proceed — the snapshot may
+ * simply be stale.
  */
 function warnOnStaleOpencodeModelPin(spec: TaskSpec, taskSpecPath: string, options: DispatchOptions): void {
   if (spec.vendor !== 'opencode') return;
-  const pinnedModel = yamlScalar(taskSpecPath, 'opencode_model');
+  const pinnedModel = vendorSpecPins(taskSpecPath).model || yamlScalar(taskSpecPath, 'opencode_model');
   if (!pinnedModel) return;
   const headsFile = options.headsFile ?? headsFilePath();
   const models: unknown = readHeadsFile(headsFile)?.heads.opencode.models;
   if (Array.isArray(models) && models.length > 0 && !models.includes(pinnedModel)) {
-    warn(`opencode_model '${pinnedModel}' is not in the detected opencode model list (${models.length} models in ${headsFile}); proceeding anyway`);
+    warn(`model pin '${pinnedModel}' is not in the detected opencode model list (${models.length} models in ${headsFile}); proceeding anyway`);
   }
+}
+
+/**
+ * Which halves of a `model:` / `effort:` pin each vendor's CLI can actually
+ * honor — verified against the installed CLIs, not assumed (issue #42):
+ *
+ *   codex 0.144.6   `-m/--model` on exec AND exec resume;
+ *                   `-c model_reasoning_effort=` (accepted by --strict-config)
+ *   kimi 0.29.1     `-m/--model`; NO effort/reasoning flag anywhere
+ *   opencode 1.18.5 `-m/--model`; `--variant` (provider-specific effort)
+ *   claude          neither is wired by adapter-claude.ts
+ *
+ * A pin a vendor cannot honor must be LOUD at dispatch time — silently
+ * ignoring it is exactly the unfalsifiable-comparison failure issue #42
+ * describes.
+ */
+const VENDOR_PIN_SUPPORT: Record<string, { model: boolean; effort: boolean }> = {
+  codex: { model: true, effort: true },
+  kimi: { model: true, effort: false },
+  opencode: { model: true, effort: true },
+  claude: { model: false, effort: false },
+};
+
+function warnOnUnhonorablePin(spec: TaskSpec, taskSpecPath: string): void {
+  const pins = vendorSpecPins(taskSpecPath);
+  const support = VENDOR_PIN_SUPPORT[spec.vendor];
+  if (support === undefined) return;
+  if (pins.model && !support.model) {
+    warn(
+      `${spec.vendor} adapter cannot pin model ('${pins.model}' requested); `
+      + 'inheriting account default — the pin had NO effect',
+    );
+  }
+  if (pins.effort && !support.effort) {
+    warn(
+      `${spec.vendor} adapter cannot pin reasoning effort ('${pins.effort}' requested); `
+      + 'inheriting account default — the pin had NO effect',
+    );
+  }
+}
+
+/**
+ * Read the per-attempt provenance an adapter recorded in its session capture.
+ *
+ * Returns an all-null `unavailable` record when the capture is missing or
+ * malformed — a vendor whose adapter predates issue #42 (adapter-claude.ts)
+ * lands here, which is the honest answer rather than a fabricated model.
+ */
+export function readModelProvenance(sessionsDir: string, agentRunId: string): ModelProvenance {
+  const fallback: ModelProvenance = {
+    model: null,
+    provider: null,
+    cli_version: null,
+    effort: null,
+    source: 'unavailable',
+    model_source: 'unavailable',
+    effort_source: 'unavailable',
+  };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(join(sessionsDir, `${agentRunId}.json`), 'utf8'));
+  } catch {
+    return fallback;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return fallback;
+  const record = parsed as Record<string, unknown>;
+  const text = (key: string): string | null =>
+    typeof record[key] === 'string' && record[key] !== '' ? record[key] as string : null;
+
+  const asSource = (value: unknown): ModelSource | null =>
+    value === 'pinned' || value === 'vendor_default' || value === 'unavailable'
+      ? value
+      : null;
+
+  const model = text('model');
+  const effort = text('effort');
+  // A capture written before this change has a model but no source key.
+  const source = asSource(record.source) ?? (model === null ? 'unavailable' : 'vendor_default');
+  // Per-field keys are also absent in a pre-amendment capture, whose single
+  // `source` was computed from the MODEL pin alone. So the model inherits it,
+  // while the effort can only be graded on whether it is known at all — that
+  // capture carries no evidence either way about an effort pin, and inheriting
+  // `pinned` there would assert something never recorded.
+  return {
+    model,
+    provider: text('provider'),
+    cli_version: text('cli_version'),
+    effort,
+    source,
+    model_source: asSource(record.model_source) ?? source,
+    effort_source: asSource(record.effort_source)
+      ?? (effort === null ? 'unavailable' : 'vendor_default'),
+  };
 }
 
 function computeConcurrencyCap(options: DispatchOptions, env: NodeJS.ProcessEnv): number {
@@ -1838,23 +1934,58 @@ function safeRecordUsage(ctx: WorkerContext): void {
   }
 }
 
+/**
+ * Emit `worker_model_resolved` exactly once per attempt, after the adapter has
+ * written its session capture (issue #42). Every field is always present:
+ * `null` means "genuinely not recoverable for this vendor", never "not looked
+ * for". `source` is what separates an explicit pin from a silent inherit —
+ * without it, a cross-vendor comparison is unfalsifiable.
+ */
+function recordModelProvenance(ctx: WorkerContext): void {
+  try {
+    const p = readModelProvenance(ctx.sessionsDir, ctx.agentRunId);
+    ctx.appendLedger(
+      ctx.runId,
+      'worker_model_resolved',
+      'task_id', ctx.taskId,
+      'vendor', ctx.vendor,
+      'agent_run_id', ctx.agentRunId,
+      'model', p.model ?? 'null',
+      'provider', p.provider ?? 'null',
+      'cli_version', p.cli_version ?? 'null',
+      'effort', p.effort ?? 'null',
+      'source', p.source,
+      // Per-field, because an effort-only pin is a pin: the attempt-level
+      // `source` above cannot say WHICH field was chosen deliberately.
+      'model_source', p.model_source,
+      'effort_source', p.effort_source,
+    );
+  } catch (error) {
+    // Provenance is disclosure, never a gate: it must not fail a dispatch.
+    warn(`failed to record model provenance: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 async function runWorker(ctx: WorkerContext, recorder: ExitRecorder): Promise<void> {
   const panesEnabled = ctx.env.HYDRA_HERDR_PANES !== '0';
   const herdrLive = panesEnabled && safeHerdrLive(ctx.herdr);
   if (ctx.vendor === 'opencode') {
     await runWorkerPlain(ctx, recorder, herdrLive);
+    recordModelProvenance(ctx);
     if (!recorder.isCancelled()) safeRecordUsage(ctx);
     return;
   }
   if (herdrLive) {
     const hosted = await runWorkerInHerdrPane(ctx, recorder);
     if (hosted) {
+      recordModelProvenance(ctx);
       if (!recorder.isCancelled()) safeRecordUsage(ctx);
       return;
     }
     warn('herdr pane launch failed — falling back to a plain subprocess');
   }
   await runWorkerPlain(ctx, recorder);
+  recordModelProvenance(ctx);
   if (!recorder.isCancelled()) safeRecordUsage(ctx);
 }
 
@@ -2002,6 +2133,7 @@ export async function dispatch(
   enforceHeadAvailability(spec, taskSpecPath, options);
   enforceVendorCooldown(spec, options);
   warnOnStaleOpencodeModelPin(spec, taskSpecPath, options);
+  warnOnUnhonorablePin(spec, taskSpecPath);
   const env = options.env ?? process.env;
   // Strip BUN_BE_BUN in place so the worker spawn (runWorkerPlain passes
   // `env: ctx.env` explicitly, by reference — see dispatch.test.ts's identity

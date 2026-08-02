@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   auditOwnership,
@@ -21,6 +21,168 @@ import {
   yamlScalar,
 } from './lib.ts';
 import { verify, type VerifyOptions, type VerifyResult } from './verify.ts';
+import { readModelProvenance } from './dispatch.ts';
+import { attemptOrdinalFromAgentRunId } from './current-attempt.ts';
+import type { ModelProvenance } from './adapter-codex.ts';
+
+/**
+ * The one drop path shape the dispatch pipeline ever produces:
+ * `<rDir>/inbox/<agent_run_id>/result.json`. `claimDispatchAttempt()`
+ * (dispatch.ts) mkdirs `inbox/<agent_run_id>` and every adapter writes
+ * `result.json` into it — see adapter-{claude,codex,kimi,opencode}.ts.
+ */
+const CANONICAL_DROP_FILENAME = 'result.json';
+
+/**
+ * The agent_run_id a drop path proves it belongs to, or `undefined`.
+ *
+ * The parent directory NAME alone is not evidence: a drop handed in from
+ * anywhere else whose parent happens to look like an agent_run_id — by
+ * coincidence or by construction — would otherwise be trusted as that
+ * attempt's own capture. So the FULL resolved path must reconstruct exactly.
+ */
+function canonicalInboxAgentRunId(rDir: string, drop: string): string | undefined {
+  const resolved = resolve(drop);
+  const agentRunId = basename(dirname(resolved));
+  const canonical = resolve(join(rDir, 'inbox', agentRunId, CANONICAL_DROP_FILENAME));
+  return resolved === canonical ? agentRunId : undefined;
+}
+
+/** An agent_run_id's own position in attempt order: spec version, then retry. */
+interface AttemptKey {
+  version: number;
+  ordinal: number;
+}
+
+/** Sorts below every real attempt, whose spec versions start at 1. */
+const UNPARSEABLE_ATTEMPT_KEY: AttemptKey = { version: 0, ordinal: 0 };
+
+/**
+ * Parse an agent_run_id's OWN embedded `(spec_version, retry_ordinal)` from
+ * `<runId>-<taskId>-v<N>[-a<M>]`, independent of any spec version the caller
+ * happens to be on.
+ *
+ * `attemptOrdinalFromAgentRunId()` (current-attempt.ts) deliberately answers a
+ * different question — "is this id an attempt of spec version X" — and returns
+ * `undefined` for every other version. Ordering same-session captures with it
+ * therefore flattens all earlier-version attempts to one indistinguishable
+ * bucket, which is exactly the amended/resumed-task case this lookup exists to
+ * get right. That utility is shared (status.ts, wait-task.ts), so the ordering
+ * fix lives here rather than changing its contract.
+ *
+ * The `-a1` suffix is rejected to match the canonical spelling: attempt 1 is
+ * the bare base id (`agentRunIdForAttempt()`).
+ */
+function attemptKeyFromAgentRunId(
+  agentRunId: string,
+  runId: string,
+  taskId: string,
+): AttemptKey | undefined {
+  const prefix = `${runId}-${taskId}-v`;
+  if (!agentRunId.startsWith(prefix)) return undefined;
+  const match = /^([1-9]\d*)(?:-a([1-9]\d*))?$/.exec(agentRunId.slice(prefix.length));
+  if (match === null) return undefined;
+  const version = Number(match[1]);
+  const ordinal = match[2] === undefined ? 1 : Number(match[2]);
+  if (!Number.isSafeInteger(version) || !Number.isSafeInteger(ordinal)) return undefined;
+  if (match[2] !== undefined && ordinal < 2) return undefined;
+  return { version, ordinal };
+}
+
+/** Version first, then within-version retry, then the id itself so that even a
+ * pair of unparseable names orders by something better than readdir order. */
+function compareAttempts(
+  a: { agentRunId: string; key: AttemptKey },
+  b: { agentRunId: string; key: AttemptKey },
+): number {
+  if (a.key.version !== b.key.version) return a.key.version - b.key.version;
+  if (a.key.ordinal !== b.key.ordinal) return a.key.ordinal - b.key.ordinal;
+  if (a.agentRunId === b.agentRunId) return 0;
+  return a.agentRunId < b.agentRunId ? -1 : 1;
+}
+
+/**
+ * Model provenance for the promoted attempt (issue #42).
+ *
+ * The promoted document must be SELF-DESCRIBING: a reviewer holding only
+ * `authoritative/results/<task>.json` should be able to say which model
+ * produced it, without cross-referencing the ledger. The adapters record this
+ * per attempt in `sessions/<agent_run_id>.json`.
+ *
+ * The attempt is identified by AGENT RUN ID, taken from the inbox directory the
+ * drop sits in (`inbox/<agent_run_id>/result.json`) — the same identity the
+ * rest of the dispatch pipeline uses. A session_id-keyed lookup would be
+ * ambiguous: a resume attempt legitimately REUSES the session it resumed from,
+ * so an amended-and-resumed task has several attempts sharing one session_id
+ * and the scan could hand back an older attempt's model.
+ *
+ * Returns an all-null `unavailable` record when nothing matches — an honest
+ * "not recoverable" beats a fabricated model.
+ */
+function promotedModelProvenance(
+  rDir: string,
+  runId: string,
+  taskId: string,
+  specVersion: string,
+  drop: string,
+  claims: Record<string, any>,
+): ModelProvenance {
+  const unavailable: ModelProvenance = {
+    model: null,
+    provider: null,
+    cli_version: null,
+    effort: null,
+    source: 'unavailable',
+    model_source: 'unavailable',
+    effort_source: 'unavailable',
+  };
+  const sessionsDir = join(rDir, 'sessions');
+
+  // 1. Authoritative: this attempt's own capture, by agent_run_id. Only a drop
+  //    sitting at the exact canonical path carries that identity — a lookalike
+  //    parent directory elsewhere proves nothing about whose session it is.
+  const inboxName = canonicalInboxAgentRunId(rDir, drop);
+  if (inboxName !== undefined
+    && attemptOrdinalFromAgentRunId(inboxName, runId, taskId, specVersion) !== undefined) {
+    // A missing capture for a KNOWN attempt is `unavailable`, not licence to
+    // go looking for some other attempt's file.
+    return readModelProvenance(sessionsDir, inboxName);
+  }
+
+  // 2. A drop handed in from outside the canonical inbox layout has no attempt
+  //    identity, so fall back to the session_id. Among captures sharing that
+  //    session the LATEST attempt wins — by (spec version, retry ordinal),
+  //    both read off the agent_run_id itself. With no better evidence the most
+  //    recent one is the only defensible choice, and this ordering holds across
+  //    spec-version boundaries rather than collapsing to readdir order.
+  const sessionId = typeof claims.session_id === 'string' ? claims.session_id : '';
+  if (!sessionId) return unavailable;
+
+  let names: string[];
+  try {
+    names = readdirSync(sessionsDir).filter((name) => name.endsWith('.json')
+      && !name.endsWith('.outcome.json') && !name.endsWith('.session.json'));
+  } catch {
+    return unavailable;
+  }
+
+  let best: { agentRunId: string; key: AttemptKey } | undefined;
+  for (const name of names) {
+    const agentRunId = name.slice(0, -'.json'.length);
+    try {
+      const parsed = JSON.parse(readFileSync(join(sessionsDir, name), 'utf8'));
+      if (parsed?.session_id !== sessionId) continue;
+    } catch {
+      continue; // A malformed or partial capture simply does not match.
+    }
+    // Keyed on the id's OWN version, so a capture predating an amendment still
+    // orders correctly against one from the current spec version.
+    const key = attemptKeyFromAgentRunId(agentRunId, runId, taskId) ?? UNPARSEABLE_ATTEMPT_KEY;
+    const candidate = { agentRunId, key };
+    if (best === undefined || compareAttempts(candidate, best) > 0) best = candidate;
+  }
+  return best === undefined ? unavailable : readModelProvenance(sessionsDir, best.agentRunId);
+}
 
 /**
  * Trust-boundary schema content. The `schema` option (tests) reads from disk
@@ -700,6 +862,15 @@ export async function promote(
   mkdirSync(promotedDir, { recursive: true });
   const promoted = join(promotedDir, `${taskId}.json`);
 
+  const workerModel = promotedModelProvenance(
+    rDir,
+    runId,
+    taskId,
+    specVersionLatest,
+    drop,
+    claims,
+  );
+
   const promotedDoc = {
     claims,
     harness_observed: { verification: observed },
@@ -707,6 +878,9 @@ export async function promote(
     mandated_verification_missing: mandatedVerificationMissing,
     mandated_verification_not_claimed: mandatedNotClaimed,
     verification_policy_placeholder: placeholderVerifyPolicy,
+    // Which model produced this candidate (issue #42) — keys are always
+    // present, null meaning "not recoverable for this vendor".
+    worker_model: workerModel,
     promoted_at: now(),
   };
   writeFileSync(promoted, `${JSON.stringify(promotedDoc)}\n`, 'utf8');
