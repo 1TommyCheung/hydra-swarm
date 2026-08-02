@@ -78,6 +78,13 @@ export interface OpencodeRunOptions {
   cwd?: string;
   /** Directory containing the optional global opencode-model.json override. */
   stateRoot?: string;
+  /**
+   * Environment consulted for HYDRA_OPENCODE_MODEL / HOME; defaults to
+   * process.env. Injected by out-of-process callers (dispatch resolves the
+   * provider a worker WOULD use before spawning it) so the resolution reads the
+   * exact environment the adapter process will run under.
+   */
+  env?: NodeJS.ProcessEnv;
   /** Injected vendor probe so tests never shell out to the real opencode CLI. */
   probe?: VendorProbe;
 }
@@ -131,11 +138,12 @@ function resolveModelDetailed(options?: OpencodeRunOptions): { value: string; pi
 
   if (options?.taskSpecModel) return { value: options.taskSpecModel, pinned: true };
 
-  const envModel = process.env.HYDRA_OPENCODE_MODEL;
+  const env = options?.env ?? process.env;
+  const envModel = env.HYDRA_OPENCODE_MODEL;
   if (envModel) return { value: envModel, pinned: true };
 
   const stateRoot = options?.stateRoot
-    ?? join(process.env.HOME ?? '', '.local/state/hydra');
+    ?? join(env.HOME ?? '', '.local/state/hydra');
   const configPath = join(stateRoot, 'opencode-model.json');
   let config: unknown;
   try {
@@ -182,6 +190,26 @@ export function resolveOpencodeSpecPin(taskSpec: string): string {
     return neutral;
   }
   return neutral || legacy;
+}
+
+/**
+ * The provider route a `start`/`resume` for this task spec WOULD take, e.g.
+ * `zai-coding-plan/glm-5.2` -> `zai-coding-plan` and `openrouter/z-ai/glm-5.2`
+ * -> `openrouter`. Null when the resolved model carries no provider segment.
+ *
+ * Deliberately mirrors runImplementer's own resolution (spec pin, then the
+ * shared model precedence) rather than re-deriving it, so an out-of-process
+ * caller — dispatch's cooldown gate (issue #25) — asks about the same provider
+ * the worker will actually dial. opencode is the only vendor whose single
+ * machine-global credential fans out to several independent provider accounts,
+ * so it is the only one for which this question is meaningful.
+ */
+export function resolveOpencodeProvider(
+  taskSpec: string,
+  options?: OpencodeRunOptions,
+): string | null {
+  const specPin = options?.taskSpecModel || resolveOpencodeSpecPin(taskSpec);
+  return providerOf(resolveModel(specPin ? { ...options, taskSpecModel: specPin } : options));
 }
 
 interface OpencodeResolution {

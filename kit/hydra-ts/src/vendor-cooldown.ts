@@ -18,10 +18,13 @@ import { warn } from './lib.ts';
 //   - dispatch.ts  runUsageDetectorTick records a cooldown alongside
 //     recordUsageLimited (best-effort: a write failure never blocks the
 //     usage-limited termination)
-//   - dispatch.ts  enforceVendorCooldown refuses to START a dispatch to a
-//     vendor with an active cooldown, mirroring enforceHeadAvailability: the
-//     operator waits for the reset or re-pins assigned_vendor — hydra never
-//     auto-substitutes, never auto-reroutes, never auto-retries.
+//   - dispatch.ts  enforceVendorCooldown refuses to START a dispatch whose
+//     credential has an active cooldown, mirroring enforceHeadAvailability: the
+//     operator waits for the reset or re-pins — hydra never auto-substitutes,
+//     never auto-reroutes, never auto-retries. That gate queries by vendor, plus
+//     (opencode only) the provider the task's model pin selects, since one
+//     opencode credential store fans out to several independently-quotaed
+//     provider accounts — see activeCooldown for the matching rule.
 // ---------------------------------------------------------------------------
 
 /**
@@ -74,6 +77,14 @@ interface CooldownFile {
 export interface ActiveCooldown {
   retryAt?: string;
   rawError: string;
+  /**
+   * The provider the MATCHED cooldown was recorded against, when the detection
+   * managed to identify one. Absent means the matched cooldown is unscoped: an
+   * unknown-scope, machine-global block covering every provider under the
+   * vendor. The dispatch gate uses this to tell the operator whether a
+   * different provider is worth re-pinning to (issue #25).
+   */
+  provider?: string;
 }
 
 /** The machine-global hydra state dir (deliberately NOT per-repo). */
@@ -185,12 +196,46 @@ function isActive(entry: StoredCooldown, nowMs: number): boolean {
   return recordedAtMs + FALLBACK_COOLDOWN_MS > nowMs;
 }
 
+/** The provider an entry is scoped to; undefined when it is unscoped. */
+function scopeOf(entry: StoredCooldown): string | undefined {
+  return typeof entry.provider === 'string' ? entry.provider : undefined;
+}
+
+/** Project a matched stored entry onto the caller-visible hit shape. */
+function hitFor(entry: StoredCooldown): ActiveCooldown {
+  const active: ActiveCooldown = {
+    rawError: typeof entry.rawError === 'string' ? entry.rawError : '',
+  };
+  if (typeof entry.retryAt === 'string' && Number.isFinite(Date.parse(entry.retryAt))) {
+    active.retryAt = entry.retryAt;
+  }
+  const scope = scopeOf(entry);
+  if (scope !== undefined) active.provider = scope;
+  return active;
+}
+
 /**
- * Look up an active cooldown. A query component that is provided must equal
- * the recorded one; an omitted query component matches any recorded value, so
- * a bare `activeCooldown(vendor)` — what the dispatch gate calls — finds EVERY
- * cooldown recorded against that vendor's machine-global credential, however
- * much provider/model detail the detection carried.
+ * Look up an active cooldown.
+ *
+ * An omitted query component matches any recorded value, so a bare
+ * `activeCooldown(vendor)` finds EVERY cooldown recorded against that vendor's
+ * machine-global credential, however much provider/model detail the detection
+ * carried.
+ *
+ * A supplied `provider` narrows the lookup to that provider's route — but NOT
+ * by exact match alone (issue #25). Vendor credentials are machine-global, yet
+ * one vendor (opencode) fans out to several INDEPENDENT provider accounts with
+ * separate quotas, so a cooldown recorded for provider X must not block a
+ * dispatch pinned to provider Y. The matching rule is therefore
+ * OR-with-unscoped-entries: an entry matches a provider-scoped query when
+ * EITHER (a) the entry's own provider equals the queried one, OR (b) the entry
+ * records no provider at all. Case (b) is load-bearing — the usage detector
+ * cannot always recover a `providerID=` from the vendor's diagnostics, and such
+ * an unknown-scope cooldown is a conservative machine-global block that must
+ * keep blocking every provider under the vendor. Only a cooldown recorded for a
+ * DIFFERENT, specific provider is excluded. An exact-provider entry is
+ * preferred over an unscoped one when both are active, so the returned hit
+ * describes the block as precisely as the store allows.
  *
  * Expiry is computed at read time: a parseable retryAt in the future keeps the
  * cooldown active; without a usable retryAt the FALLBACK_COOLDOWN_MS window
@@ -209,21 +254,23 @@ export function activeCooldown(
     const file = readCooldownFile(cooldownFilePath(options));
     if (file === null) return null;
     const nowMs = (options.now ?? Date.now)();
+    let unscopedHit: ActiveCooldown | null = null;
     for (const entry of Object.values(file.cooldowns)) {
       if (entry === null || typeof entry !== 'object') continue;
       if (entry.vendor !== vendor) continue;
-      if (provider !== undefined && entry.provider !== provider) continue;
+      const scope = scopeOf(entry);
+      if (provider !== undefined && scope !== undefined && scope !== provider) continue;
       if (model !== undefined && entry.model !== model) continue;
       if (!isActive(entry, nowMs)) continue;
-      const active: ActiveCooldown = {
-        rawError: typeof entry.rawError === 'string' ? entry.rawError : '',
-      };
-      if (typeof entry.retryAt === 'string' && Number.isFinite(Date.parse(entry.retryAt))) {
-        active.retryAt = entry.retryAt;
+      if (provider !== undefined && scope === undefined) {
+        // Keep the unscoped block as a fallback and keep scanning: an entry
+        // recorded for exactly this provider describes the situation better.
+        unscopedHit ??= hitFor(entry);
+        continue;
       }
-      return active;
+      return hitFor(entry);
     }
-    return null;
+    return unscopedHit;
   } catch (error) {
     // Fail open: a broken cooldown store must never itself block dispatch.
     warn(`vendor cooldown check failed: ${error instanceof Error ? error.message : String(error)}`);

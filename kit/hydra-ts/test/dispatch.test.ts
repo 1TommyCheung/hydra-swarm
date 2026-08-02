@@ -2824,6 +2824,138 @@ describe('dispatch vendor cooldown gate', () => {
     assert.equal(mock.calls.length, 1, 'a corrupt cooldown file must not block dispatch');
     assert.match(output, /vendor cooldown file is corrupt/);
   });
+
+  // Issue #25 (narrow slice): opencode's single machine-global credential store
+  // routes to several INDEPENDENT provider accounts chosen by the model pin, so
+  // the gate asks about the provider this dispatch would actually dial. Nothing
+  // here reroutes, retries or prompts — hydra detects and refuses, it never
+  // decides on the operator's behalf.
+  describe('opencode provider granularity', () => {
+    const FUTURE = () => new Date(Date.now() + 3_600_000).toISOString();
+    /** heads.json is irrelevant here; point at a missing file so no pin warning fires. */
+    const noHeads = (f: Fixture): DispatchOptions => ({ headsFile: join(f.runDir, 'absent-heads.json') });
+
+    function pinnedFixture(model: string, field = 'model'): Fixture {
+      const f = fixture(runId(), { vendor: 'opencode' });
+      appendFileSync(f.taskSpecPath, `${field}: ${model}\n`, 'utf8');
+      return f;
+    }
+
+    it('does not block a task pinned to a DIFFERENT provider than the one in cooldown', async () => {
+      const f = pinnedFixture('openrouter/z-ai/glm-5.2');
+      const cooldownFile = writeCooldown(f, {
+        vendor: 'opencode',
+        provider: 'zai-coding-plan',
+        model: 'glm-5.2',
+        retryAt: FUTURE(),
+        rawError: 'Usage limit reached for 5 hour',
+      });
+      const mock = fakeSpawn();
+      // openrouter is a separate account with its own quota — it was never limited.
+      await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { cooldownFile, ...noHeads(f) }));
+      assert.equal(mock.calls.length, 1, 'the openrouter-pinned worker must start');
+    });
+
+    it('honors the opencode_model alias when resolving the target provider', async () => {
+      const f = pinnedFixture('openrouter/z-ai/glm-5.2', 'opencode_model');
+      const cooldownFile = writeCooldown(f, {
+        vendor: 'opencode',
+        provider: 'zai-coding-plan',
+        retryAt: FUTURE(),
+        rawError: 'zai limited',
+      });
+      const mock = fakeSpawn();
+      await dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { cooldownFile, ...noHeads(f) }));
+      assert.equal(mock.calls.length, 1);
+    });
+
+    it('still blocks a task pinned to the provider that IS in cooldown, naming it', async () => {
+      const f = pinnedFixture('zai-coding-plan/glm-5.2');
+      const retryAt = FUTURE();
+      const cooldownFile = writeCooldown(f, {
+        vendor: 'opencode',
+        provider: 'zai-coding-plan',
+        model: 'glm-5.2',
+        retryAt,
+        rawError: 'Usage limit reached for 5 hour',
+      });
+      const mock = fakeSpawn();
+      await assert.rejects(
+        dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { cooldownFile, ...noHeads(f) })),
+        (error: unknown) => {
+          const message = (error as Error).message;
+          // Both the vendor AND the specific provider are named.
+          assert.match(message, /assigned vendor 'opencode' is in a usage-limit cooldown for provider 'zai-coding-plan'/);
+          assert.ok(message.includes(retryAt));
+          assert.match(message, /re-pin model:\/opencode_model: to a different opencode provider/);
+          assert.match(message, /never auto-substitutes/);
+          return true;
+        },
+      );
+      assert.equal(mock.calls.length, 0);
+    });
+
+    it('blocks an unpinned task, whose provider resolves to the adapter default', async () => {
+      const f = fixture(runId(), { vendor: 'opencode' });
+      const cooldownFile = writeCooldown(f, {
+        vendor: 'opencode',
+        provider: 'zai-coding-plan',
+        retryAt: FUTURE(),
+        rawError: 'zai limited',
+      });
+      const mock = fakeSpawn();
+      await assert.rejects(
+        dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { cooldownFile, ...noHeads(f) })),
+        /for provider 'zai-coding-plan'/,
+      );
+      assert.equal(mock.calls.length, 0);
+    });
+
+    it('lets a provider-UNKNOWN cooldown keep blocking every opencode provider', async () => {
+      const f = pinnedFixture('openrouter/z-ai/glm-5.2');
+      // The detector could not recover a providerID= from the diagnostics: the
+      // block is machine-global and stays exactly as conservative as before.
+      const cooldownFile = writeCooldown(f, {
+        vendor: 'opencode',
+        retryAt: FUTURE(),
+        rawError: 'stream error, scope unknown',
+      });
+      const mock = fakeSpawn();
+      await assert.rejects(
+        dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { cooldownFile, ...noHeads(f) })),
+        (error: unknown) => {
+          const message = (error as Error).message;
+          assert.match(message, /assigned vendor 'opencode' is in a usage-limit cooldown for an unidentified provider/);
+          assert.match(message, /covers every provider of this vendor/);
+          // Re-pinning the provider cannot help, so it is not suggested.
+          assert.doesNotMatch(message, /different opencode provider/);
+          return true;
+        },
+      );
+      assert.equal(mock.calls.length, 0, 'the unscoped block must refuse the pinned provider too');
+    });
+
+    it('leaves single-provider vendors on the unchanged bare-vendor query', async () => {
+      // A codex cooldown carrying provider detail still blocks codex: the gate
+      // never narrows for claude/codex/kimi, which have no multi-provider route.
+      for (const vendor of ['codex', 'kimi', 'claude']) {
+        const f = fixture(runId(), { vendor });
+        const cooldownFile = writeCooldown(f, {
+          vendor,
+          provider: 'some-provider',
+          model: 'some-model',
+          retryAt: FUTURE(),
+          rawError: `${vendor} limited`,
+        });
+        const mock = fakeSpawn();
+        await assert.rejects(
+          dispatch(f.runId, 'task-a', injectedOptions(f, mock.spawn, { cooldownFile, ...noHeads(f) })),
+          new RegExp(`assigned vendor '${vendor}' is in a usage-limit cooldown`),
+        );
+        assert.equal(mock.calls.length, 0, `${vendor} must stay blocked by any of its cooldowns`);
+      }
+    });
+  });
 });
 
 describe('dispatch opencode_model pin', () => {

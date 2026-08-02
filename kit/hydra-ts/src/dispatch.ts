@@ -79,6 +79,7 @@ import { isCompiledBinary } from './kit-assets.ts';
 import { resolveWorkerNodeBinDir } from './resolve-node.ts';
 import { readAdapterOutcome } from './adapter-outcome.ts';
 import { vendorSpecPins, type ModelProvenance, type ModelSource } from './adapter-codex.ts';
+import { resolveOpencodeProvider } from './adapter-opencode.ts';
 
 export type ExecFileSyncLike = (
   file: string,
@@ -464,23 +465,61 @@ function cooldownStoreOptions(env: NodeJS.ProcessEnv, cooldownFile: string | und
 }
 
 /**
- * Vendor usage-limit cooldown gate (run 0055, task 3): when the assigned
- * vendor's machine-global credential was recently reported exhausted (recorded
- * by runUsageDetectorTick into vendor-cooldowns.json), die before any worker
- * spawns — a second dispatch would hit the same still-limited account and hang
- * again. The message names the vendor and the vendor's reset time (or
- * "unknown — try again later") and tells the operator to wait or re-pin
- * assigned_vendor: hydra NEVER auto-substitutes — the same policy
- * enforceHeadAvailability applies to a missing CLI, applied here to a
- * usage-limited credential. Fails open on any read error so a broken cooldown
- * file can never itself wedge dispatch.
+ * The provider route this dispatch would actually take, when the vendor has
+ * more than one (issue #25).
+ *
+ * opencode is the ONLY such vendor: one machine-global credential store fans
+ * out to several independent provider accounts (`zai-coding-plan/…`,
+ * `openrouter/…`), each with its own quota, selected by the `model:` /
+ * `opencode_model:` pin. claude, codex and kimi are single-provider — inventing
+ * a provider for them would narrow their gate on a distinction that does not
+ * exist, so they keep the bare-vendor query.
+ *
+ * Returns undefined (i.e. "query the whole vendor", today's conservative
+ * behavior) for every other vendor and for any resolution failure.
  */
-function enforceVendorCooldown(spec: TaskSpec, options: DispatchOptions): void {
+function cooldownProviderFor(
+  spec: TaskSpec,
+  taskSpecPath: string,
+  options: DispatchOptions,
+): string | undefined {
+  if (spec.vendor !== 'opencode') return undefined;
+  try {
+    return resolveOpencodeProvider(taskSpecPath, { env: options.env ?? process.env }) ?? undefined;
+  } catch (error) {
+    warn(`opencode provider resolution failed; checking the cooldown for the whole vendor: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
+}
+
+/**
+ * Vendor usage-limit cooldown gate (run 0055 task 3; narrowed by issue #25):
+ * when the credential this dispatch would use was recently reported exhausted
+ * (recorded by runUsageDetectorTick into vendor-cooldowns.json), die before any
+ * worker spawns — a second dispatch would hit the same still-limited account
+ * and hang again.
+ *
+ * For opencode the gate asks about the PROVIDER the task's own model pin
+ * selects, so a `zai-coding-plan` cooldown no longer blocks a task pinned to
+ * the separately-quotaed `openrouter` account. A cooldown whose provider the
+ * detector could not identify stays a machine-global block and still refuses
+ * every provider (see activeCooldown's OR-with-unscoped rule) — narrower, never
+ * weaker. Every other vendor keeps the bare-vendor query unchanged.
+ *
+ * The message names the vendor, the provider in cooldown when known, and the
+ * vendor's reset time (or "unknown — try again later"), then tells the operator
+ * to wait or re-pin: hydra NEVER auto-substitutes, auto-reroutes or auto-retries
+ * — the same policy enforceHeadAvailability applies to a missing CLI, applied
+ * here to a usage-limited credential. Fails open on any read error so a broken
+ * cooldown file can never itself wedge dispatch.
+ */
+function enforceVendorCooldown(spec: TaskSpec, taskSpecPath: string, options: DispatchOptions): void {
+  const provider = cooldownProviderFor(spec, taskSpecPath, options);
   let cooldown: ActiveCooldown | null = null;
   try {
     cooldown = activeCooldown(
       spec.vendor,
-      undefined,
+      provider,
       undefined,
       cooldownStoreOptions(options.env ?? process.env, options.cooldownFile),
     );
@@ -491,11 +530,24 @@ function enforceVendorCooldown(spec: TaskSpec, options: DispatchOptions): void {
   if (cooldown === null) return;
 
   const rawError = cooldown.rawError.replace(/\s+/g, ' ').slice(0, 200);
+  // Name the provider of the cooldown that actually matched — which for a
+  // provider-scoped query is either this dispatch's own provider or an
+  // unknown-scope block covering it. Saying which one it is decides whether
+  // re-pinning to another provider could possibly help.
+  const scope = cooldown.provider !== undefined
+    ? ` for provider '${cooldown.provider}'`
+    : provider !== undefined
+      ? ' for an unidentified provider (the block covers every provider of this vendor)'
+      : '';
+  const repin = provider !== undefined && cooldown.provider !== undefined
+    ? 're-pin model:/opencode_model: to a different opencode provider (e.g. openrouter/…), or '
+    : '';
   die(
-    `assigned vendor '${spec.vendor}' is in a usage-limit cooldown`
+    `assigned vendor '${spec.vendor}' is in a usage-limit cooldown${scope}`
       + `${rawError === '' ? '' : ` (vendor reported: ${rawError})`}. `
       + `Usage-limit reset: ${cooldown.retryAt ?? 'unknown — try again later'}. `
-      + `Wait for the vendor's usage limit to reset, or re-pin assigned_vendor in the task spec and re-dispatch — hydra never auto-substitutes.`,
+      + `Wait for the vendor's usage limit to reset, ${repin}`
+      + `or re-pin assigned_vendor in the task spec and re-dispatch — hydra never auto-substitutes.`,
   );
 }
 
@@ -2131,7 +2183,7 @@ export async function dispatch(
   const spec = readTaskSpec(taskSpecPath);
   const repo = discoverRepoRoot(options, cwd);
   enforceHeadAvailability(spec, taskSpecPath, options);
-  enforceVendorCooldown(spec, options);
+  enforceVendorCooldown(spec, taskSpecPath, options);
   warnOnStaleOpencodeModelPin(spec, taskSpecPath, options);
   warnOnUnhonorablePin(spec, taskSpecPath);
   const env = options.env ?? process.env;

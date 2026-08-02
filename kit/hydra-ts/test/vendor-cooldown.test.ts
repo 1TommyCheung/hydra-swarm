@@ -105,7 +105,13 @@ describe('recordCooldown/activeCooldown', () => {
     );
 
     const cooldown = activeCooldown('opencode', 'zai-coding-plan', 'glm-5.2', { stateDir, now: () => T0 });
-    assert.deepEqual(cooldown, { retryAt: FUTURE, rawError: 'Usage limit reached for 5 hour' });
+    // The hit reports the provider it was recorded against, so the dispatch
+    // gate can say WHICH provider is blocked (issue #25).
+    assert.deepEqual(cooldown, {
+      retryAt: FUTURE,
+      rawError: 'Usage limit reached for 5 hour',
+      provider: 'zai-coding-plan',
+    });
 
     // The write is atomic: the target parses and no tmp sibling is left behind.
     const file = JSON.parse(readFileSync(cooldownFilePath({ stateDir }), 'utf8')) as { cooldowns: Record<string, unknown> };
@@ -131,10 +137,100 @@ describe('recordCooldown/activeCooldown', () => {
     assert.equal(activeCooldown('claude', undefined, undefined, { stateDir, now: () => T0 }), null);
     assert.equal(activeCooldown('opencode', 'other-provider', undefined, { stateDir, now: () => T0 }), null);
     assert.equal(activeCooldown('opencode', 'zai', 'other-model', { stateDir, now: () => T0 }), null);
-    // The vendor-only codex bucket is distinct from any provider-qualified query.
-    assert.equal(activeCooldown('codex', 'openai', undefined, { stateDir, now: () => T0 }), null);
+    // The codex entry records no provider: an unknown-scope block still answers
+    // a provider-qualified query (issue #25 — conservative, never weaker).
+    assert.equal(
+      activeCooldown('codex', 'openai', undefined, { stateDir, now: () => T0 })?.rawError,
+      'codex limited',
+    );
     const codexCooldown = activeCooldown('codex', undefined, undefined, { stateDir, now: () => T0 });
     assert.equal(codexCooldown?.rawError, 'codex limited');
+  });
+
+  // Issue #25: opencode's one machine-global credential fans out to several
+  // independent provider accounts, so the gate asks about the provider THIS
+  // dispatch would use. The three-way matrix below is the whole contract.
+  describe('provider-scoped lookup', () => {
+    function withEntries(entries: Array<Parameters<typeof recordCooldown>[0]>): string {
+      const stateDir = makeTempDir('state');
+      for (const entry of entries) recordCooldown(entry, { stateDir, now: () => T0 });
+      return stateDir;
+    }
+
+    it('matches an entry recorded with the SAME provider', () => {
+      const stateDir = withEntries([
+        { vendor: 'opencode', provider: 'zai-coding-plan', model: 'glm-5.2', retryAt: FUTURE, rawError: 'zai limited' },
+      ]);
+      const hit = activeCooldown('opencode', 'zai-coding-plan', undefined, { stateDir, now: () => T0 });
+      assert.equal(hit?.rawError, 'zai limited');
+      assert.equal(hit?.provider, 'zai-coding-plan');
+      assert.equal(hit?.retryAt, FUTURE);
+    });
+
+    it('does NOT match an entry recorded with a DIFFERENT provider', () => {
+      const stateDir = withEntries([
+        { vendor: 'opencode', provider: 'zai-coding-plan', model: 'glm-5.2', retryAt: FUTURE, rawError: 'zai limited' },
+      ]);
+      // openrouter is a separate account with its own quota — it was never limited.
+      assert.equal(activeCooldown('opencode', 'openrouter', undefined, { stateDir, now: () => T0 }), null);
+    });
+
+    it('STILL matches an entry recorded with NO provider at all', () => {
+      // The detector could not recover a providerID= from the diagnostics, so
+      // the block is machine-global and must refuse every provider.
+      const stateDir = withEntries([
+        { vendor: 'opencode', retryAt: FUTURE, rawError: 'scope unknown' },
+      ]);
+      for (const provider of ['zai-coding-plan', 'openrouter']) {
+        const hit = activeCooldown('opencode', provider, undefined, { stateDir, now: () => T0 });
+        assert.equal(hit?.rawError, 'scope unknown', `unscoped cooldown must block ${provider}`);
+        assert.equal(hit?.provider, undefined, 'the hit reports the block as unscoped');
+      }
+    });
+
+    it('prefers the exact-provider entry over an unscoped one when both are active', () => {
+      const stateDir = withEntries([
+        { vendor: 'opencode', retryAt: FUTURE, rawError: 'scope unknown' },
+        { vendor: 'opencode', provider: 'zai-coding-plan', retryAt: FUTURE, rawError: 'zai limited' },
+      ]);
+      assert.equal(
+        activeCooldown('opencode', 'zai-coding-plan', undefined, { stateDir, now: () => T0 })?.rawError,
+        'zai limited',
+      );
+      // openrouter has no entry of its own, so it sees the unscoped block.
+      assert.equal(
+        activeCooldown('opencode', 'openrouter', undefined, { stateDir, now: () => T0 })?.rawError,
+        'scope unknown',
+      );
+    });
+
+    it('ignores an expired entry of either scope', () => {
+      const stateDir = withEntries([
+        { vendor: 'opencode', retryAt: PAST, rawError: 'scope unknown' },
+        { vendor: 'opencode', provider: 'zai-coding-plan', retryAt: PAST, rawError: 'zai limited' },
+      ]);
+      assert.equal(activeCooldown('opencode', 'zai-coding-plan', undefined, { stateDir, now: () => T0 }), null);
+      assert.equal(activeCooldown('opencode', 'openrouter', undefined, { stateDir, now: () => T0 }), null);
+    });
+
+    it('treats a null provider in a hand-edited file exactly like an absent one', () => {
+      const stateDir = makeTempDir('state');
+      writeFileSync(
+        cooldownFilePath({ stateDir }),
+        JSON.stringify({
+          cooldowns: {
+            [cooldownKey('opencode')]: {
+              vendor: 'opencode', provider: null, model: null, retryAt: FUTURE, recordedAt: new Date(T0).toISOString(), rawError: 'null scope',
+            },
+          },
+        }),
+        'utf8',
+      );
+      assert.equal(
+        activeCooldown('opencode', 'openrouter', undefined, { stateDir, now: () => T0 })?.rawError,
+        'null scope',
+      );
+    });
   });
 
   it('keeps "no provider known" distinct from the literal string undefined', () => {

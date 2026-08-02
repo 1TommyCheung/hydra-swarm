@@ -18,6 +18,7 @@ import {
   start,
   resume,
   buildWorkerPrompt,
+  resolveOpencodeProvider,
   type OpencodeSpawn,
 } from '../src/adapter-opencode.ts';
 
@@ -1331,5 +1332,78 @@ ${extraSpecLines}`,
     assert.equal(session.effort, null);
     assert.equal(session.model_source, 'vendor_default');
     assert.equal(session.effort_source, 'unavailable');
+  });
+});
+
+// Issue #25: dispatch's cooldown gate asks, before spawning anything, which
+// provider account a start/resume for this spec WOULD dial — so the resolution
+// has to be the same one runImplementer performs.
+describe('resolveOpencodeProvider (issue #25)', () => {
+  before(() => mkdirSync(TEST_TMP, { recursive: true }));
+  after(() => {
+    cleanTmp();
+    restoreEnv();
+  });
+
+  function writeSpec(extraSpecLines = ''): string {
+    const id = `p25-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const spec = join(TEST_TMP, 'specs', `${id}.yaml`);
+    mkdirSync(dirname(spec), { recursive: true });
+    writeFileSync(spec, `task_id: t\nrun_id: 0068\nspec_version: 1\n${extraSpecLines}`, 'utf8');
+    return spec;
+  }
+
+  /** An env with no HOME so the machine-local opencode-model.json is never read. */
+  const BARE_ENV: NodeJS.ProcessEnv = {};
+
+  it('takes the segment before the first slash of a model: pin', () => {
+    const spec = writeSpec('model: zai-coding-plan/glm-5.2\n');
+    assert.equal(resolveOpencodeProvider(spec, { env: BARE_ENV }), 'zai-coding-plan');
+  });
+
+  it('keeps only the FIRST segment of a multi-segment alias', () => {
+    // openrouter routes to z-ai/glm-5.2 — the account is openrouter.
+    const spec = writeSpec('model: openrouter/z-ai/glm-5.2\n');
+    assert.equal(resolveOpencodeProvider(spec, { env: BARE_ENV }), 'openrouter');
+  });
+
+  it('honors the opencode_model alias', () => {
+    const spec = writeSpec('opencode_model: openrouter/z-ai/glm-5.2\n');
+    assert.equal(resolveOpencodeProvider(spec, { env: BARE_ENV }), 'openrouter');
+  });
+
+  it('prefers the vendor-neutral model: on a conflict, exactly as start does', () => {
+    const spec = writeSpec('model: openrouter/z-ai/glm-5.2\nopencode_model: zai-coding-plan/glm-5.2\n');
+    assert.equal(resolveOpencodeProvider(spec, { env: BARE_ENV }), 'openrouter');
+  });
+
+  it('falls through the same precedence as the adapter when no pin is present', () => {
+    const spec = writeSpec();
+    assert.equal(resolveOpencodeProvider(spec, { env: BARE_ENV }), DEFAULT_MODEL.split('/')[0]);
+    // The injected env is consulted, not process.env: an out-of-process caller
+    // resolves against the environment the adapter will actually run under.
+    assert.equal(
+      resolveOpencodeProvider(spec, { env: { HYDRA_OPENCODE_MODEL: 'openrouter/z-ai/glm-5.2' } }),
+      'openrouter',
+    );
+    const stateRoot = join(TEST_TMP, 'provider-state', `s-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(stateRoot, { recursive: true });
+    writeFileSync(join(stateRoot, 'opencode-model.json'), JSON.stringify({ model: 'acme/from-config' }), 'utf8');
+    assert.equal(resolveOpencodeProvider(spec, { env: BARE_ENV, stateRoot }), 'acme');
+  });
+
+  it('returns null when the resolved model carries no provider segment', () => {
+    const spec = writeSpec('model: bare-model-name\n');
+    assert.equal(resolveOpencodeProvider(spec, { env: BARE_ENV }), null);
+  });
+
+  it('throws on an unreadable spec rather than inventing a provider', () => {
+    // The spec is always readable on the dispatch path (readTaskSpec parsed it
+    // first); the gate still wraps this call and falls back to the whole-vendor
+    // query, so an unexpected read failure narrows nothing.
+    assert.throws(
+      () => resolveOpencodeProvider(join(TEST_TMP, 'specs', 'absent.yaml'), { env: BARE_ENV }),
+      /ENOENT/,
+    );
   });
 });
