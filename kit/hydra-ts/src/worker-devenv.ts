@@ -39,7 +39,10 @@ type DeriveDomainsFn = (worktreeRoot: string) => string[];
 const NPM_REGISTRY = 'registry.npmjs.org';
 const YARN_REGISTRY = 'registry.yarnpkg.com';
 const BUN_REGISTRY = 'bun.sh';
-const GITHUB_DOMAINS = ['github.com', 'codeload.github.com', 'objects.githubusercontent.com', 'raw.githubusercontent.com'];
+// release-assets.githubusercontent.com serves GitHub Releases binary assets;
+// omitting it breaks binary postinstalls like ffmpeg-static (issue #43).
+// Mirrored in env-domains.ts — keep both in sync.
+const GITHUB_DOMAINS = ['github.com', 'codeload.github.com', 'objects.githubusercontent.com', 'raw.githubusercontent.com', 'release-assets.githubusercontent.com'];
 
 const COMMON_INSTALL_ROOTS = ['.opencode/bin', '.kimi-code/bin', '.npm-global/bin', '.bun/bin'];
 

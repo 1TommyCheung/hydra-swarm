@@ -81,6 +81,8 @@ describe('inlineDeriveDomains', () => {
     assert.ok(domains.includes('github.com'));
     assert.ok(domains.includes('codeload.github.com'));
     assert.ok(domains.includes('registry.npmjs.org'));
+    // GitHub Releases binary assets (ffmpeg-static-style postinstalls, issue #43).
+    assert.ok(domains.includes('release-assets.githubusercontent.com'));
   });
 
   it('does not treat an ordinary semver dependency as a git dependency', () => {

@@ -238,6 +238,74 @@ describe('auditOwnership', () => {
     assert.equal(result.violations.length, 0);
   });
 
+  it('flags a gitignored symlink whose target escapes the worktree (issue #43 node_modules)', () => {
+    const worktree = makeTempDir('worktree');
+    initGitRepo(worktree);
+    commitFile(worktree, '.gitignore', 'node_modules\n');
+    const base = commitFile(worktree, 'src/anchor.js', 'hello');
+    const outside = makeTempDir('operator-checkout');
+    symlinkSync(outside, join(worktree, 'node_modules'));
+    const head = base;
+
+    // Precondition: .gitignore really does hide it from the exclude-standard listing.
+    const excluded = execFileSync(
+      'git',
+      ['-C', worktree, 'ls-files', '--others', '--exclude-standard'],
+      { encoding: 'utf8' },
+    );
+    assert.ok(!excluded.split('\n').includes('node_modules'));
+
+    const result = audit(worktree, base, head, ['src/**']);
+    assert.equal(result.clean, false);
+    assert.ok(result.violations.some((v) => v.includes('symlink escapes worktree: node_modules')));
+  });
+
+  it('flags a gitignored symlink whose target is inside the worktree but outside writable_paths', () => {
+    const worktree = makeTempDir('worktree');
+    initGitRepo(worktree);
+    commitFile(worktree, '.gitignore', 'node_modules\n');
+    const base = commitFile(worktree, 'src/anchor.js', 'hello');
+    symlinkSync('docs', join(worktree, 'node_modules'));
+    const head = base;
+
+    const result = audit(worktree, base, head, ['src/**']);
+    assert.equal(result.clean, false);
+    assert.ok(
+      result.violations.some((v) =>
+        v.includes('symlink target outside writable_paths: node_modules -> docs'),
+      ),
+    );
+  });
+
+  it('does not flag ordinary gitignored non-symlink files as untracked violations', () => {
+    const worktree = makeTempDir('worktree');
+    initGitRepo(worktree);
+    commitFile(worktree, '.gitignore', 'dist/\ncoverage/\n');
+    const base = commitFile(worktree, 'src/app.js', 'hello');
+    mkdirSync(join(worktree, 'dist'), { recursive: true });
+    writeFileSync(join(worktree, 'dist/bundle.js'), 'bundle', 'utf8');
+    mkdirSync(join(worktree, 'coverage'), { recursive: true });
+    writeFileSync(join(worktree, 'coverage/lcov.info'), 'cov', 'utf8');
+    const head = base;
+
+    const result = audit(worktree, base, head, ['src/**']);
+    assert.equal(result.clean, true, `unexpected violations: ${result.violations.join(', ')}`);
+  });
+
+  it('flags a gitignored symlink nested inside an otherwise-ignored build directory', () => {
+    const worktree = makeTempDir('worktree');
+    initGitRepo(worktree);
+    commitFile(worktree, '.gitignore', 'dist\n');
+    const base = commitFile(worktree, 'src/anchor.js', 'hello');
+    mkdirSync(join(worktree, 'dist'), { recursive: true });
+    symlinkSync('/etc/passwd', join(worktree, 'dist/leak'));
+    const head = base;
+
+    const result = audit(worktree, base, head, ['src/**']);
+    assert.equal(result.clean, false);
+    assert.ok(result.violations.some((v) => v.includes('symlink escapes worktree: dist/leak')));
+  });
+
   it('flags absolute paths reported by git', () => {
     const worktree = makeTempDir('worktree');
     initGitRepo(worktree);

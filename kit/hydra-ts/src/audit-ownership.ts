@@ -214,9 +214,36 @@ export function auditOwnership(
     diffNameOnlyOutput = '';
   }
 
+  // Second, WIDER untracked listing without --exclude-standard, so gitignored
+  // entries are visible here. The section-2 list above honors .gitignore, which
+  // makes a `node_modules` symlink — virtually always gitignored — structurally
+  // invisible to the very guard meant to catch it (issue #43: a worker's
+  // node_modules symlink into the operator's live checkout escaped detection and
+  // a later `CI=true pnpm` purge followed it into the operator's main repo).
+  //
+  // This wider list feeds ONLY the symlink-escape loop below. It must NOT reach
+  // section 2's untracked-file check: ordinary gitignored build output (dist/,
+  // coverage/, .cache/) that a worker legitimately produces would then flood the
+  // report with false positives.
+  let ignoredUntrackedOutput = '';
+  try {
+    ignoredUntrackedOutput = String(
+      run('git', ['-C', worktreeAbs, 'ls-files', '--others', '-z'], {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'ignore'],
+        // See the rev-parse call above: explicit env so in-process
+        // process.env mutations reach the git child under Bun (#10.3).
+        env: { ...process.env },
+      }),
+    );
+  } catch {
+    ignoredUntrackedOutput = '';
+  }
+
   const candidatePaths = new Set<string>([
     ...parseNullDelimited(diffNameOnlyOutput),
     ...untrackedPaths,
+    ...parseNullDelimited(ignoredUntrackedOutput),
   ]);
 
   for (const link of candidatePaths) {

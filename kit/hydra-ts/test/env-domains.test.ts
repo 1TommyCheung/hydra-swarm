@@ -68,6 +68,8 @@ describe('deriveEnvironmentDomains', () => {
     assert.ok(domains.includes('codeload.github.com'));
     assert.ok(domains.includes('objects.githubusercontent.com'));
     assert.ok(domains.includes('raw.githubusercontent.com'));
+    // GitHub Releases binary assets (ffmpeg-static-style postinstalls, issue #43).
+    assert.ok(domains.includes('release-assets.githubusercontent.com'));
     assert.ok(domains.includes('registry.npmjs.org'));
   });
 
