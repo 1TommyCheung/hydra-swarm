@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { constants as osConstants } from 'node:os';
@@ -25,6 +26,7 @@ import {
   runDir,
   setPinnedHerdrWorkspace,
   stateRoot,
+  warn,
   type JsonlTailState,
 } from './lib.ts';
 import { herdrAgentPaneRatio, monitorEventText } from './dispatch.ts';
@@ -198,19 +200,122 @@ function vendorCommand(
 }
 
 // ---------------------------------------------------------------------------
+// Raw vendor output hygiene (issue #37).
+// ---------------------------------------------------------------------------
+
+/**
+ * ANSI/VT control sequences a terminal-aware vendor CLI writes even when it
+ * has been asked for machine-readable output (opencode colors its warnings
+ * before the JSON stream begins). Stripped BEFORE any JSON-line parsing and
+ * again before anything reaches the `.md`, so neither the distilled path nor
+ * the raw-copy fallback can leak escape bytes into a reviewer-facing file.
+ *
+ * Coverage follows ECMA-48 by BYTE RANGE rather than by enumerating the
+ * sequences seen in the wild, so a vendor emitting some other short escape
+ * does not reopen this hole. An earlier revision matched only a final byte in
+ * `[@-Z\-_]`, which silently let `ESC 7`/`ESC 8` (DECSC/DECRC), `ESC c`
+ * (RIS) and the 8-bit C1 form of CSI (0x9B) through.
+ *
+ * Alternation order is load-bearing: the structured multi-byte forms must be
+ * tried before the single-final-byte escape, because `[` (0x5B) and `]`
+ * (0x5D) are themselves inside the Fe range.
+ */
+const ANSI_PATTERN = new RegExp(
+  [
+    // CSI: params (0x30-0x3F) intermediates (0x20-0x2F) final (0x40-0x7E).
+    // Both the 7-bit `ESC [` opener and the 8-bit C1 single byte 0x9B.
+    '(?:\\u001B\\[|\\u009B)[0-?]*[ -/]*[@-~]',
+    // Control strings — OSC (`ESC ]`), DCS (`ESC P`), SOS, PM, APC — and
+    // their 8-bit C1 openers, terminated by BEL, ST (`ESC \\`) or 0x9C.
+    // The body also stops at a newline: real control-string payloads are
+    // single-line, so bounding there keeps an UNterminated one (a truncated
+    // capture file) from swallowing the rest of the transcript on the
+    // raw-copy fallback path.
+    '(?:\\u001B[\\]P^_X]|[\\u0090\\u0098\\u009D\\u009E\\u009F])' +
+      '[^\\u0007\\u001B\\u009C\\n\\r]*(?:\\u0007|\\u001B\\\\|\\u009C)?',
+    // nF sequences: ESC + one or more intermediates (0x20-0x2F) + a final
+    // byte (0x30-0x7E) — charset selection (`ESC ( B`), DECALN (`ESC # 8`).
+    '\\u001B[ -/]+[0-~]',
+    // Single-character escapes: ESC + one byte in Fp (0x30-0x3F, DECSC
+    // `ESC 7` / DECRC `ESC 8`), Fe (0x40-0x5F, NEL `ESC E`) or Fs
+    // (0x60-0x7E, RIS `ESC c`) — i.e. the whole 0x30-0x7E range.
+    '\\u001B[0-~]',
+    // Any remaining bare C1 control byte (0x80-0x9F): the ones with their
+    // own openers above are consumed there, this catches the rest.
+    '[\\u0080-\\u009F]',
+    // A dangling ESC with nothing after it (truncated capture file) — last
+    // so it only fires when no structured form matched.
+    '\\u001B',
+  ].join('|'),
+  'g',
+);
+
+export function stripAnsi(value: string): string {
+  return value.replace(ANSI_PATTERN, '');
+}
+
+/**
+ * Vendor CLIs that cannot resolve a requested agent silently downgrade to
+ * their built-in default and keep going — the review still "succeeds", but
+ * it was produced by a different agent than the one the lane asked for
+ * (issue #37). opencode prints
+ * `agent "hydra-reviewer" not found. Falling back to default agent`.
+ * Detection is observability only: it never gates or alters the review.
+ */
+const AGENT_FALLBACK_PATTERN =
+  /agent\s+["'`]?([^"'`\n]*?)["'`]?\s+not found[.,]?\s*falling back to\s+(?:the\s+)?([\w.:@/-]+)\s+agent/i;
+const AGENT_FALLBACK_LOOSE = /\bnot found\b[.,]?\s*falling back to\b/i;
+
+export interface AgentFallback {
+  requested: string;
+  used: string;
+}
+
+/**
+ * `rawText` must already be ANSI-stripped — the warning is emitted in color,
+ * so escape bytes can sit between the very words being matched.
+ */
+export function detectAgentFallback(rawText: string): AgentFallback | undefined {
+  const match = AGENT_FALLBACK_PATTERN.exec(rawText);
+  if (match) {
+    return { requested: match[1]?.trim() || '?', used: match[2]?.trim() || '?' };
+  }
+  // A reworded variant still deserves the event; the names are just unknown.
+  if (AGENT_FALLBACK_LOOSE.test(rawText)) return { requested: '?', used: '?' };
+  return undefined;
+}
+
+// ---------------------------------------------------------------------------
 // Extract the final assistant message per vendor stream format.
 // ---------------------------------------------------------------------------
 
-function extractFinalMessage(vendor: string, rawPath: string): string {
-  if (!existsSync(rawPath)) return '';
-  const raw = readFileSync(rawPath, 'utf8');
+/** `raw` is the ANSI-stripped raw transcript text (empty when absent). */
+function extractFinalMessage(vendor: string, raw: string): string {
+  if (!raw) return '';
 
   try {
-    const jsonLines = (): Record<string, unknown>[] =>
-      raw
-        .split('\n')
-        .filter((line) => line.trim())
-        .map((line) => JSON.parse(line) as Record<string, unknown>);
+    // Per-line tolerant (issue #37): each line is parsed independently and a
+    // line that is not valid JSON is SKIPPED, not thrown. The previous eager
+    // `.map(JSON.parse)` aborted the whole transcript on the first non-JSON
+    // line — one vendor warning ahead of the stream discarded an entire
+    // review and forced the raw-copy fallback.
+    const jsonLines = (): Record<string, unknown>[] => {
+      const objects: Record<string, unknown>[] = [];
+      for (const line of raw.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(trimmed);
+        } catch {
+          continue;
+        }
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          objects.push(parsed as Record<string, unknown>);
+        }
+      }
+      return objects;
+    };
 
     switch (vendor) {
       case 'codex': {
@@ -236,8 +341,17 @@ function extractFinalMessage(vendor: string, rawPath: string): string {
         return contents.at(-1) ?? '';
       }
       case 'claude': {
-        const obj = JSON.parse(raw) as Record<string, unknown>;
-        return String(obj.result ?? '');
+        // `--output-format json` is a single document, so the whole-file
+        // parse is the fast path. A vendor warning printed ahead of it used
+        // to poison that parse too; fall back to scanning the file line by
+        // line for the last object carrying a `result`.
+        try {
+          const obj = JSON.parse(raw) as Record<string, unknown>;
+          return String(obj.result ?? '');
+        } catch {
+          const results = jsonLines().filter((obj) => obj.result !== undefined);
+          return String(results.at(-1)?.result ?? '');
+        }
       }
       case 'opencode': {
         const texts: string[] = [];
@@ -358,6 +472,83 @@ function launchInPane(
 function sleepMs(ms: number): void {
   spawnSync('sleep', [String(ms / 1000)], { encoding: 'utf8', stdio: 'ignore' });
 }
+
+// ---------------------------------------------------------------------------
+// Inactivity watchdog (issue #36 / issue #28 E1).
+// ---------------------------------------------------------------------------
+
+/** Supervisor poll cadence for a pane-hosted review. */
+const REVIEW_POLL_INTERVAL_MS = 3000;
+
+/**
+ * Wall-clock backstop, in minutes. Raised from 15 to 30 (issue #28): real
+ * reviews of a large diff legitimately ran past 15 minutes and were killed
+ * mid-answer, and a killed review was indistinguishable from a completed
+ * one in the ledger. The inactivity watchdog below now catches a genuinely
+ * hung provider in minutes, so this cap only has to be generous enough for a
+ * slow-but-live reviewer — it stays a hard backstop for the case where
+ * output never stops but never finishes either. Overridable, unchanged, via
+ * HYDRA_REVIEW_TIMEOUT_MIN.
+ */
+const REVIEW_TIMEOUT_MIN_DEFAULT = 30;
+
+/**
+ * Minutes of complete byte-silence in a review's own capture file before the
+ * supervisor calls it stalled. 3 minutes ≈ 60 poll ticks: comfortably longer
+ * than any single tool call or model turn a streaming vendor puts between
+ * two emitted events, and far shorter than the wall-clock backstop, so a hung
+ * provider is caught in minutes instead of burning the full cap in silence.
+ * HYDRA_REVIEW_STALL_MIN=0 disables the watchdog and restores the pure
+ * wall-clock behavior.
+ */
+const REVIEW_STALL_MIN_DEFAULT = 3;
+
+/**
+ * Byte-size signature over a review's capture files, mirroring the worker
+ * lane's activitySignature()/plainActivity() pattern in dispatch.ts: an
+ * unchanged signature across consecutive polls means genuine silence, a
+ * changed one means the vendor is still producing output. Deliberately
+ * re-implemented here rather than imported — the review lane owns its own
+ * capture layout, and dispatch.ts is not touched by this change.
+ */
+function reviewActivitySignature(paths: string[]): string {
+  const values: Array<{ path: string; size: number }> = [];
+  for (const path of paths) {
+    try {
+      const info = statSync(path);
+      if (info.isFile()) values.push({ path, size: info.size });
+    } catch {
+      // A capture file that does not exist yet contributes nothing — the
+      // empty signature is itself a valid "no output at all" state.
+    }
+  }
+  if (values.length === 0) return '';
+  if (values.length === 1) return `${values[0].size} ${values[0].path}`;
+  return `${values.reduce((total, value) => total + value.size, 0)} total`;
+}
+
+/** Minute count from an env override, else the supplied default. */
+function minutesFromEnv(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+/** Wall-clock cap in minutes; HYDRA_REVIEW_TIMEOUT_MIN overrides the default. */
+export function reviewTimeoutMinutes(
+  raw: string | undefined = process.env.HYDRA_REVIEW_TIMEOUT_MIN,
+): number {
+  return minutesFromEnv(raw, REVIEW_TIMEOUT_MIN_DEFAULT);
+}
+
+/** Silence window in minutes; HYDRA_REVIEW_STALL_MIN overrides the default. */
+export function reviewStallMinutes(
+  raw: string | undefined = process.env.HYDRA_REVIEW_STALL_MIN,
+): number {
+  return minutesFromEnv(raw, REVIEW_STALL_MIN_DEFAULT);
+}
+
+export type ReviewTimeoutReason = 'stalled' | 'wall_clock';
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
@@ -507,6 +698,10 @@ export function reviewDispatch(
 
   let launchedInPane = false;
   let pane: string | undefined;
+  // Set ONLY when the supervisor gave up on a pane-hosted review; a review
+  // that produced its sentinel leaves this undefined and keeps the untouched
+  // review_completed path below.
+  let reviewTimeout: { reason: ReviewTimeoutReason; kvs: string[] } | undefined;
 
   if (process.env.HYDRA_HERDR_PANES !== '0') {
     // Seed the progress file BEFORE launching the pane, matching the worker
@@ -549,19 +744,68 @@ export function reviewDispatch(
       if (pane) shrinkAgentPane(exec, repoRootPath, pane);
       if (pane) reportHerdrState(pane, vendor, 'working');
 
-      const limitMinutes = Number(
-        process.env.HYDRA_REVIEW_TIMEOUT_MIN ?? '15',
-      );
+      const limitMinutes = reviewTimeoutMinutes();
       const limitSeconds = limitMinutes * 60;
+      const stallMinutes = reviewStallMinutes();
+      const stallPolls = Math.max(
+        1,
+        Math.ceil((stallMinutes * 60 * 1000) / REVIEW_POLL_INTERVAL_MS),
+      );
+      // Only a vendor that streams incremental output can be judged by
+      // capture growth. `claude` is invoked with --output-format json and
+      // writes its whole document at exit, so a perfectly healthy claude
+      // review is legitimately byte-silent for its entire duration — it keeps
+      // the wall-clock backstop alone rather than being killed as "stalled".
+      const stallWatchEnabled = streamsVendorEvents && stallMinutes > 0;
+
       const start = Date.now();
-      while (
-        !existsSync(sentinel) &&
-        (Date.now() - start) / 1000 < limitSeconds
-      ) {
-        sleep(3000);
+      let lastSignature = reviewActivitySignature([raw]);
+      let idlePolls = 0;
+      while (!existsSync(sentinel)) {
+        if ((Date.now() - start) / 1000 >= limitSeconds) {
+          reviewTimeout = {
+            reason: 'wall_clock',
+            kvs: ['timeout_min', String(limitMinutes)],
+          };
+          break;
+        }
+        sleep(REVIEW_POLL_INTERVAL_MS);
         pollLiveProgress();
+        if (existsSync(sentinel)) break;
+        if (!stallWatchEnabled) continue;
+        const signature = reviewActivitySignature([raw]);
+        if (signature !== lastSignature) {
+          lastSignature = signature;
+          idlePolls = 0;
+          continue;
+        }
+        idlePolls += 1;
+        if (idlePolls >= stallPolls) {
+          reviewTimeout = {
+            reason: 'stalled',
+            kvs: [
+              'stall_min', String(stallMinutes),
+              'idle_polls', String(idlePolls),
+              'elapsed_sec', String(Math.floor((Date.now() - start) / 1000)),
+              'timeout_min', String(limitMinutes),
+            ],
+          };
+          break;
+        }
       }
       pollLiveProgress(true);
+
+      // The sentinel can still land between the loop break and here (the
+      // vendor finished in the same instant we gave up); a review that
+      // actually produced an exit code is a completion, not a timeout.
+      if (reviewTimeout && existsSync(sentinel)) reviewTimeout = undefined;
+
+      if (reviewTimeout) {
+        warn(
+          `review ${reviewId} (${vendor}) timed out: ${reviewTimeout.reason}` +
+            ` — terminating (limit ${limitMinutes}m, stall window ${stallMinutes}m)`,
+        );
+      }
 
       if (!existsSync(sentinel) && existsSync(pidfile)) {
         const pid = Number(readFileSync(pidfile, 'utf8').trim());
@@ -592,29 +836,88 @@ export function reviewDispatch(
     }
   }
 
-  const message = extractFinalMessage(vendor, raw);
+  // Read the transcript ONCE and strip ANSI up front: every downstream
+  // consumer (distillation, the raw-copy fallback, agent-fallback detection)
+  // works from the same escape-free text, so no path can leak control bytes
+  // into the reviewer-facing .md (issue #37).
+  const rawText = existsSync(raw) ? stripAnsi(readFileSync(raw, 'utf8')) : '';
+
+  const message = stripAnsi(extractFinalMessage(vendor, rawText));
   if (message) {
     writeFileSync(outMd, `${message}\n`, 'utf8');
   } else if (existsSync(raw)) {
-    writeFileSync(outMd, readFileSync(raw, 'utf8'), 'utf8');
+    writeFileSync(outMd, rawText, 'utf8');
+  }
+
+  // Observability only (issue #37): a vendor that silently downgraded to its
+  // built-in agent still produced a review, so this neither gates nor
+  // reshapes the flow — it just stops the substitution from being invisible.
+  try {
+    const fallback = detectAgentFallback(rawText);
+    if (fallback) {
+      appendLedger(
+        stateRootPath,
+        runId,
+        'review_agent_fallback',
+        'review_id',
+        reviewId,
+        'task_id',
+        taskId,
+        'vendor',
+        vendor,
+        'requested_agent',
+        fallback.requested,
+        'used_agent',
+        fallback.used,
+      );
+      warn(
+        `review ${reviewId} (${vendor}): requested agent '${fallback.requested}' not found;` +
+          ` vendor fell back to '${fallback.used}'`,
+      );
+    }
+  } catch {
+    // Detection must never be able to fail a review.
   }
 
   const exitCode = existsSync(sentinel)
     ? readFileSync(sentinel, 'utf8').trim()
     : '?';
-  appendLedger(
-    stateRootPath,
-    runId,
-    'review_completed',
-    'review_id',
-    reviewId,
-    'task_id',
-    taskId,
-    'vendor',
-    vendor,
-    'exit_code',
-    exitCode,
-  );
+  if (reviewTimeout) {
+    // A killed review is NOT a completion (issue #28 E1): today's
+    // `review_completed exit_code:"?"` made a timeout indistinguishable from
+    // a real finish, so a genuine timeout gets its own event with the reason
+    // that triggered it. The normal path below is untouched.
+    appendLedger(
+      stateRootPath,
+      runId,
+      'review_timed_out',
+      'review_id',
+      reviewId,
+      'task_id',
+      taskId,
+      'vendor',
+      vendor,
+      'reason',
+      reviewTimeout.reason,
+      'exit_code',
+      exitCode,
+      ...reviewTimeout.kvs,
+    );
+  } else {
+    appendLedger(
+      stateRootPath,
+      runId,
+      'review_completed',
+      'review_id',
+      reviewId,
+      'task_id',
+      taskId,
+      'vendor',
+      vendor,
+      'exit_code',
+      exitCode,
+    );
+  }
   log(`review ${reviewId} (${vendor}) -> ${outMd}`);
   process.stdout.write(`${outMd}\n`);
   return outMd;

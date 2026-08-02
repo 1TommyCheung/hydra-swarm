@@ -18,12 +18,26 @@ import {
   main as reviewDispatchMain,
   parseReviewDispatchArgs,
   reviewDispatch,
+  reviewStallMinutes,
+  reviewTimeoutMinutes,
+  stripAnsi,
   type ReviewDispatchOptions,
   type ExecFn,
   type ExecResult,
 } from '../src/review-dispatch.ts';
 
 const TEST_TMP = join(import.meta.dirname, 'tmp-review-dispatch');
+
+// Built from char codes rather than pasted literally so the fixtures stay
+// visible (and greppable) in this source file.
+const ESC = String.fromCharCode(0x1b);
+const BEL = String.fromCharCode(0x07);
+/** 8-bit C1 forms: CSI (0x9B), OSC (0x9D), ST (0x9C). */
+const CSI8 = String.fromCharCode(0x9b);
+const OSC8 = String.fromCharCode(0x9d);
+const ST8 = String.fromCharCode(0x9c);
+/** Any escape byte at all — asserts nothing leaked into a written .md. */
+const ANSI_PROBE = new RegExp('[\\u001B\\u009B]');
 
 interface Call {
   file: string;
@@ -688,7 +702,11 @@ describe('reviewDispatch', () => {
     assert.match(wrapped, /--model' 'review\/custom-model'/);
   });
 
-  it('copies the whole raw stream when any JSONL line is malformed', () => {
+  // Issue #37: a single non-JSON line used to abort the WHOLE transcript
+  // parse (eager `.map(JSON.parse)` inside one outer try/catch), so a real,
+  // already-present distillation was discarded and the raw stream copied
+  // verbatim. Parsing is now per-line tolerant: a bad line is skipped.
+  it('still extracts the final message when a JSONL line is malformed', () => {
     const raw = [
       JSON.stringify({ role: 'assistant', content: 'would otherwise extract' }),
       '{malformed',
@@ -704,7 +722,280 @@ describe('reviewDispatch', () => {
       }),
     );
 
-    assert.equal(readFileSync(mdPath, 'utf8'), raw);
+    assert.equal(readFileSync(mdPath, 'utf8'), 'would otherwise extract\n');
+  });
+
+  it('extracts opencode output past an ANSI-colored non-JSON preamble', () => {
+    const raw = [
+      `${ESC}[33magent "hydra-reviewer" not found. Falling back to default agent${ESC}[0m`,
+      JSON.stringify({ part: { type: 'text', text: 'first pass' } }),
+      'plain progress chatter that is not JSON at all',
+      JSON.stringify({ part: { type: 'text', text: 'VERDICT: revise' } }),
+    ].join('\n');
+
+    const mdPath = reviewDispatch(
+      'ansi-preamble-run',
+      'rev1',
+      'opencode',
+      writePrompt('ansi preamble review'),
+      options({ exec: () => ({ stdout: raw, stderr: '', exitCode: 0 }) }),
+    );
+
+    const md = readFileSync(mdPath, 'utf8');
+    assert.equal(md, 'VERDICT: revise\n', 'distilled, not a raw copy');
+    assert.doesNotMatch(md, ANSI_PROBE, 'no ANSI escapes reach the .md');
+  });
+
+  it('extracts kimi output past an ANSI-colored non-JSON preamble', () => {
+    const raw = [
+      `${ESC}[2mloading model...${ESC}[0m`,
+      JSON.stringify({ role: 'assistant', content: 'draft thoughts' }),
+      '',
+      'not json',
+      JSON.stringify({ role: 'assistant', content: 'final verdict text' }),
+    ].join('\n');
+
+    const mdPath = reviewDispatch(
+      'ansi-kimi-run',
+      'rev1',
+      'kimi',
+      writePrompt('ansi kimi review'),
+      options({ exec: () => ({ stdout: raw, stderr: '', exitCode: 0 }) }),
+    );
+
+    const md = readFileSync(mdPath, 'utf8');
+    assert.equal(md, 'final verdict text\n');
+    assert.doesNotMatch(md, ANSI_PROBE);
+  });
+
+  it('strips ANSI escapes on the raw-copy fallback path too', () => {
+    // Nothing distillable here, so the raw-copy fallback runs — and it must
+    // still never write escape bytes into a reviewer-facing file.
+    const raw = `${ESC}[31mvendor exploded${ESC}[0m\n${ESC}]0;title${BEL}no json here\n`;
+
+    const mdPath = reviewDispatch(
+      'ansi-fallback-run',
+      'rev1',
+      'opencode',
+      writePrompt('ansi fallback review'),
+      options({ exec: () => ({ stdout: raw, stderr: '', exitCode: 0 }) }),
+    );
+
+    const md = readFileSync(mdPath, 'utf8');
+    assert.equal(md, 'vendor exploded\nno json here\n');
+    assert.doesNotMatch(md, ANSI_PROBE);
+  });
+
+  // An earlier revision matched only a final byte in `[@-Z\-_]`, so the short
+  // escapes below survived stripping and could still reach a reviewer-facing
+  // .md through the raw-copy fallback. Each fixture is asserted BOTH for the
+  // exact stripped text and for the absence of any escape byte at all.
+  describe('stripAnsi covers the ECMA-48 escape ranges, not just CSI/OSC', () => {
+    const fixtures: Array<[string, string]> = [
+      ['CSI SGR color', `${ESC}[1;33m`],
+      ['CSI erase line', `${ESC}[2K`],
+      ['OSC + BEL', `${ESC}]0;window title${BEL}`],
+      ['OSC + ST', `${ESC}]8;;https://example.test${ESC}\\`],
+      // Fp (0x30-0x3F) — the private-use single-character escapes.
+      ['DECSC save cursor', `${ESC}7`],
+      ['DECRC restore cursor', `${ESC}8`],
+      // Fs (0x60-0x7E).
+      ['RIS full reset', `${ESC}c`],
+      // Fe (0x40-0x5F).
+      ['NEL next line', `${ESC}E`],
+      // nF: intermediates then a final byte.
+      ['DECALN alignment test', `${ESC}#8`],
+      ['charset selection', `${ESC}(B`],
+      // 8-bit C1 encodings some tools emit instead of the ESC-prefixed form.
+      ['C1 CSI (0x9B) + params + final', `${CSI8}1;31m`],
+      ['C1 OSC (0x9D) + ST (0x9C)', `${OSC8}0;title${ST8}`],
+      ['bare C1 control byte', String.fromCharCode(0x85)],
+    ];
+
+    for (const [name, sequence] of fixtures) {
+      it(`strips ${name}`, () => {
+        const stripped = stripAnsi(`before${sequence}after`);
+        assert.equal(stripped, 'beforeafter');
+        assert.doesNotMatch(stripped, ANSI_PROBE);
+      });
+    }
+
+    it('strips every fixture at once, leaving no escape byte anywhere', () => {
+      const raw = fixtures
+        .map(([name, sequence]) => `${sequence}${name}${sequence}`)
+        .join('\n');
+      const stripped = stripAnsi(raw);
+      assert.equal(stripped, fixtures.map(([name]) => name).join('\n'));
+      assert.doesNotMatch(stripped, ANSI_PROBE);
+    });
+
+    it('leaves ordinary text, whitespace and JSON-escaped codepoints alone', () => {
+      // `\u009b` here is the six literal ASCII characters a JSON encoder
+      // writes -- not a raw escape byte -- and must survive untouched, or
+      // stripping would corrupt the transcript it is meant to clean.
+      const text = 'plain\ttext\nsecond line\r\n{"note":"\\u009b"}\n';
+      assert.equal(stripAnsi(text), text);
+    });
+
+    it('drops a dangling escape byte from a truncated capture file', () => {
+      assert.doesNotMatch(stripAnsi(`partial output${ESC}`), ANSI_PROBE);
+      assert.doesNotMatch(stripAnsi(`partial output${ESC}[0`), ANSI_PROBE);
+    });
+
+    it('an unterminated control string stops at the newline, not at EOF', () => {
+      // Bounding the body keeps a truncated OSC from swallowing the rest of
+      // the transcript on the raw-copy fallback path.
+      assert.equal(
+        stripAnsi(`${ESC}]0;never terminated\nreal review content\n`),
+        '\nreal review content\n',
+      );
+    });
+  });
+
+  it('never writes short escapes into the .md on the raw-copy fallback path', () => {
+    // Nothing distillable, so the whole cleaned transcript is copied — the
+    // exact path where a missed sequence becomes live terminal-control bytes
+    // in a reviewer-facing file (issue #37).
+    const raw = [
+      `${ESC}7${ESC}[33mnot json${ESC}[0m${ESC}8`,
+      `${CSI8}1;31mstill not json${CSI8}0m`,
+      `${ESC}creset mid-stream`,
+      `${ESC}#8${ESC}]0;title${BEL}tail line`,
+      '',
+    ].join('\n');
+
+    const mdPath = reviewDispatch(
+      'short-escape-fallback-run',
+      'rev1',
+      'opencode',
+      writePrompt('short escape fallback review'),
+      options({ exec: () => ({ stdout: raw, stderr: '', exitCode: 0 }) }),
+    );
+
+    const md = readFileSync(mdPath, 'utf8');
+    assert.equal(
+      md,
+      'not json\nstill not json\nreset mid-stream\ntail line\n',
+    );
+    assert.doesNotMatch(md, ANSI_PROBE, 'no escape byte reaches the .md');
+  });
+
+  it('distills opencode JSON hidden behind short-escape noise', () => {
+    // The distilled path: the preamble carries DECSC/RIS/C1-CSI rather than
+    // plain SGR color, so a parser that only knew CSI/OSC would still be
+    // handed escape bytes when splitting lines for JSON.
+    const raw = [
+      `${ESC}7${CSI8}33magent "hydra-reviewer" not found. Falling back to default agent${ESC}8`,
+      JSON.stringify({ part: { type: 'text', text: 'first pass' } }),
+      `${ESC}cprogress chatter`,
+      JSON.stringify({ part: { type: 'text', text: 'VERDICT: accept' } }),
+    ].join('\n');
+
+    const mdPath = reviewDispatch(
+      'short-escape-distill-run',
+      'rev1',
+      'opencode',
+      writePrompt('short escape distill review'),
+      options({ exec: () => ({ stdout: raw, stderr: '', exitCode: 0 }) }),
+    );
+
+    const md = readFileSync(mdPath, 'utf8');
+    assert.equal(md, 'VERDICT: accept\n', 'distilled, not a raw copy');
+    assert.doesNotMatch(md, ANSI_PROBE);
+  });
+
+  it('detects the agent fallback warning through short-escape coloring', () => {
+    // Detection runs on the CLEANED text, so an escape form the stripper
+    // missed would split the warning and silently lose the ledger event.
+    const runId = 'short-escape-fallback-event-run';
+    const raw = [
+      `${ESC}7${CSI8}33magent "hydra-reviewer" not found. Falling back to default agent${CSI8}0m${ESC}8`,
+      JSON.stringify({ part: { type: 'text', text: 'reviewed anyway' } }),
+    ].join('\n');
+
+    reviewDispatch(
+      runId,
+      'rev1',
+      'opencode',
+      writePrompt('short escape fallback event review'),
+      options({ exec: () => ({ stdout: raw, stderr: '', exitCode: 0 }) }),
+    );
+
+    const events = ledgerEvents(runId);
+    assert.deepEqual(events.map((event) => event.event), [
+      'review_started',
+      'review_agent_fallback',
+      'review_completed',
+    ]);
+    assert.equal(events[1].requested_agent, 'hydra-reviewer');
+    assert.equal(events[1].used_agent, 'default');
+  });
+
+  it('records review_agent_fallback without disturbing the completion flow', () => {
+    const runId = 'agent-fallback-run';
+    const raw = [
+      `${ESC}[33magent "hydra-reviewer" not found. Falling back to default agent${ESC}[0m`,
+      JSON.stringify({ part: { type: 'text', text: 'reviewed anyway' } }),
+    ].join('\n');
+
+    const mdPath = reviewDispatch(
+      runId,
+      'rev1',
+      'opencode',
+      writePrompt('agent fallback review'),
+      options({ exec: () => ({ stdout: raw, stderr: '', exitCode: 0 }) }),
+    );
+
+    assert.equal(readFileSync(mdPath, 'utf8'), 'reviewed anyway\n');
+    const events = ledgerEvents(runId);
+    assert.deepEqual(events.map((event) => event.event), [
+      'review_started',
+      'review_agent_fallback',
+      'review_completed',
+    ]);
+    assert.equal(events[1].requested_agent, 'hydra-reviewer');
+    assert.equal(events[1].used_agent, 'default');
+    assert.equal(events[1].task_id, 'task-default');
+    assert.equal(events[1].vendor, 'opencode');
+    assert.equal(events[1].review_id, 'rev1');
+    // The review itself is untouched: same completion event, same exit code.
+    assert.equal(events[2].exit_code, '0');
+  });
+
+  it('does not record review_agent_fallback for an ordinary review', () => {
+    const runId = 'no-agent-fallback-run';
+
+    reviewDispatch(
+      runId,
+      'rev1',
+      'opencode',
+      writePrompt('ordinary review'),
+      options({
+        exec: () => ({
+          stdout: JSON.stringify({ part: { type: 'text', text: 'all good' } }),
+          stderr: '',
+          exitCode: 0,
+        }),
+      }),
+    );
+
+    assert.deepEqual(ledgerEvents(runId).map((event) => event.event), [
+      'review_started',
+      'review_completed',
+    ]);
+  });
+
+  it('raises the default wall-clock cap to 30 minutes, still env-overridable', () => {
+    assert.equal(reviewTimeoutMinutes(undefined), 30);
+    assert.equal(reviewTimeoutMinutes(''), 30);
+    assert.equal(reviewTimeoutMinutes('not-a-number'), 30);
+    assert.equal(reviewTimeoutMinutes('45'), 45);
+    assert.equal(reviewTimeoutMinutes('0'), 0);
+    // The inactivity window has its own knob, defaulting to 3 minutes of
+    // complete byte-silence (60 poll ticks at the 3s cadence).
+    assert.equal(reviewStallMinutes(undefined), 3);
+    assert.equal(reviewStallMinutes('7'), 7);
+    assert.equal(reviewStallMinutes('0'), 0);
   });
 
   it('hosts a review in an existing herdr workspace and polls to completion', () => {
@@ -805,6 +1096,10 @@ describe('reviewDispatch', () => {
     ]);
     assert.equal(events[1].label, `hydra:${runId}:${reviewId}:claude`);
     assert.equal(events[1].pane, 'pane-1');
+    // A sentinel-backed finish keeps the original completion contract: same
+    // event, same exit-code handling, no timeout telemetry.
+    assert.equal(events[2].exit_code, '0');
+    assert.equal(events[2].reason, undefined);
   });
 
   it('kills a timed-out pane process tree and does not run inline', () => {
@@ -861,7 +1156,300 @@ describe('reviewDispatch', () => {
 
     assert.deepEqual(killed, [4242]);
     assert.equal(calls.some((call) => call.file === 'bash'), false);
-    assert.equal(ledgerEvents(runId).at(-1)?.exit_code, '?');
+    // Issue #28 E1: a killed review is no longer reported as a completion.
+    const last = ledgerEvents(runId).at(-1);
+    assert.equal(last?.event, 'review_timed_out');
+    assert.equal(last?.reason, 'wall_clock');
+    assert.equal(last?.exit_code, '?');
+    assert.equal(last?.timeout_min, '0');
+  });
+
+  /** Minimal herdr transcript for a reviewer pane that starts successfully. */
+  function paneExec(
+    calls: Call[],
+    paneId: string,
+    onStart?: () => void,
+  ): ExecFn {
+    return (file, args, opts) => {
+      calls.push({ file, args, cwd: opts?.cwd });
+      if (args[0] === 'status') return { stdout: '', stderr: '', exitCode: 0 };
+      if (args[0] === 'pane' && args[1] === 'list') {
+        return {
+          stdout: JSON.stringify({
+            result: { panes: [{ agent: {}, cwd: TEST_TMP, workspace_id: 'workspace-1' }] },
+          }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'agent' && args[1] === 'start') {
+        onStart?.();
+        return {
+          stdout: JSON.stringify({ result: { agent: { pane_id: paneId } } }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'pane' && (args[1] === 'resize' || args[1] === 'close')) {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(' ')}`);
+    };
+  }
+
+  // Issue #36: a hung provider used to burn the entire wall-clock cap in
+  // silence with no signal at all. The supervisor now compares a byte-size
+  // signature over the review's own capture file poll-to-poll (the worker
+  // lane's activitySignature pattern) and gives up on genuine silence.
+  it('terminates a stalled review early with review_timed_out reason=stalled', () => {
+    const runId = 'pane-stall-run';
+    const reviewId = 'rev1';
+    const sessionDir = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions');
+    const rawPath = join(sessionDir, `${reviewId}.opencode.raw`);
+    const pidPath = join(sessionDir, `${reviewId}.opencode.pid`);
+    const calls: Call[] = [];
+    const killed: number[] = [];
+    let sleeps = 0;
+    const previousPanes = process.env.HYDRA_HERDR_PANES;
+    const previousTimeout = process.env.HYDRA_REVIEW_TIMEOUT_MIN;
+    const previousStall = process.env.HYDRA_REVIEW_STALL_MIN;
+    process.env.HYDRA_HERDR_PANES = '1';
+    // A wall-clock cap that could never plausibly be reached here, so an
+    // early termination can ONLY be the inactivity watchdog.
+    process.env.HYDRA_REVIEW_TIMEOUT_MIN = '10';
+    process.env.HYDRA_REVIEW_STALL_MIN = '0.15'; // 9s / 3s cadence = 3 polls
+
+    try {
+      reviewDispatch(
+        runId,
+        reviewId,
+        'opencode',
+        writePrompt('stalling review'),
+        options({
+          exec: paneExec(calls, 'pane-stall', () => writeFileSync(pidPath, '5150')),
+          sleep: () => {
+            sleeps += 1;
+            // Output for the first two polls, then total silence — and the
+            // sentinel never appears.
+            if (sleeps <= 2) {
+              appendFileSync(
+                rawPath,
+                `${JSON.stringify({ part: { type: 'text', text: `chunk ${sleeps}` } })}\n`,
+                'utf8',
+              );
+            }
+          },
+          killTree: (pid) => killed.push(pid),
+          herdrState: () => {},
+        }),
+      );
+    } finally {
+      restoreEnv('HYDRA_HERDR_PANES', previousPanes);
+      restoreEnv('HYDRA_REVIEW_TIMEOUT_MIN', previousTimeout);
+      restoreEnv('HYDRA_REVIEW_STALL_MIN', previousStall);
+    }
+
+    // Two productive polls reset the counter, then three consecutive silent
+    // polls trip it: the watchdog fires on poll 5, not on the 10-minute cap.
+    assert.equal(sleeps, 5);
+    assert.deepEqual(killed, [5150]);
+    const last = ledgerEvents(runId).at(-1);
+    assert.equal(last?.event, 'review_timed_out');
+    assert.equal(last?.reason, 'stalled');
+    assert.equal(last?.stall_min, '0.15');
+    assert.equal(last?.idle_polls, '3');
+    assert.equal(last?.timeout_min, '10');
+    assert.equal(last?.review_id, reviewId);
+    assert.equal(last?.task_id, 'task-default');
+    assert.equal(last?.vendor, 'opencode');
+  });
+
+  // The race window: a review that finishes in the exact instant the stall
+  // watchdog was about to fire must be a completion, not a timeout. Staged
+  // deterministically by writing the sentinel during the sleep of the poll
+  // that WOULD have tripped the watchdog (the preceding run of this same
+  // schedule, with no sentinel, trips on poll 5 — see the test above).
+  // A sentinel that lands even later, after the loop has already decided to
+  // give up, is caught by the post-loop re-check in review-dispatch.ts; that
+  // one needs a genuinely concurrent vendor process, so a synchronous test
+  // harness cannot stage it.
+  it('treats a sentinel that lands on the tripping poll as a completion, not a stall', () => {
+    const runId = 'pane-stall-race-run';
+    const reviewId = 'rev1';
+    const sessionDir = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions');
+    const rawPath = join(sessionDir, `${reviewId}.opencode.raw`);
+    const sentinelPath = join(sessionDir, `${reviewId}.opencode.exit`);
+    const pidPath = join(sessionDir, `${reviewId}.opencode.pid`);
+    const calls: Call[] = [];
+    const killed: number[] = [];
+    let sleeps = 0;
+    const previousPanes = process.env.HYDRA_HERDR_PANES;
+    const previousTimeout = process.env.HYDRA_REVIEW_TIMEOUT_MIN;
+    const previousStall = process.env.HYDRA_REVIEW_STALL_MIN;
+    process.env.HYDRA_HERDR_PANES = '1';
+    process.env.HYDRA_REVIEW_TIMEOUT_MIN = '10';
+    process.env.HYDRA_REVIEW_STALL_MIN = '0.15'; // 9s / 3s cadence = 3 polls
+
+    try {
+      reviewDispatch(
+        runId,
+        reviewId,
+        'opencode',
+        writePrompt('racing review'),
+        options({
+          exec: paneExec(calls, 'pane-stall-race', () => writeFileSync(pidPath, '5151')),
+          sleep: () => {
+            sleeps += 1;
+            if (sleeps <= 2) {
+              appendFileSync(
+                rawPath,
+                `${JSON.stringify({ part: { type: 'text', text: `chunk ${sleeps}` } })}\n`,
+                'utf8',
+              );
+              return;
+            }
+            // Polls 3 and 4 are silent, so the idle counter reaches 2. On
+            // poll 5 -- the one that would push it to the 3-poll threshold --
+            // the vendor exits instead. It writes ONLY the sentinel: the
+            // capture file does not grow, so the signature is byte-identical
+            // to a genuine stall and the sentinel is the sole thing telling
+            // the two apart. This is the tightest form of the race.
+            if (sleeps === 5) writeFileSync(sentinelPath, '0', 'utf8');
+          },
+          killTree: (pid) => killed.push(pid),
+          herdrState: () => {},
+        }),
+      );
+    } finally {
+      restoreEnv('HYDRA_HERDR_PANES', previousPanes);
+      restoreEnv('HYDRA_REVIEW_TIMEOUT_MIN', previousTimeout);
+      restoreEnv('HYDRA_REVIEW_STALL_MIN', previousStall);
+    }
+
+    assert.equal(sleeps, 5, 'the loop stops on the same poll the stall would have');
+    assert.deepEqual(killed, [], 'a finished vendor is never killed');
+    const events = ledgerEvents(runId);
+    // The untouched completion contract: no review_timed_out anywhere.
+    assert.deepEqual(events.map((event) => event.event), [
+      'review_started',
+      'herdr_pane_started',
+      'review_completed',
+    ]);
+    assert.equal(events.at(-1)?.exit_code, '0');
+    assert.equal(events.at(-1)?.reason, undefined);
+  });
+
+  it('reports reason=wall_clock when slow but continuous output never stalls', () => {
+    const runId = 'pane-wallclock-run';
+    const reviewId = 'rev1';
+    const sessionDir = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions');
+    const rawPath = join(sessionDir, `${reviewId}.codex.raw`);
+    const pidPath = join(sessionDir, `${reviewId}.codex.pid`);
+    const calls: Call[] = [];
+    const killed: number[] = [];
+    let sleeps = 0;
+    const previousPanes = process.env.HYDRA_HERDR_PANES;
+    const previousTimeout = process.env.HYDRA_REVIEW_TIMEOUT_MIN;
+    const previousStall = process.env.HYDRA_REVIEW_STALL_MIN;
+    process.env.HYDRA_HERDR_PANES = '1';
+    process.env.HYDRA_REVIEW_TIMEOUT_MIN = '0.005'; // 300ms of real wall clock
+    process.env.HYDRA_REVIEW_STALL_MIN = '5'; // 100 silent polls — unreachable
+
+    try {
+      reviewDispatch(
+        runId,
+        reviewId,
+        'codex',
+        writePrompt('slow review'),
+        options({
+          exec: paneExec(calls, 'pane-wallclock', () => writeFileSync(pidPath, '6161')),
+          sleep: () => {
+            sleeps += 1;
+            // Real elapsed time per poll (the injected sleeper does not
+            // actually sleep) so the wall-clock backstop can be reached,
+            // with fresh bytes every tick so the stall watch never trips.
+            const until = Date.now() + 120;
+            while (Date.now() < until) { /* burn wall clock deterministically */ }
+            appendFileSync(
+              rawPath,
+              `${JSON.stringify({ msg: { type: 'agent_reasoning', text: `tick ${sleeps}` } })}\n`,
+              'utf8',
+            );
+          },
+          killTree: (pid) => killed.push(pid),
+          herdrState: () => {},
+        }),
+      );
+    } finally {
+      restoreEnv('HYDRA_HERDR_PANES', previousPanes);
+      restoreEnv('HYDRA_REVIEW_TIMEOUT_MIN', previousTimeout);
+      restoreEnv('HYDRA_REVIEW_STALL_MIN', previousStall);
+    }
+
+    assert.ok(sleeps >= 2, `expected several productive polls, got ${sleeps}`);
+    assert.ok(sleeps < 20, `wall-clock cap should stop the loop, got ${sleeps} polls`);
+    assert.deepEqual(killed, [6161]);
+    const last = ledgerEvents(runId).at(-1);
+    assert.equal(last?.event, 'review_timed_out');
+    assert.equal(last?.reason, 'wall_clock');
+    assert.equal(last?.timeout_min, '0.005');
+    assert.equal(last?.exit_code, '?');
+    assert.equal(last?.stall_min, undefined, 'wall-clock timeouts carry no stall detail');
+  });
+
+  it('never stalls a claude review, whose output only lands at exit', () => {
+    // claude runs with --output-format json: a healthy review is byte-silent
+    // until the very end, so capture growth cannot judge it. It keeps the
+    // wall-clock backstop alone rather than being killed as "stalled".
+    const runId = 'pane-claude-silent-run';
+    const reviewId = 'rev1';
+    const sessionDir = join(TEST_TMP, 'runs', `run-${runId}`, 'sessions');
+    const rawPath = join(sessionDir, `${reviewId}.claude.raw`);
+    const sentinelPath = join(sessionDir, `${reviewId}.claude.exit`);
+    const calls: Call[] = [];
+    let sleeps = 0;
+    const previousPanes = process.env.HYDRA_HERDR_PANES;
+    const previousTimeout = process.env.HYDRA_REVIEW_TIMEOUT_MIN;
+    const previousStall = process.env.HYDRA_REVIEW_STALL_MIN;
+    process.env.HYDRA_HERDR_PANES = '1';
+    process.env.HYDRA_REVIEW_TIMEOUT_MIN = '10';
+    process.env.HYDRA_REVIEW_STALL_MIN = '0.05'; // would trip on poll 1
+
+    let mdPath: string;
+    try {
+      mdPath = reviewDispatch(
+        runId,
+        reviewId,
+        'claude',
+        writePrompt('silent claude review'),
+        options({
+          exec: paneExec(calls, 'pane-claude-silent'),
+          sleep: () => {
+            sleeps += 1;
+            // Byte-silent for several polls, then the whole document at once.
+            if (sleeps < 4) return;
+            writeFileSync(rawPath, JSON.stringify({ result: 'late but complete' }), 'utf8');
+            writeFileSync(sentinelPath, '0', 'utf8');
+          },
+          killTree: () => assert.fail('a silent claude review must not be killed'),
+          herdrState: () => {},
+        }),
+      );
+    } finally {
+      restoreEnv('HYDRA_HERDR_PANES', previousPanes);
+      restoreEnv('HYDRA_REVIEW_TIMEOUT_MIN', previousTimeout);
+      restoreEnv('HYDRA_REVIEW_STALL_MIN', previousStall);
+    }
+
+    assert.equal(sleeps, 4);
+    assert.equal(readFileSync(mdPath!, 'utf8').trim(), 'late but complete');
+    const events = ledgerEvents(runId);
+    assert.deepEqual(events.map((event) => event.event), [
+      'review_started',
+      'herdr_pane_started',
+      'review_completed',
+    ]);
+    assert.equal(events.at(-1)?.exit_code, '0');
   });
 
   it('does not fall back inline after a successful pane start with invalid JSON', () => {
