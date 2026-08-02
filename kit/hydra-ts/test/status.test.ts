@@ -9,7 +9,14 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { status, main, type StatusOptions } from '../src/status.ts';
+import {
+  status,
+  main,
+  LEDGER_DISPLAY_TAIL,
+  SUCCESS_TERMINAL_EVENT,
+  TERMINAL_EVENTS,
+  type StatusOptions,
+} from '../src/status.ts';
 
 const TEST_TMP = join(tmpdir(), `hydra-ts-status-${process.pid}`);
 
@@ -869,6 +876,146 @@ describe('status', () => {
     assert.equal(parsed.state, 'failed');
     assert.equal(parsed.amendment_noop?.head, 'c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ffe');
     assert.equal(parsed.amendment_noop?.delivered_via, 'resume');
+  });
+});
+
+describe('TERMINAL_EVENTS is the exported, authoritative vocabulary', () => {
+  before(() => {
+    if (!existsSync(TEST_TMP)) mkdirSync(TEST_TMP, { recursive: true });
+  });
+
+  it('is exported so downstream primitives import it instead of copying it', () => {
+    // Issue #41: hand-rolled watchers drifted from this list and polled for
+    // event names that could never match. Anything that needs the vocabulary
+    // must be able to import it — that is what this export is for.
+    assert.ok(Array.isArray(TERMINAL_EVENTS));
+    assert.ok(TERMINAL_EVENTS.includes('agent_exited'));
+  });
+
+  it('every listed event actually drives determineState out of running/unknown', () => {
+    // Pins the exported list to real behaviour: a name that appeared here but
+    // was never matched by determineState would silently reintroduce the
+    // never-terminates bug in every importer.
+    for (const event of TERMINAL_EVENTS) {
+      const f = fixture(uniqueRunId(`terminal-${event.replace(/_/g, '-')}`));
+      writeLedger(f, [
+        { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
+        { time: '2024-01-01T00:01:00Z', event, run_id: f.runId, task_id: 'task-a', vendor: 'kimi', exit_code: '0' },
+      ]);
+
+      const result = status(f.runId, 'task-a', baseOptions(f));
+      assert.notEqual(result.state, 'running', `${event} must be terminal`);
+      assert.notEqual(result.state, 'unknown', `${event} must be terminal`);
+      assert.equal(result.terminal_event, event, `${event} must be the deciding event`);
+    }
+  });
+
+  it('SUCCESS_TERMINAL_EVENT is a member of the vocabulary and is what a clean exit writes', () => {
+    // Issue #41: the "did it actually succeed?" identifier must be importable
+    // too. A downstream copy of the string is the same drift hazard as a copy
+    // of the list.
+    assert.ok(TERMINAL_EVENTS.includes(SUCCESS_TERMINAL_EVENT));
+
+    const f = fixture(uniqueRunId('success-event'));
+    writeLedger(f, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:01:00Z', event: SUCCESS_TERMINAL_EVENT, run_id: f.runId, task_id: 'task-a', vendor: 'kimi', exit_code: '0' },
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f));
+    assert.equal(result.state, 'completed');
+    assert.equal(result.terminal_exit_code, '0');
+  });
+});
+
+describe('terminal_* is authoritative and independent of the display tail', () => {
+  before(() => {
+    if (!existsSync(TEST_TMP)) mkdirSync(TEST_TMP, { recursive: true });
+  });
+
+  it('surfaces the deciding event even when later events push it out of ledger_events', () => {
+    // The defect this pins: `ledger_events` is only the last
+    // LEDGER_DISPLAY_TAIL events of the attempt, so a task that exited 0 and
+    // then accrued more follow-on lifecycle events than that has no agent_exited
+    // left in the tail. `state` was always right (it reads the full window);
+    // anything reading the outcome out of the tail called the success a failure.
+    const f = fixture(uniqueRunId('buried-exit'));
+    const later = ['review_started', 'review_completed', 'review_started',
+      'review_completed', 'promotion_started', 'promotion_completed']
+      .map((event, index) => ({
+        time: `2024-01-01T00:1${index}:00Z`,
+        event,
+        run_id: f.runId,
+        task_id: 'task-a',
+      }));
+    assert.ok(later.length > LEDGER_DISPLAY_TAIL, 'fixture must overflow the display tail');
+
+    writeLedger(f, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:01:00Z', event: 'agent_exited', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', exit_code: '0' },
+      ...later,
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f));
+
+    assert.equal(result.state, 'completed');
+    assert.equal(
+      result.ledger_events.some(({ event }) => event === 'agent_exited'),
+      false,
+      'the display tail must no longer hold the terminal event',
+    );
+    assert.equal(result.terminal_event, 'agent_exited');
+    assert.equal(result.terminal_exit_code, '0');
+    assert.equal(result.attempt_event_count, 2 + later.length);
+  });
+
+  it('reports the amendment_noop, not the agent_exited it overrides', () => {
+    const f = fixture(uniqueRunId('noop-terminal'), { specVersion: 2 });
+    writeLedger(f, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v2`, spec_version: '2', attempt_ordinal: '1' },
+      { time: '2024-01-01T00:01:00Z', event: 'agent_exited', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', exit_code: '0' },
+      { time: '2024-01-01T00:01:01Z', event: 'amendment_noop', run_id: f.runId, task_id: 'task-a', spec_version: '2', delivered_via: 'resume', head: 'c0ffee1', exit_code: '0' },
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f));
+    assert.equal(result.state, 'failed');
+    assert.equal(result.terminal_event, 'amendment_noop');
+  });
+
+  it('carries the reason of a vanished pane worker alongside the failed state', () => {
+    const f = fixture(uniqueRunId('vanished-terminal'));
+    writeLedger(f, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:01:00Z', event: 'agent_exited', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', reason: 'worker_disappeared' },
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f));
+    assert.equal(result.state, 'failed');
+    assert.equal(result.terminal_event, 'agent_exited');
+    assert.equal(result.terminal_reason, 'worker_disappeared');
+    assert.equal(result.terminal_exit_code, null);
+  });
+
+  it('leaves the terminal fields null while an attempt is still running or unknown', () => {
+    const running = fixture(uniqueRunId('running-terminal'));
+    writeLedger(running, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: running.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${running.runId}-task-a-v1` },
+      { time: '2024-01-01T00:00:01Z', event: 'concurrency_wait', run_id: running.runId, task_id: 'task-a', cap: '3', active: '3' },
+    ]);
+    const queued = status(running.runId, 'task-a', baseOptions(running));
+    assert.equal(queued.state, 'running', 'task_started precedes concurrency_wait in real dispatch');
+    assert.equal(queued.terminal_event, null);
+    assert.equal(queued.terminal_exit_code, null);
+    assert.equal(queued.attempt_event_count, 2);
+
+    const other = fixture(uniqueRunId('unknown-terminal'));
+    writeLedger(other, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: other.runId, task_id: 'task-b', vendor: 'kimi', agent_run_id: `${other.runId}-task-b-v1` },
+    ]);
+    const unknown = status(other.runId, 'task-a', baseOptions(other));
+    assert.equal(unknown.state, 'unknown');
+    assert.equal(unknown.terminal_event, null);
+    assert.equal(unknown.attempt_event_count, 0, 'nothing was dispatched for this task');
   });
 });
 

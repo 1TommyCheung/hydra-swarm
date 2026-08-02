@@ -66,8 +66,34 @@ export interface StatusResult {
   disagreement: string | null;
   loop_suspicion: LoopSuspicion | null;
   amendment_noop: AmendmentNoop | null;
+  /**
+   * The terminal ledger event that DETERMINED `state`, or null when the attempt
+   * has not reached one. Derived from the SAME full-attempt-window scan that
+   * produces `state` — deliberately NOT from `ledger_events`, which is a
+   * truncated display tail. A consumer that needs to know how an attempt ended
+   * (wait-task.ts) must read these three fields: a genuinely successful exit
+   * followed by more than `LEDGER_DISPLAY_TAIL` later events is invisible in
+   * the tail, and reading the outcome from there reports a clean success as a
+   * failure.
+   */
+  terminal_event: string | null;
+  /** `exit_code` recorded on `terminal_event`, as text. */
+  terminal_exit_code: string | null;
+  /** `reason` recorded on `terminal_event` (e.g. worker_disappeared). */
+  terminal_reason: string | null;
+  /**
+   * How many events the current attempt window holds, before display
+   * truncation. Zero means nothing was ever dispatched for this attempt — the
+   * one condition under which no further event can ever arrive.
+   */
+  attempt_event_count: number;
   progress_tail: string[];
   progress_source: string | null;
+  /**
+   * The last `LEDGER_DISPLAY_TAIL` events of the current attempt. A
+   * human-readable summary ONLY: it is truncated and can omit the terminal
+   * event entirely. Never decide an outcome from this — use `terminal_event`.
+   */
   ledger_events: Array<Record<string, unknown>>;
 }
 
@@ -77,7 +103,13 @@ interface TaskSpec {
   specVersion: string;
 }
 
-const TERMINAL_EVENTS = [
+/**
+ * The authoritative terminal-event vocabulary. Exported so downstream
+ * primitives (wait-task.ts) observe the SAME list rather than maintaining a
+ * copy that can silently drift from it — the drift failure mode issue #41 was
+ * filed to kill.
+ */
+export const TERMINAL_EVENTS = [
   'agent_exited',
   'agent_cancelled',
   'agent_timed_out',
@@ -86,6 +118,20 @@ const TERMINAL_EVENTS = [
   // dispatch moved no commits — it is the LAST word on that attempt.
   'amendment_noop',
 ];
+
+/**
+ * The one terminal event that can represent a GENUINE success, and the only one
+ * carrying an `exit_code`. Exported for the same reason as TERMINAL_EVENTS: a
+ * downstream primitive that must ask "did this attempt actually succeed?"
+ * (wait-task.ts) has to name this event, and a local copy of the string there
+ * is an independently-maintained duplicate that can drift — issue #41's whole
+ * failure mode. It is necessarily a member of TERMINAL_EVENTS; importers assert
+ * that at load time so a rename here fails loudly instead of silently.
+ */
+export const SUCCESS_TERMINAL_EVENT = 'agent_exited';
+
+/** Number of trailing attempt events exposed in `ledger_events` for display. */
+export const LEDGER_DISPLAY_TAIL = 5;
 
 // Grace window after task_started before we treat a missing dispatch pidfile as
 // a disagreement. task_started is appended before the pidfile is written, and
@@ -149,26 +195,45 @@ function isLastEventConcurrencyWait(events: LedgerEntry[]): boolean {
   return events[events.length - 1].event === 'concurrency_wait';
 }
 
-function determineState(events: LedgerEntry[]): StatusResult['state'] {
-  if (events.length === 0) return 'unknown';
+/**
+ * The state of an attempt together with the ledger event that determined it.
+ * The two are produced by one scan over the FULL attempt window on purpose: a
+ * caller that needs the deciding event must never have to re-derive it from the
+ * truncated `ledger_events` display tail, where it may not appear at all.
+ */
+interface AttemptOutcome {
+  state: StatusResult['state'];
+  /** The event that decided `state`; undefined for running/unknown. */
+  entry: LedgerEntry | undefined;
+}
+
+function determineOutcome(events: LedgerEntry[]): AttemptOutcome {
+  if (events.length === 0) return { state: 'unknown', entry: undefined };
   for (let i = events.length - 1; i >= 0; i -= 1) {
-    const event = events[i].event;
+    const entry = events[i];
+    const event = entry.event;
     // Issue #40: a no-op amendment is a FAILED attempt even though the worker
     // process exited 0. The dispatcher appends amendment_noop right after the
     // agent_exited it qualifies, so this backwards scan reaches it first and
     // the pair reads as failed, never completed.
-    if (event === 'amendment_noop') return 'failed';
-    if (event === 'agent_exited') {
+    if (event === 'amendment_noop') return { state: 'failed', entry };
+    if (event === SUCCESS_TERMINAL_EVENT) {
       // A pane worker that vanished without writing its exit sentinel is
       // recorded as agent_exited but must not be reported as a clean success.
-      return events[i].reason === 'worker_disappeared' ? 'failed' : 'completed';
+      return { state: entry.reason === 'worker_disappeared' ? 'failed' : 'completed', entry };
     }
-    if (event === 'agent_cancelled') return 'cancelled';
-    if (event === 'agent_timed_out') return 'timed_out';
-    if (event === 'agent_usage_limited') return 'usage_limited';
+    if (event === 'agent_cancelled') return { state: 'cancelled', entry };
+    if (event === 'agent_timed_out') return { state: 'timed_out', entry };
+    if (event === 'agent_usage_limited') return { state: 'usage_limited', entry };
   }
   const hasStarted = events.some((entry) => entry.event === 'task_started');
-  return hasStarted ? 'running' : 'unknown';
+  return { state: hasStarted ? 'running' : 'unknown', entry: undefined };
+}
+
+function scalarText(value: unknown): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value === 'string') return value;
+  return typeof value === 'number' || typeof value === 'boolean' ? String(value) : null;
 }
 
 const LOOP_TERMINAL_EVENTS = new Set([
@@ -484,7 +549,8 @@ export function status(
   const agentRunId = currentAttempt?.agentRunId ?? baseAgentRunId;
   const attemptEvents = currentAttempt?.events ?? [];
   const startedEntry = currentAttempt?.startedEntry;
-  const state = determineState(attemptEvents);
+  const outcome = determineOutcome(attemptEvents);
+  const state = outcome.state;
 
   const startedTime = parseEventTime(startedEntry?.time);
   const nowFn = options.now ?? (() => Date.now());
@@ -548,7 +614,11 @@ export function status(
     lines,
   );
 
-  const lastEvents = attemptEvents.slice(-5);
+  // Display tail only. The terminal_* fields below come from determineOutcome's
+  // full-window scan, NOT from this slice, so an attempt whose terminal event is
+  // followed by more than LEDGER_DISPLAY_TAIL later events still reports its
+  // real outcome.
+  const lastEvents = attemptEvents.slice(-LEDGER_DISPLAY_TAIL);
 
   return {
     state,
@@ -561,6 +631,10 @@ export function status(
     disagreement,
     loop_suspicion: loopSuspicion,
     amendment_noop: amendmentNoop,
+    terminal_event: scalarText(outcome.entry?.event),
+    terminal_exit_code: scalarText(outcome.entry?.exit_code),
+    terminal_reason: scalarText(outcome.entry?.reason),
+    attempt_event_count: attemptEvents.length,
     progress_tail: progressTail,
     progress_source: progressSource,
     ledger_events: lastEvents as Array<Record<string, unknown>>,

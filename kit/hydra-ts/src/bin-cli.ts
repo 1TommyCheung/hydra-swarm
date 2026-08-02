@@ -9,6 +9,7 @@ import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { main as detectHeadsMain } from './detect-heads.ts';
 import { main as gcMain } from './gc.ts';
 import { main as runLogMain } from './run-log.ts';
+import { main as waitTaskMain, mainRun as waitRunMain } from './wait-task.ts';
 
 // Bun documents that `BUN_BE_BUN=1` can cause a compiled executable to ignore its
 // bundled entry point and run Bun's own generic CLI instead. Unset it in our own
@@ -18,7 +19,7 @@ if (process.env.BUN_BE_BUN !== undefined) {
 }
 
 function printUsage(): void {
-  console.error('Usage: hydra-bin-stage0 <status|detect-heads [--json]|gc [--apply] [--keep-last N] [--default-branch REF] [--json]|run-log <run_id> [--out <dir>] [--json]|__adapter stub <verb> [args...]>');
+  console.error('Usage: hydra-bin-stage0 <status|detect-heads [--json]|gc [--apply] [--keep-last N] [--default-branch REF] [--json]|run-log <run_id> [--out <dir>] [--json]|wait-task <run_id> <task_id> [--timeout-seconds N] [--json]|wait-run <run_id> [task_id...] [--timeout-seconds N] [--json]|__adapter stub <verb> [args...]>');
 }
 
 function failUnknown(): void {
@@ -98,6 +99,23 @@ function handleRunLog(): void {
   process.exitCode = runLogMain(process.argv.slice(3));
 }
 
+function handleWaitTask(): void {
+  // Same subcommand surface as cli.ts's extension route (run 0068): block until
+  // one task reaches a terminal ledger state. Unlike the handlers above these
+  // mains are async (they poll), so the exit code is assigned on settlement.
+  void waitTaskMain(process.argv.slice(3)).then((code) => {
+    process.exitCode = code;
+  });
+}
+
+function handleWaitRun(): void {
+  // Same subcommand surface as cli.ts's extension route (run 0068): the
+  // fan-out wait across several tasks of a run.
+  void waitRunMain(process.argv.slice(3)).then((code) => {
+    process.exitCode = code;
+  });
+}
+
 function main(): void {
   const subcommand = process.argv[2];
 
@@ -113,6 +131,12 @@ function main(): void {
       break;
     case 'run-log':
       handleRunLog();
+      break;
+    case 'wait-task':
+      handleWaitTask();
+      break;
+    case 'wait-run':
+      handleWaitRun();
       break;
     case '__adapter':
       handleAdapter();

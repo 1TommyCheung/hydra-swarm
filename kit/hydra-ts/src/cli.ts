@@ -57,6 +57,7 @@ import { main as squashMain } from './squash.ts';
 import { main as statusMain } from './status.ts';
 import { main as verifyMain } from './verify.ts';
 import { main as versionMain } from './version.ts';
+import { main as waitTaskMain, mainRun as waitRunMain } from './wait-task.ts';
 import { initEmbeddedAssets, isCompiledBinary } from './kit-assets.ts';
 
 /** Every routed module exposes the normalized router-callable shape. */
@@ -109,11 +110,14 @@ export const routes: Readonly<Record<string, MainFn>> = {
 // exactly 34 subcommands (its 'covers exactly the 34 Stage-1 subcommands'
 // assertion), so newer subcommands register HERE instead: route() consults
 // this table only when the default registry is in play, and usage() lists
-// both. (run 0047: detect-heads; run 0048: gc, run-log.)
+// both. (run 0047: detect-heads; run 0048: gc, run-log; run 0068: wait-task,
+// wait-run.)
 const extensionRoutes: Readonly<Record<string, MainFn>> = {
   'detect-heads': detectHeadsMain,
   'gc': gcMain,
   'run-log': runLogMain,
+  'wait-task': waitTaskMain,
+  'wait-run': waitRunMain,
   'help': (args) => {
     void args;
     process.stdout.write(usage());
@@ -169,6 +173,8 @@ const SIGNATURES: Readonly<Record<string, string>> = {
   'status': '<run_id> <task_id> [--lines N] [--json]',
   'verify': '<worktree> <policy.yaml> [out.json]',
   'version': '[--json]',
+  'wait-run': '<run_id> [task_id...] [--timeout-seconds N] [--poll-interval-ms N] [--heartbeat-seconds N] [--json]',
+  'wait-task': '<run_id> <task_id> [--timeout-seconds N] [--poll-interval-ms N] [--heartbeat-seconds N] [--json]',
 };
 
 export function usage(): string {
