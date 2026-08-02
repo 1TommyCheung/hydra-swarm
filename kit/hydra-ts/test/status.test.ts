@@ -803,6 +803,73 @@ describe('status', () => {
     assert.equal(parsed.loop_suspicion?.status, 'suspected');
     assert.equal(parsed.loop_suspicion?.dominant_action_hash, 'deadbeef');
   });
+
+  // Issue #40: an amended dispatch that exits 0 without moving HEAD used to
+  // read as a clean `completed`. amendment_noop is the harness's own verdict
+  // and it outranks the worker's self-reported exit.
+  it('maps agent_exited plus amendment_noop to failed, never completed', () => {
+    const f = fixture(uniqueRunId('noop-state'), { specVersion: 2 });
+    const agentRunId = `${f.runId}-task-a-v2`;
+    writeLedger(f, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: agentRunId, spec_version: '2', attempt_ordinal: '1' },
+      { time: '2024-01-01T00:20:00Z', event: 'agent_exited', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', exit_code: '0' },
+      { time: '2024-01-01T00:20:00Z', event: 'amendment_noop', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: agentRunId, spec_version: '2', delivered_via: 'restart', head: 'a'.repeat(40), exit_code: '0' },
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f));
+
+    assert.equal(result.state, 'failed');
+    assert.deepEqual(result.amendment_noop, {
+      spec_version: '2',
+      delivered_via: 'restart',
+      head: 'a'.repeat(40),
+      exit_code: '0',
+    });
+  });
+
+  it('leaves a first-attempt agent_exited completed with no amendment_noop block', () => {
+    const f = fixture(uniqueRunId('noop-absent'));
+    writeLedger(f, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: `${f.runId}-task-a-v1` },
+      { time: '2024-01-01T00:20:00Z', event: 'agent_exited', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', exit_code: '0' },
+    ]);
+
+    const result = status(f.runId, 'task-a', baseOptions(f));
+
+    assert.equal(result.state, 'completed');
+    assert.equal(result.amendment_noop, null);
+  });
+
+  it('surfaces the no-op amendment in human and JSON output', () => {
+    const f = fixture(uniqueRunId('noop-output'), { specVersion: 2 });
+    const agentRunId = `${f.runId}-task-a-v2`;
+    writeLedger(f, [
+      { time: '2024-01-01T00:00:00Z', event: 'task_started', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: agentRunId, spec_version: '2', attempt_ordinal: '1' },
+      { time: '2024-01-01T00:20:00Z', event: 'agent_exited', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', exit_code: '0' },
+      { time: '2024-01-01T00:20:00Z', event: 'amendment_noop', run_id: f.runId, task_id: 'task-a', vendor: 'kimi', agent_run_id: agentRunId, spec_version: '2', delivered_via: 'resume', head: 'c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ffe', exit_code: '0' },
+    ]);
+
+    const previous = process.env.HYDRA_STATE_ROOT;
+    process.env.HYDRA_STATE_ROOT = f.stateRoot;
+    let human = '';
+    let json = '';
+    try {
+      human = captureStdout(() => main([f.runId, 'task-a']));
+      json = captureStdout(() => main([f.runId, 'task-a', '--json']));
+    } finally {
+      if (previous === undefined) delete process.env.HYDRA_STATE_ROOT;
+      else process.env.HYDRA_STATE_ROOT = previous;
+    }
+
+    assert.match(human, /^state: failed$/m);
+    assert.match(human, /amendment_noop: spec v2 amendment produced no commits/);
+    assert.match(human, /HEAD c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ffe unchanged/);
+    assert.match(human, /An amendment is a required fix, not an audit\./);
+    const parsed = JSON.parse(json) as ReturnType<typeof status>;
+    assert.equal(parsed.state, 'failed');
+    assert.equal(parsed.amendment_noop?.head, 'c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ffe');
+    assert.equal(parsed.amendment_noop?.delivered_via, 'resume');
+  });
 });
 
 function captureStdout(callback: () => unknown): string {

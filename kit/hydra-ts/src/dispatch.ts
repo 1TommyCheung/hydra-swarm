@@ -355,6 +355,8 @@ interface TaskSpec {
   worktree: string;
   timeoutMinutes: number;
   specVersion: string;
+  /** `delivered_via` from an amended spec ('restart' | 'resume'); '' on a first attempt. */
+  deliveredVia: string;
 }
 
 function isFile(path: string): boolean {
@@ -392,6 +394,7 @@ function readTaskSpec(path: string): TaskSpec {
     worktree: yamlScalar(path, 'worktree'),
     timeoutMinutes: timeout ? Number(timeout) : 45,
     specVersion: version || '1',
+    deliveredVia: yamlScalar(path, 'delivered_via'),
   };
 }
 
@@ -557,6 +560,123 @@ export interface UsageLimitDetails {
   rawError: string;
 }
 
+/**
+ * Amendment no-op gate (issue #40). An amended dispatch (`spec_version > 1`
+ * delivered via restart|resume) is a REQUIRED FIX, not an audit: a worker that
+ * re-reads the ORIGINAL acceptance criteria, decides nothing needs to change
+ * and exits 0 leaves the task branch HEAD exactly where it started — yet the
+ * ledger recorded that attempt as a plain `agent_exited`, which status.ts maps
+ * to `completed`. `amendment_check` (issue #23) only ever ASKED the worker to
+ * self-verify; nothing in the harness checked.
+ *
+ * So the dispatcher samples the worktree's branch HEAD before the worker
+ * spawns and again at the terminal-event choke point (ExitRecorder.finish),
+ * and an unchanged HEAD appends `amendment_noop` after the exit event, which
+ * flips the reported terminal status to `failed`.
+ *
+ * The gate is strictly additive for first attempts: `amended` stays false
+ * unless the spec says spec_version > 1 AND delivered_via is restart|resume,
+ * and no git command is run at all in that case.
+ */
+export interface AmendmentGate {
+  /** True only for an amended dispatch (spec_version > 1, delivered_via restart|resume). */
+  amended: boolean;
+  specVersion: string;
+  deliveredVia: string;
+  /** Absolute worktree path both HEAD samples are taken in. */
+  worktree: string;
+  /**
+   * HEAD sampled before the worker spawned, or null when that read failed.
+   * A null capture disables the comparison (fail OPEN) — an attempt that could
+   * not be checked must never be misclassified as a no-op.
+   */
+  headBefore: string | null;
+  /** Injected HEAD reader (tests override it; production reads git). */
+  readHead: (worktree: string) => string | null;
+}
+
+const SHA_PATTERN = /^[0-9a-f]{7,64}$/;
+
+/** `git rev-parse HEAD` in `worktree`, or null when it cannot be run or parsed. */
+export function readWorktreeHead(worktree: string, run: ExecFileSyncLike): string | null {
+  try {
+    const out = String(run('git', ['rev-parse', 'HEAD'], {
+      cwd: worktree,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })).trim();
+    return SHA_PATTERN.test(out) ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+const AMENDMENT_DELIVERIES = new Set(['restart', 'resume']);
+
+/**
+ * Classify a dispatch as amended-or-not and, when amended, take the pre-spawn
+ * HEAD sample. Every failure here is a warning plus a disabled gate, never a
+ * die(): a git that cannot answer must not wedge a legitimate attempt.
+ */
+export function buildAmendmentGate(options: {
+  specVersion: string;
+  deliveredVia: string;
+  worktree: string;
+  taskId: string;
+  run: ExecFileSyncLike;
+}): AmendmentGate {
+  const readHead = (path: string): string | null => readWorktreeHead(path, options.run);
+  const deliveredVia = options.deliveredVia.trim();
+  const specVersion = Number(options.specVersion);
+  const amended = Number.isFinite(specVersion)
+    && specVersion > 1
+    && AMENDMENT_DELIVERIES.has(deliveredVia);
+  const gate: AmendmentGate = {
+    amended,
+    specVersion: options.specVersion,
+    deliveredVia,
+    worktree: options.worktree,
+    headBefore: null,
+    readHead,
+  };
+  if (!amended) return gate;
+  gate.headBefore = readHead(options.worktree);
+  if (gate.headBefore === null) {
+    warn(
+      `could not read the worktree HEAD for amended task '${options.taskId}' (${options.worktree}); `
+        + 'the amendment no-op check is disabled for this attempt and its exit is recorded as usual',
+    );
+  }
+  return gate;
+}
+
+/**
+ * Returns the unchanged SHA when an amended dispatch's branch HEAD is
+ * identical before spawn and at exit, else null. Fails OPEN on every error
+ * path (no gate, no pre-spawn sample, HEAD unreadable now): a comparison that
+ * cannot be performed must never reclassify or corrupt a real attempt.
+ */
+export function detectAmendmentNoop(
+  gate: AmendmentGate | undefined,
+  taskId: string,
+): string | null {
+  if (!gate || !gate.amended || gate.headBefore === null) return null;
+  let headAfter: string | null = null;
+  try {
+    headAfter = gate.readHead(gate.worktree);
+  } catch {
+    headAfter = null;
+  }
+  if (headAfter === null) {
+    warn(
+      `could not re-read the worktree HEAD for amended task '${taskId}' at exit; `
+        + 'the amendment no-op check is skipped and the exit is recorded as usual',
+    );
+    return null;
+  }
+  return headAfter === gate.headBefore ? headAfter : null;
+}
+
 interface ExitRecorder {
   readonly cancelled: Promise<void>;
   isRecorded(): boolean;
@@ -607,6 +727,11 @@ interface WorkerContext {
   execFileSync: ExecFileSyncLike;
   /** Override path to vendor-cooldowns.json for the usage-limit cooldown recorder (used by tests). */
   cooldownFile?: string;
+  /**
+   * Amendment no-op gate (issue #40). Absent/`amended: false` leaves the
+   * terminal-event path byte-for-byte as it was for first attempts.
+   */
+  amendmentGate?: AmendmentGate;
 }
 
 function releaseSlot(slotsDir: string, agentRunId: string): void {
@@ -633,7 +758,46 @@ export function makeExitRecorder(ctx: WorkerContext): ExitRecorder {
   const finish = (event: string, kvs: string[], exitCode: string): void => {
     if (recorded) return;
     recorded = true;
+    // Issue #40: an amended dispatch that exits without moving the branch HEAD
+    // is a no-op amendment. The comparison is taken here, at the single choke
+    // point that already writes every terminal event, and BEFORE the exit is
+    // appended so verdict and exit land in the ledger back to back. Only
+    // `agent_exited` is qualified — timeout/cancel/usage-limit already read as
+    // non-completed and re-labelling them would lose information.
+    let noopSha: string | null = null;
+    if (event === 'agent_exited') {
+      try {
+        noopSha = detectAmendmentNoop(ctx.amendmentGate, ctx.taskId);
+      } catch (error) {
+        warn(`amendment no-op check failed; recording the exit as usual: ${error instanceof Error ? error.message : String(error)}`);
+        noopSha = null;
+      }
+    }
     ctx.appendLedger(ctx.runId, event, 'task_id', ctx.taskId, 'vendor', ctx.vendor, ...kvs);
+    if (noopSha !== null) {
+      const specVersion = ctx.amendmentGate?.specVersion ?? '';
+      try {
+        ctx.appendLedger(
+          ctx.runId,
+          'amendment_noop',
+          'task_id', ctx.taskId,
+          'vendor', ctx.vendor,
+          'agent_run_id', ctx.agentRunId,
+          'spec_version', specVersion,
+          'delivered_via', ctx.amendmentGate?.deliveredVia ?? '',
+          'head', noopSha,
+          'exit_code', exitCode,
+        );
+        log(
+          `FAILED [${ctx.taskId}]: spec v${specVersion} amendment produced no commits `
+            + `(HEAD ${noopSha} unchanged). An amendment is a required fix, not an audit.`,
+        );
+      } catch (error) {
+        // The exit event is already durable; a failed no-op append must not
+        // strand the sentinel/slot cleanup below.
+        warn(`failed to record amendment_noop for task '${ctx.taskId}': ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     try { writeFileSync(sentinel, exitCode, 'utf8'); } catch { /* ledger and slot cleanup remain authoritative */ }
     releaseSlot(ctx.slotsDir, ctx.agentRunId);
     unregister();
@@ -1982,6 +2146,16 @@ export async function dispatch(
   };
 
   const commandRunner = options.execFileSync ?? defaultExecFileSync;
+  // Pre-spawn HEAD sample for the amendment no-op gate (issue #40). Taken here
+  // — after every dispatch-time gate, before any worker process can exist —
+  // so the "before" side of the comparison can only ever precede the worker.
+  const amendmentGate = buildAmendmentGate({
+    specVersion: spec.specVersion,
+    deliveredVia: spec.deliveredVia,
+    worktree: resolvedWorktree,
+    taskId,
+    run: commandRunner,
+  });
   const ctx: WorkerContext = {
     runId,
     taskId,
@@ -2017,6 +2191,7 @@ export async function dispatch(
     usageDetectorState: createUsageDetectorState(),
     execFileSync: commandRunner,
     cooldownFile: options.cooldownFile,
+    amendmentGate,
   };
   const recorder = makeExitRecorder(ctx);
   recorder.register(options.signal, options.noSignals);

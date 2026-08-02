@@ -18,7 +18,9 @@ import { dirname, join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
+  buildAmendmentGate,
   claimDispatchAttempt,
+  detectAmendmentNoop,
   dispatch,
   herdrAgentPaneRatio,
   kimiEventText,
@@ -33,6 +35,7 @@ import {
   type UsageLimitDetails,
 } from '../src/dispatch.ts';
 import type { HeadsSnapshot } from '../src/detect-heads.ts';
+import { status } from '../src/status.ts';
 import { buildWorkerPrompt } from '../src/build-worker-prompt.ts';
 import { activeCooldown, recordCooldown } from '../src/vendor-cooldown.ts';
 
@@ -3309,5 +3312,237 @@ describe('resume vendor ownership and downgrade ledger events (issue #26)', () =
     const downgraded = ledger(f).find((entry) => entry.event === 'delivery_downgraded');
     assert.equal(downgraded?.reason, 'session_vendor_unknown');
     assert.equal(downgraded?.task_id, 'task-a');
+  });
+});
+
+// Issue #40: an amendment is a required fix, not an audit. A worker dispatched
+// on an amended spec that re-reads the ORIGINAL acceptance criteria, decides
+// nothing needs changing and exits 0 leaves HEAD exactly where it started —
+// and used to be recorded as a plain `agent_exited`, i.e. `completed`.
+describe('amendment no-op gate (issue #40)', () => {
+  before(() => mkdirSync(TEST_TMP, { recursive: true }));
+  after(() => rmSync(TEST_TMP, { recursive: true, force: true }));
+
+  const HEAD_BEFORE = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const HEAD_AFTER = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+
+  /** Turn a fixture spec into an amended one (what amend-task writes). */
+  function amend(f: Fixture, deliveredVia = 'restart'): void {
+    appendFileSync(f.taskSpecPath, [
+      'supersedes: 1',
+      'amendment_reason: Fix the blocking findings from the recorded verdicts.',
+      `delivered_via: ${deliveredVia}`,
+      '',
+    ].join('\n'));
+  }
+
+  /**
+   * Lifecycle events only. An amended spec always emits the issue #26
+   * revision-evidence bookkeeping too; it is orthogonal to this gate.
+   */
+  function lifecycle(f: Fixture): string[] {
+    return ledger(f)
+      .map(({ event }) => event)
+      .filter((event) => !event.startsWith('revision_evidence_'));
+  }
+
+  function eventNamed(f: Fixture, name: string): Record<string, string> | undefined {
+    return ledger(f).find((entry) => entry.event === name);
+  }
+
+  /**
+   * Fake `git rev-parse HEAD` that answers with `heads[n]` on the n-th call
+   * (the last value repeats). A value of THROW makes the git call itself fail,
+   * which is the fail-open path. Any other command is a test failure.
+   */
+  const THROW = Symbol('git failure');
+  function gitHeads(...heads: Array<string | typeof THROW>): {
+    run: ExecFileSyncLike;
+    calls: string[][];
+  } {
+    const calls: string[][] = [];
+    const run: ExecFileSyncLike = (file, args) => {
+      calls.push([file, ...args]);
+      if (file !== 'git' || args[0] !== 'rev-parse' || args[1] !== 'HEAD') {
+        throw new Error(`external command execution was not expected: ${file} ${args.join(' ')}`);
+      }
+      const head = heads[Math.min(calls.length - 1, heads.length - 1)];
+      if (head === THROW) throw new Error('fatal: not a git repository');
+      return `${head}\n`;
+    };
+    return { run, calls };
+  }
+
+  it('records amendment_noop and a failed status when an amended worker exits 0 without committing', async () => {
+    const f = fixture(runId(), { specVersion: 2 });
+    amend(f);
+    const git = gitHeads(HEAD_BEFORE);
+    const mock = fakeSpawn();
+
+    const { output } = await captureStderr(() => captureStdout(() => dispatch(
+      f.runId, 'task-a', injectedOptions(f, mock.spawn, { execFileSync: git.run }),
+    )));
+
+    assert.deepEqual(lifecycle(f), ['task_started', 'agent_exited', 'amendment_noop']);
+    // The worker process really did exit 0 — that is the whole point.
+    assert.equal(eventNamed(f, 'agent_exited')?.exit_code, '0');
+    const noop = eventNamed(f, 'amendment_noop') ?? {};
+    assert.deepEqual(
+      {
+        task_id: noop.task_id,
+        vendor: noop.vendor,
+        spec_version: noop.spec_version,
+        delivered_via: noop.delivered_via,
+        head: noop.head,
+        exit_code: noop.exit_code,
+      },
+      {
+        task_id: 'task-a',
+        vendor: 'claude',
+        spec_version: '2',
+        delivered_via: 'restart',
+        head: HEAD_BEFORE,
+        exit_code: '0',
+      },
+    );
+    assert.match(
+      output,
+      /hydra: FAILED \[task-a\]: spec v2 amendment produced no commits \(HEAD a{40} unchanged\)\. An amendment is a required fix, not an audit\./,
+    );
+    // HEAD is sampled once before the spawn and once at the terminal event.
+    assert.equal(git.calls.length, 2);
+    assert.deepEqual(git.calls[0], ['git', 'rev-parse', 'HEAD']);
+
+    // End to end: the terminal status an operator reads is failed, not completed.
+    const reported = status(f.runId, 'task-a', { stateRoot: f.stateRoot });
+    assert.equal(reported.state, 'failed');
+    assert.equal(reported.amendment_noop?.head, HEAD_BEFORE);
+  });
+
+  it('records an amended dispatch that DID move HEAD exactly as today', async () => {
+    const f = fixture(runId(), { specVersion: 2 });
+    amend(f, 'resume');
+    const git = gitHeads(HEAD_BEFORE, HEAD_AFTER);
+    const mock = fakeSpawn();
+
+    await captureStderr(() => captureStdout(() => dispatch(
+      f.runId, 'task-a', injectedOptions(f, mock.spawn, { execFileSync: git.run }),
+    )));
+
+    assert.deepEqual(lifecycle(f), ['task_started', 'agent_exited']);
+    assert.equal(eventNamed(f, 'agent_exited')?.exit_code, '0');
+    assert.equal(status(f.runId, 'task-a', { stateRoot: f.stateRoot }).state, 'completed');
+  });
+
+  it('never probes git and never gates a first-attempt (spec_version 1) dispatch', async () => {
+    const f = fixture(runId());
+    const git = gitHeads(HEAD_BEFORE);
+    const mock = fakeSpawn();
+
+    await captureStdout(() => dispatch(
+      f.runId, 'task-a', injectedOptions(f, mock.spawn, { execFileSync: git.run }),
+    ));
+
+    assert.deepEqual(ledger(f).map(({ event }) => event), ['task_started', 'agent_exited']);
+    assert.deepEqual(git.calls, [], 'a first attempt must not run the HEAD comparison at all');
+    assert.equal(status(f.runId, 'task-a', { stateRoot: f.stateRoot }).state, 'completed');
+  });
+
+  it('does not gate an amended spec that carries no delivered_via', async () => {
+    const f = fixture(runId(), { specVersion: 2 });
+    appendFileSync(f.taskSpecPath, 'supersedes: 1\namendment_reason: r\n');
+    const git = gitHeads(HEAD_BEFORE);
+    const mock = fakeSpawn();
+
+    await captureStderr(() => captureStdout(() => dispatch(
+      f.runId, 'task-a', injectedOptions(f, mock.spawn, { execFileSync: git.run }),
+    )));
+
+    assert.deepEqual(lifecycle(f), ['task_started', 'agent_exited']);
+    assert.deepEqual(git.calls, []);
+  });
+
+  it('fails open with a warning when the pre-spawn HEAD read errors', async () => {
+    const f = fixture(runId(), { specVersion: 2 });
+    amend(f);
+    const git = gitHeads(THROW);
+    const mock = fakeSpawn();
+
+    const { output } = await captureStderr(() => captureStdout(() => dispatch(
+      f.runId, 'task-a', injectedOptions(f, mock.spawn, { execFileSync: git.run }),
+    )));
+
+    assert.deepEqual(lifecycle(f), ['task_started', 'agent_exited']);
+    assert.match(output, /could not read the worktree HEAD for amended task 'task-a'/);
+    // The failed pre-spawn read disables the comparison; no second probe runs.
+    assert.equal(git.calls.length, 1);
+    assert.equal(status(f.runId, 'task-a', { stateRoot: f.stateRoot }).state, 'completed');
+  });
+
+  it('fails open with a warning when the HEAD re-read at exit errors', async () => {
+    const f = fixture(runId(), { specVersion: 2 });
+    amend(f);
+    const git = gitHeads(HEAD_BEFORE, THROW);
+    const mock = fakeSpawn();
+
+    const { output } = await captureStderr(() => captureStdout(() => dispatch(
+      f.runId, 'task-a', injectedOptions(f, mock.spawn, { execFileSync: git.run }),
+    )));
+
+    assert.deepEqual(lifecycle(f), ['task_started', 'agent_exited']);
+    assert.match(output, /could not re-read the worktree HEAD for amended task 'task-a' at exit/);
+    assert.equal(readFileSync(join(f.sessionsDir, `${f.runId}-task-a-v2.exit`), 'utf8'), '0');
+    assert.equal(status(f.runId, 'task-a', { stateRoot: f.stateRoot }).state, 'completed');
+  });
+
+  it('fails open when git answers with unparseable output', async () => {
+    const f = fixture(runId(), { specVersion: 2 });
+    amend(f);
+    const git = gitHeads('HEAD is not a sha');
+    const mock = fakeSpawn();
+
+    await captureStderr(() => captureStdout(() => dispatch(
+      f.runId, 'task-a', injectedOptions(f, mock.spawn, { execFileSync: git.run }),
+    )));
+
+    assert.deepEqual(lifecycle(f), ['task_started', 'agent_exited']);
+  });
+
+  it('leaves a non-agent_exited terminal event (timeout) unqualified', async () => {
+    const f = fixture(runId(), { specVersion: 2, timeoutMinutes: 1 });
+    amend(f);
+    const git = gitHeads(HEAD_BEFORE);
+    const mock = fakeSpawn({ autoExit: false });
+    const clock = new StepClock();
+
+    await captureStderr(() => captureStdout(() => dispatch(
+      f.runId, 'task-a', injectedOptions(f, mock.spawn, { execFileSync: git.run, clock }),
+    )));
+
+    assert.deepEqual(lifecycle(f), ['task_started', 'agent_timed_out']);
+    assert.equal(status(f.runId, 'task-a', { stateRoot: f.stateRoot }).state, 'timed_out');
+  });
+
+  it('detectAmendmentNoop and buildAmendmentGate fail open on every unusable input', () => {
+    const runOk: ExecFileSyncLike = () => `${HEAD_BEFORE}\n`;
+    assert.equal(detectAmendmentNoop(undefined, 'task-a'), null);
+
+    const firstAttempt = buildAmendmentGate({
+      specVersion: '1', deliveredVia: '', worktree: '/nowhere', taskId: 'task-a', run: runOk,
+    });
+    assert.equal(firstAttempt.amended, false);
+    assert.equal(firstAttempt.headBefore, null);
+    assert.equal(detectAmendmentNoop(firstAttempt, 'task-a'), null);
+
+    const amended = buildAmendmentGate({
+      specVersion: '2', deliveredVia: 'resume', worktree: '/nowhere', taskId: 'task-a', run: runOk,
+    });
+    assert.equal(amended.amended, true);
+    assert.equal(amended.headBefore, HEAD_BEFORE);
+    assert.equal(detectAmendmentNoop(amended, 'task-a'), HEAD_BEFORE);
+
+    // A reader that throws outright must still fail open, not propagate.
+    const hostile = { ...amended, readHead: () => { throw new Error('boom'); } };
+    assert.equal(detectAmendmentNoop(hostile, 'task-a'), null);
   });
 });

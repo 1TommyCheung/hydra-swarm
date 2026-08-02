@@ -36,6 +36,21 @@ export interface LoopSuspicion {
   dominant_action_hash: string;
 }
 
+/**
+ * No-op amendment detail (issue #40): present only when the dispatcher
+ * recorded `amendment_noop` for the current attempt — an amended spec whose
+ * worker exited without moving the branch HEAD. The state itself is `failed`;
+ * this block is what tells an operator WHY it is failed rather than completed.
+ */
+export interface AmendmentNoop {
+  spec_version: string;
+  delivered_via: string;
+  /** The branch HEAD that was identical before spawn and at exit. */
+  head: string;
+  /** The worker process's own exit code — typically '0', which is the point. */
+  exit_code: string;
+}
+
 export interface StatusResult {
   state: 'running' | 'completed' | 'failed' | 'cancelled' | 'timed_out' | 'usage_limited' | 'unknown';
   agent_run_id: string;
@@ -50,6 +65,7 @@ export interface StatusResult {
   } | null;
   disagreement: string | null;
   loop_suspicion: LoopSuspicion | null;
+  amendment_noop: AmendmentNoop | null;
   progress_tail: string[];
   progress_source: string | null;
   ledger_events: Array<Record<string, unknown>>;
@@ -61,7 +77,15 @@ interface TaskSpec {
   specVersion: string;
 }
 
-const TERMINAL_EVENTS = ['agent_exited', 'agent_cancelled', 'agent_timed_out', 'agent_usage_limited'];
+const TERMINAL_EVENTS = [
+  'agent_exited',
+  'agent_cancelled',
+  'agent_timed_out',
+  'agent_usage_limited',
+  // Issue #40: appended immediately after `agent_exited` when an amended
+  // dispatch moved no commits — it is the LAST word on that attempt.
+  'amendment_noop',
+];
 
 // Grace window after task_started before we treat a missing dispatch pidfile as
 // a disagreement. task_started is appended before the pidfile is written, and
@@ -129,6 +153,11 @@ function determineState(events: LedgerEntry[]): StatusResult['state'] {
   if (events.length === 0) return 'unknown';
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const event = events[i].event;
+    // Issue #40: a no-op amendment is a FAILED attempt even though the worker
+    // process exited 0. The dispatcher appends amendment_noop right after the
+    // agent_exited it qualifies, so this backwards scan reaches it first and
+    // the pair reads as failed, never completed.
+    if (event === 'amendment_noop') return 'failed';
     if (event === 'agent_exited') {
       // A pane worker that vanished without writing its exit sentinel is
       // recorded as agent_exited but must not be reported as a clean success.
@@ -150,6 +179,7 @@ const LOOP_TERMINAL_EVENTS = new Set([
   'agent_cancelled',
   'agent_timed_out',
   'agent_usage_limited',
+  'amendment_noop',
 ]);
 
 function deriveLoopSuspicion(events: LedgerEntry[]): LoopSuspicion | null {
@@ -166,6 +196,30 @@ function deriveLoopSuspicion(events: LedgerEntry[]): LoopSuspicion | null {
       };
     }
     return null;
+  }
+  return null;
+}
+
+/**
+ * Issue #40: surface the no-op amendment as its own block so `failed` here is
+ * never confused with a worker that failed on its own terms. Reads the last
+ * amendment_noop of the current attempt; absent it, null.
+ */
+function deriveAmendmentNoop(events: LedgerEntry[]): AmendmentNoop | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    if (events[i].event !== 'amendment_noop') continue;
+    const entry = events[i];
+    const text = (key: string): string => {
+      const value = entry[key];
+      if (typeof value === 'string') return value;
+      return typeof value === 'number' ? String(value) : '';
+    };
+    return {
+      spec_version: text('spec_version'),
+      delivered_via: text('delivered_via'),
+      head: text('head'),
+      exit_code: text('exit_code'),
+    };
   }
   return null;
 }
@@ -357,6 +411,15 @@ function renderHuman(result: StatusResult): string {
     lines.push(`loop_suspicion: ${status} since ${since} (hash=${dominant_action_hash})`);
   }
 
+  if (result.amendment_noop) {
+    const { spec_version, head, exit_code, delivered_via } = result.amendment_noop;
+    lines.push(
+      `amendment_noop: spec v${spec_version} amendment produced no commits `
+        + `(HEAD ${head} unchanged, delivered_via=${delivered_via}, worker exit_code=${exit_code}). `
+        + 'An amendment is a required fix, not an audit.',
+    );
+  }
+
   if (result.state === 'usage_limited') {
     const terminal = [...result.ledger_events].reverse()
       .find((entry) => entry.event === 'agent_usage_limited');
@@ -475,6 +538,7 @@ export function status(
     queuedDiscovery,
   );
   const loopSuspicion = deriveLoopSuspicion(attemptEvents);
+  const amendmentNoop = deriveAmendmentNoop(attemptEvents);
 
   const lines = options.lines ?? 20;
   const { tail: progressTail, source: progressSource } = gatherProgressTail(
@@ -496,6 +560,7 @@ export function status(
     dispatch_liveness: liveness,
     disagreement,
     loop_suspicion: loopSuspicion,
+    amendment_noop: amendmentNoop,
     progress_tail: progressTail,
     progress_source: progressSource,
     ledger_events: lastEvents as Array<Record<string, unknown>>,
