@@ -1,6 +1,6 @@
 # Hydra-Swarm
 
-**v0.6.8.3** · A local multi-agent development harness. A lead (Claude Code)
+**v0.6.8.4** · A local multi-agent development harness. A lead (Claude Code)
 plans, dispatches, and judges; a deterministic harness owns state, process
 launch, and verification. Four vendor heads — **Claude**, **Codex**,
 **OpenCode/GLM**, and **Kimi** — implement tasks in isolated Git worktrees.
@@ -20,7 +20,13 @@ human-authorized.
 > gc` + `hydra run-log` worktree-lifecycle pair are done. 0.6.8.3 hardened
 > the revise loop and the truth of record: file-first revision evidence,
 > append-only review provenance, unique dispatch-attempt identity, Claude
-> API-error truth, and bounded prompt/review-store hardening (see
+> API-error truth, and bounded prompt/review-store hardening. 0.6.8.4 closed
+> a batch of trust-boundary and vendor-parity gaps found operating the
+> harness on itself: squash/integrate now refuse a stale promoted head or a
+> no-op amendment, Codex and OpenCode gained real session resume, worker
+> model/version/effort is recorded and pinnable, `integrate` supports
+> incremental multi-call runs and an explicit `--onto` target, and the
+> vendor usage-limit cooldown is provider-granular for OpenCode (see
 > [CHANGELOG.md](CHANGELOG.md) for the 0.6.x releases). The remaining
 > packaging work (kit extraction, `hydra-init` scaffolding, global ledger,
 > bundle export/import) is still design-only — see `docs/roadmap.md`.

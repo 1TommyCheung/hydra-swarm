@@ -188,15 +188,20 @@ read-only.
 directly in the same herdr pane (the decoupled monitor-pane split is a
 full-worker-dispatch behavior only), with the same live tails/heartbeat.
 
-**Termination.** Vendor exit. The review timeout
-(`HYDRA_REVIEW_TIMEOUT_MIN`, default 15 minutes) applies to the
+**Termination.** Vendor exit. The review wall-clock timeout
+(`HYDRA_REVIEW_TIMEOUT_MIN`, default 30 minutes, v0.6.8.4) applies to the
 **pane-hosted path only** (a polling loop that kills the reviewer's process
 tree when the sentinel hasn't appeared); the inline no-pane fallback runs
 the vendor synchronously with **no timeout** and blocks until it exits.
-Raise the timeout for deep analysis briefs — a timeout kill discards the
-verdict, though whatever raw output streamed before the kill remains in
-`sessions/<review_id>.<vendor>.raw` (and the extracted `.md` may hold a
-partial answer).
+An inactivity watchdog (`HYDRA_REVIEW_STALL_MIN`, default 3 minutes,
+v0.6.8.4) separately kills a reviewer whose output has stopped growing —
+disabled for Claude's non-streaming `--output-format json` mode, where
+byte-growth tracking doesn't apply. A kill records a `review_timed_out`
+event with reason `stalled` or `wall_clock` instead of an ambiguous
+`review_completed exit_code:"?"`. Raise either timeout for deep analysis
+briefs — a timeout kill discards the verdict, though whatever raw output
+streamed before the kill remains in `sessions/<review_id>.<vendor>.raw`
+(and the extracted `.md` may hold a partial answer).
 
 **Failure modes.** Argument/id validation dies before dispatch; a timed-out
 or crashed reviewer leaves `review_completed` with a nonzero/`?` exit code

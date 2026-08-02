@@ -3,7 +3,7 @@
 > **Dev notes:** vendor design/review/spike artifacts referenced below (`bun-migration-*`, `*-design-*`, `*-review-*`, `license-research-*`, `doc-audit-*`) live in the machine-local, gitignored `docs/dev-notes/` — production users do not need them; recover from git history pre-split if absent.
 
 
-**Status:** v0.6.8.3 (2026-07-21). Waves 0–2 delivered; the post-Wave-2
+**Status:** v0.6.8.4 (2026-08-02). Waves 0–2 delivered; the post-Wave-2
 hardening (Bun single-binary migration, bash lane retirement, head
 auto-detection, GitHub Releases binary distribution, and the `hydra gc` +
 `hydra run-log` worktree-lifecycle pair) shipped across the 0.6.x–0.6.x
@@ -458,6 +458,71 @@ the tracked verification policy default is unchanged.
   published through one artifact fan-in job. `fetch-bin.sh` remains
   Unix-only (Windows: WSL, or manual `.exe` + manifest download).
 - New authoritative mode reference: `docs/dispatch-modes.md`.
+
+### Trust-boundary and vendor-parity hardening (v0.6.8.4) · 2026-08-02
+
+A batch of gaps found operating the harness on itself, triaged from 14 open
+issues via a five-way independent review (Codex, Kimi, OpenCode, and Opus 5 /
+Sonnet 5 subagents) into a dependency-ordered, effort/impact-weighted
+sequence and executed across four batches. Every lane was cross-vendor
+reviewed (Kimi + Codex, then Kimi + OpenCode after Codex hit a usage-limit
+exhaustion mid-run) before integration.
+
+- **Stale-base guard for squash/integrate (#39):** `squash` refuses a
+  promoted head that has drifted from the branch tip it staged against
+  unless `--accept-new-commits` is passed; divergence is a hard error.
+  `integrate` asserts every squash record it consumes is fresh for the
+  whole run before touching the integration worktree.
+- **No-op amendment detection (#40):** `dispatch` compares HEAD before and
+  after an amended dispatch; a no-op amendment now terminates `failed` with
+  a `amendment_noop`-family ledger event instead of reporting `completed`.
+- **Incremental `integrate` + explicit `--onto` (#22):** `integrate` no
+  longer always recreates its worktree fresh from `run.yaml`'s frozen
+  `base_commit`. A new `inspectIntegrationWorktree()` classifies an existing
+  worktree as absent/reusable/unusable (branch ref, in-progress sequencer
+  ref, dirty tree), and a new `--onto <commit>` flag lets an operator target
+  a specific base for multi-call incremental runs.
+- **Codex + OpenCode session resume (#33):** both adapters gained a real
+  `resume` verb using vendor-verified mechanisms (`codex exec resume
+  [SESSION_ID] [PROMPT]`, `opencode run -s <id>`) instead of silently
+  downgrading to a fresh session; `COMPILED_ADAPTERS` now declares resume
+  support for both.
+- **Worker model/version/effort provenance (#42):** every attempt across all
+  four vendors records resolved model, provider, CLI version, effort, and a
+  per-field pin-vs-default/config/probe source classification
+  (`worker_model_resolved` ledger event + promoted-result fields), fixing
+  several rounds of provider-attribution edge cases (pin, state-config
+  override, null-model-orphan-provider).
+- **`status`/`wait-task` terminal-state fidelity (#41):** `status` gained
+  explicit `terminal_event`/`terminal_exit_code`/`terminal_reason`/
+  `attempt_event_count` fields derived from the full attempt-window scan
+  (not the truncated display tail), and a new `wait-task`/`wait-run` pair
+  blocks on those fields instead of polling ad hoc.
+- **Provider-granular vendor cooldown (#25):** a usage-limit cooldown now
+  matches on `(vendor, provider)` instead of bare vendor, so an OpenCode/GLM
+  cooldown no longer blocks an OpenCode/OpenRouter fallback path.
+- **Ownership-audit symlink-escape coverage (#43, guarded):** a wider
+  gitignore-inclusive scan catches a gitignored symlink escaping the
+  worktree, with a follow-up fix (`insideVendorDir()`) to avoid a false
+  positive on ordinary `node_modules/.bin/*` symlinks from a plain package
+  install.
+- **Bootstrap + verification-claim hardening (#38):** a failed `pnpm
+  install` in bootstrap no longer gets silently swallowed by `|| true`; the
+  installed-vs-dev-checkout bootstrap-policy resolution mirrors
+  `kitAssetPath()`'s existing order; `promote` now discloses (never blocks
+  on) a mandated verification command the worker's claims don't cover.
+- **Review-lane hardening (#28-E1, #36, #37):** tolerant per-line JSONL
+  parsing, a full ECMA-48 ANSI-stripping pass, an inactivity watchdog with a
+  new `review_timed_out` terminal event (`stalled` vs `wall_clock`), and the
+  default review timeout raised 15 → 30 minutes.
+- **Code-graph-aware review reading strategy (#28-E2):** `detect-heads`
+  probes each vendor for an active code-intelligence MCP server
+  (`gitnexus`); `review-dispatch` prepends a batched-reading strategy
+  preamble only for a vendor explicitly known to lack one — advisory only,
+  never auto-routed.
+- **`.kimi-plugin/plugin.json` (#35):** a Kimi-facing plugin manifest
+  mirroring `.claude-plugin/plugin.json`, closing a parity gap that left
+  Kimi without discoverable plugin metadata.
 
 ### Wave 3 preflight tooling — first real artifact · 2026-07-13
 

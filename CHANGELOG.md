@@ -15,7 +15,99 @@ run-by-run evidence) lives in `docs/roadmap.md`.
 > minor bumps overstated the changes. Content is identical; the superseded
 > tags/releases were retired and v0.6.8 republished.
 
-## [0.6.8.3] — 2026-07-21
+## [0.6.8.4] — 2026-08-02
+
+Runs 0063–0067 (Batches A–D): trust-boundary and vendor-parity gaps found
+operating the harness on itself, triaged from 14 open issues via a five-way
+independent review (Codex, Kimi, OpenCode, and Opus 5 / Sonnet 5 subagents)
+into a dependency-ordered, effort/impact-weighted sequence. Every lane was
+cross-vendor reviewed (Kimi + Codex, then Kimi + OpenCode after Codex hit a
+usage-limit exhaustion mid-run — substitution confirmed with the operator,
+never auto-applied) before integration. Closes issues #22, #25, #28, #33,
+#35, #36, #37, #38, #39, #40, #41, #42; partially addresses #43 (guard
+landed, comment-only).
+
+### Added
+- **Codex + OpenCode session resume** (#33): both adapters gained a real
+  `resume` verb using vendor-verified mechanisms — `codex exec resume
+  [SESSION_ID] [PROMPT]` (not the interactive-picker `codex resume`), and
+  `opencode run -s <id>` (not `--fork`, which would branch away from
+  reviewed history). `COMPILED_ADAPTERS` now declares resume support for
+  both.
+- **Worker model/version/effort provenance** (#42): every attempt across
+  all four vendors records resolved model, provider, CLI version, effort,
+  and a per-field pin/config/probe source classification
+  (`worker_model_resolved` ledger event + promoted-result fields), fixing
+  several rounds of provider-attribution edge cases uncovered in review
+  (pin, state-config override, null-model-orphan-provider).
+- **`integrate --onto` + incremental runs** (#22): `integrate` no longer
+  always recreates its worktree fresh from `run.yaml`'s frozen
+  `base_commit`. A new `inspectIntegrationWorktree()` classifies an
+  existing worktree as absent/reusable/unusable (branch ref, in-progress
+  sequencer ref, dirty tree), and a new `--onto <commit>` flag lets an
+  operator target a specific base for multi-call incremental runs.
+- **`wait-task` / `wait-run`** (#41): new commands that block on
+  ledger-authoritative terminal state instead of ad hoc polling, backed by
+  new explicit `terminal_event`/`terminal_exit_code`/`terminal_reason`/
+  `attempt_event_count` fields on `status`'s output (derived from the full
+  attempt-window scan, not the truncated display tail) and an exported
+  `SUCCESS_TERMINAL_EVENT` constant.
+- **Provider-granular vendor usage-limit cooldown** (#25): a cooldown now
+  matches on `(vendor, provider)` with OR-with-unscoped-entries semantics,
+  so an OpenCode/GLM cooldown no longer blocks an OpenCode/OpenRouter
+  fallback path, and a bare-vendor query still matches any cooldown for
+  that vendor.
+- **Code-graph-aware review reading strategy** (#28-E2): `detect-heads`
+  probes each vendor for an active code-intelligence MCP server
+  (`gitnexus`, via `~/.codex/config.toml`, `~/.claude.json`, or
+  `~/.config/opencode/opencode.{jsonc,json}`); `review-dispatch` prepends a
+  batched-reading strategy preamble only for a vendor explicitly known to
+  lack one. Advisory only — no auto-routing, `allocate.ts` unchanged.
+- **`.kimi-plugin/plugin.json`** (#35): a Kimi-facing plugin manifest
+  mirroring `.claude-plugin/plugin.json`'s name/version/description, closing
+  a discoverability parity gap.
+
+### Fixed
+- **Stale-base guard for squash/integrate** (#39): `squash` refuses a
+  promoted head that has drifted from the branch tip it staged against
+  unless `--accept-new-commits` is passed (divergence is a hard error);
+  `integrate` asserts every squash record it consumes is fresh for the
+  whole run before touching the integration worktree
+  (`assertSquashRecordsAreFresh()`).
+- **No-op amendment detection** (#40): `dispatch` compares HEAD before and
+  after an amended dispatch; a no-op amendment now terminates `failed` with
+  a new `amendment_noop`-family ledger event instead of silently reporting
+  `completed`.
+- **Ownership-audit symlink-escape coverage** (#43, guarded): a wider
+  gitignore-inclusive `git ls-files --others` scan feeds the symlink-escape
+  loop, catching a gitignored symlink (e.g. `node_modules`) escaping the
+  worktree. A same-run follow-up (`insideVendorDir()` /
+  `VENDOR_DIR_NAMES`) fixed a false positive the wider scan introduced on
+  ordinary `node_modules/.bin/*` symlinks from a plain package install.
+- **Bootstrap install-failure swallowing** (#38): a failed `pnpm install`
+  in bootstrap is no longer silently swallowed by `|| true`; the
+  installed-vs-dev-checkout bootstrap-policy resolution now mirrors
+  `kitAssetPath()`'s existing order, and a post-bootstrap check fails
+  loudly if a lockfile is present but `node_modules` is missing.
+  `runBootstrapSteps()` now preserves phase/step/error diagnostics instead
+  of collapsing a real command failure to `false`.
+- **Mandated-verification disclosure** (#38): `promote` now discloses
+  (never blocks on) a mandated verification command the worker's claims
+  don't literally cover, via a command-boundary-aware matcher (fixing a
+  substring false-positive like "echo pnpm test" counting as running
+  "pnpm test") and new `mandated_verification_missing` /
+  `verification_policy_placeholder` detection.
+- **Review-lane hardening** (#28-E1, #36, #37): tolerant per-line JSONL
+  parsing (a malformed line no longer aborts the whole parse), a full
+  ECMA-48 ANSI-stripping pass (CSI 7-/8-bit forms, control strings, nF
+  sequences, bare C1 bytes, dangling ESC), a new inactivity watchdog
+  (byte-size activity tracking, disabled for Claude's non-streaming mode),
+  a new `review_agent_fallback` detection event, and a new
+  `review_timed_out` terminal event (`stalled` vs `wall_clock`) replacing
+  an ambiguous `review_completed exit_code:"?"`. Default review timeout
+  raised 15 → 30 minutes.
+
+
 
 Runs 0057–0062: revise-loop fidelity and truth-of-record hardening,
 delivering the fixes for issues #26, #29, #30, #31, and #32. Every lane was

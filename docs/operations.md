@@ -201,7 +201,8 @@ normal operation.
 | `HYDRA_HERDR_PANES` | Host each worker/reviewer in a herdr pane (Layer-1 live monitor). Enabled by default (`1` or unset) when herdr is live; set to `0` to force headless subprocess hosting. |
 | `HYDRA_HERDR_KEEP_PANE=1` | Don't auto-close panes on completion (for inspection). |
 | `HYDRA_HERDR_PANE_RATIO` | Height ratio for spawned agent/reviewer panes (default `0.25`) — the lead console keeps the majority of the terminal. Applies to worker, reviewer, and monitor panes (v0.6.8.1). |
-| `HYDRA_REVIEW_TIMEOUT_MIN` | Harness timeout for a pane-hosted review (default 15). |
+| `HYDRA_REVIEW_TIMEOUT_MIN` | Harness wall-clock timeout for a pane-hosted review (default 30, v0.6.8.4). |
+| `HYDRA_REVIEW_STALL_MIN` | Inactivity watchdog for a pane-hosted review — kills a reviewer whose output has stopped growing (default 3; `0` disables; not applied to Claude's non-streaming mode; v0.6.8.4). |
 | `HYDRA_OPENCODE_MODEL` | e.g. `zai-coding-plan/glm-5.2` (the working id; NOT `zhipu/…`). |
 | `MOONSHOT_API_KEY` / `ANTHROPIC_API_KEY` | Graphify semantic pass (`graphify-baseline.sh`). |
 | `GRAPHIFY_KIMI_BASE_URL`, `GRAPHIFY_KIMI_MODEL`, `GRAPHIFY_KIMI_USER_AGENT` | Point Graphify's kimi backend at the coding endpoint (`https://api.kimi.com/coding/v1`, `kimi-for-coding`, `kimi-code-cli/0.23.6`). |

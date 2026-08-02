@@ -36,7 +36,7 @@ mixed-runtime use; leave it unset for normal operation.
 |---|---|---|---|---|
 | Headless invocation | `claude -p "…"` | `codex exec "…"` | `opencode run --model zai-coding-plan/glm-5.2 "…"` | `kimi -p / --prompt` |
 | Structured output | `--output-format json\|stream-json` | JSON/experimental flags | `--format json` | `--output-format` (with `--prompt` only); `--final-message-only`, `--quiet` |
-| Session resume | `--resume <id>` (id from JSON result) | `codex resume` | `run -s <id>`; `--fork` to branch | `--session/-S <id>`, `--continue/-C` |
+| Session resume | `--resume <id>` (id from JSON result) | `codex exec resume [SESSION_ID] [PROMPT]` (v0.6.8.4; bare `codex resume` is an interactive picker, never used) | `run -s <id>` (v0.6.8.4; `--fork` deliberately unused — it branches away from reviewed history) | `--session/-S <id>`, `--continue/-C` |
 | Fine tool allowlist | Yes (`--allowedTools`, rules) | Sandbox modes + config | Partial (`opencode.json` permission per agent) | **None in print mode — auto-approves** |
 | Pre/post tool hooks | Yes (PreToolUse/PostToolUse) | Yes (hooks.json via adapter) | Plugin system (weaker) | None in print mode |
 | Read-only mode | permission-mode + allowlist | sandbox read-only | agent with edit/bash deny | `--plan` (not combinable with `--prompt`) |
