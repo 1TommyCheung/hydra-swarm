@@ -667,4 +667,187 @@ describe('integrate', { concurrency: 1 }, () => {
       ),
     );
   });
+
+  // --- issue #39: squash record produced from a superseded promoted head ----
+
+  function promotedResultPath(f: Fixture, taskId: string): string {
+    return join(
+      f.stateRoot,
+      'runs',
+      `run-${f.runId}`,
+      'authoritative',
+      'results',
+      `${taskId}.json`,
+    );
+  }
+
+  function writePromotedHead(f: Fixture, taskId: string, headCommit: string): void {
+    writeFileSync(
+      promotedResultPath(f, taskId),
+      `${JSON.stringify({ claims: { head_commit: headCommit } })}\n`,
+      'utf8',
+    );
+  }
+
+  function writeSquashRecord(
+    f: Fixture,
+    taskId: string,
+    integrationCommit: string,
+    candidateHead: string,
+  ): void {
+    writeFileSync(
+      squashRecordPath(f, taskId),
+      `${JSON.stringify({
+        candidate_head: candidateHead,
+        integration_commit: integrationCommit,
+        source_commits: [candidateHead],
+      })}\n`,
+      'utf8',
+    );
+  }
+
+  it('refuses a squash record whose candidate_head is not the promoted head', async () => {
+    const fixture = initRepoWithTasks('stale-squash-record', [
+      { id: 'alpha', files: { 'alpha.txt': 'alpha\n' } },
+    ]);
+    const f = setupState(fixture, 'stale-squash-record', ['alpha']);
+    const staleHead = fixture.taskCommits.alpha;
+    writeSquashRecord(f, 'alpha', staleHead, staleHead);
+    // The task was re-promoted after an amendment: the authoritative result
+    // now names a head the squash record knows nothing about.
+    const amendedHead = 'a'.repeat(40);
+    writePromotedHead(f, 'alpha', amendedHead);
+
+    await assert.rejects(
+      () =>
+        integrate(f.runId, ['alpha'], {
+          cwd: fixture.repoPath,
+          stateRoot: f.stateRoot,
+          worktreeRoot: f.worktreeRoot,
+          verify: async () => true,
+        }),
+      (error: unknown) => {
+        assert.ok(hasExitCode(error, 1, /stale squash record for alpha/));
+        const message = (error as IntegrationError).message;
+        assert.ok(message.includes(staleHead), 'names the recorded candidate head');
+        assert.ok(message.includes(amendedHead), 'names the current promoted head');
+        assert.match(message, /re-run squash/i);
+        return true;
+      },
+    );
+
+    // Refused as a precondition: the integration worktree and branch were
+    // never created, so the remedy the message gives (re-squash, re-run
+    // integrate) works as written instead of tripping over its own debris.
+    const wt = join(f.worktreeRoot, `run-${f.runId}-integration`);
+    assert.equal(existsSync(wt), false, 'leaves no integration worktree behind');
+    assert.equal(
+      git(fixture.repoPath, ['branch', '--list', `hydra-integration/${f.runId}`]),
+      '',
+      'leaves no integration branch behind',
+    );
+    assert.equal(existsSync(join(wt, 'alpha.txt')), false);
+    const events = readLedger(f.stateRoot, f.runId);
+    assert.equal(
+      events.some((event) => event.event === 'candidate_integrated'),
+      false,
+    );
+    assert.equal(
+      events.some((event) => event.event === 'integration_started'),
+      false,
+      'refuses before the run is marked started',
+    );
+  });
+
+  it('integrates on the retry after the refused record is re-squashed', async () => {
+    const fixture = initRepoWithTasks('stale-then-resquash', [
+      { id: 'alpha', files: { 'alpha.txt': 'alpha\n' } },
+    ]);
+    const f = setupState(fixture, 'stale-then-resquash', ['alpha']);
+    const head = fixture.taskCommits.alpha;
+    writeSquashRecord(f, 'alpha', head, 'c'.repeat(40));
+    writePromotedHead(f, 'alpha', head);
+
+    await assert.rejects(
+      () =>
+        integrate(f.runId, ['alpha'], {
+          cwd: fixture.repoPath,
+          stateRoot: f.stateRoot,
+          worktreeRoot: f.worktreeRoot,
+          verify: async () => true,
+        }),
+      (error: unknown) => hasExitCode(error, 1, /stale squash record for alpha/),
+    );
+
+    // The operator does exactly what the message says — re-squash — and
+    // re-runs integrate. No manual worktree/branch cleanup in between.
+    writeSquashRecord(f, 'alpha', head, head);
+
+    const integrated = await integrate(f.runId, ['alpha'], {
+      cwd: fixture.repoPath,
+      stateRoot: f.stateRoot,
+      worktreeRoot: f.worktreeRoot,
+      verify: async () => true,
+    });
+
+    assert.match(integrated, /^[0-9a-f]{40}$/);
+    assert.ok(existsSync(join(f.worktreeRoot, `run-${f.runId}-integration`, 'alpha.txt')));
+  });
+
+  it('integrates when the squash record matches the current promoted head', async () => {
+    const fixture = initRepoWithTasks('fresh-squash-record', [
+      { id: 'alpha', files: { 'alpha.txt': 'alpha\n' } },
+    ]);
+    const f = setupState(fixture, 'fresh-squash-record', ['alpha']);
+    const head = fixture.taskCommits.alpha;
+    writeSquashRecord(f, 'alpha', head, head);
+    writePromotedHead(f, 'alpha', head);
+
+    const integrated = await integrate(f.runId, ['alpha'], {
+      cwd: fixture.repoPath,
+      stateRoot: f.stateRoot,
+      worktreeRoot: f.worktreeRoot,
+      verify: async () => true,
+    });
+
+    assert.match(integrated, /^[0-9a-f]{40}$/);
+    assert.ok(existsSync(join(f.worktreeRoot, `run-${f.runId}-integration`, 'alpha.txt')));
+  });
+
+  it('accepts an abbreviated promoted head that resolves to the recorded head', async () => {
+    const fixture = initRepoWithTasks('abbrev-promoted-head', [
+      { id: 'alpha', files: { 'alpha.txt': 'alpha\n' } },
+    ]);
+    const f = setupState(fixture, 'abbrev-promoted-head', ['alpha']);
+    const head = fixture.taskCommits.alpha;
+    writeSquashRecord(f, 'alpha', head, head);
+    writePromotedHead(f, 'alpha', head.slice(0, 12));
+
+    await integrate(f.runId, ['alpha'], {
+      cwd: fixture.repoPath,
+      stateRoot: f.stateRoot,
+      worktreeRoot: f.worktreeRoot,
+      verify: async () => true,
+    });
+
+    assert.ok(existsSync(join(f.worktreeRoot, `run-${f.runId}-integration`, 'alpha.txt')));
+  });
+
+  it('integrates a legacy record with no candidate_head, unchecked', async () => {
+    const fixture = initRepoWithTasks('legacy-squash-record', [
+      { id: 'alpha', files: { 'alpha.txt': 'alpha\n' } },
+    ]);
+    // setupState writes the historical record shape: integration_commit only.
+    const f = setupState(fixture, 'legacy-squash-record', ['alpha']);
+    writePromotedHead(f, 'alpha', 'b'.repeat(40));
+
+    await integrate(f.runId, ['alpha'], {
+      cwd: fixture.repoPath,
+      stateRoot: f.stateRoot,
+      worktreeRoot: f.worktreeRoot,
+      verify: async () => true,
+    });
+
+    assert.ok(existsSync(join(f.worktreeRoot, `run-${f.runId}-integration`, 'alpha.txt')));
+  });
 });

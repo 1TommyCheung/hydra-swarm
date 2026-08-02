@@ -91,6 +91,135 @@ function git(
   }).trim();
 }
 
+/** Resolve a revision to a full commit SHA, or '' when it cannot be resolved. */
+function resolveCommit(
+  execFn: ExecFunction,
+  cwd: string,
+  rev: string,
+): string {
+  try {
+    return git(execFn, cwd, ['rev-parse', '--verify', `${rev}^{commit}`]);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Refuse to integrate a squash record that was produced from a promoted head
+ * the authoritative result no longer names (issue #39, second half).
+ *
+ * A `<task>.squash.json` outlives an amendment just as the promoted result
+ * does. If the lead amends, re-dispatches, and re-promotes but forgets to
+ * re-squash, the stale record still cherry-picks cleanly and verifies green —
+ * shipping the pre-amendment tree while every artifact says the amendment was
+ * accepted. Comparing the record's `candidate_head` against the CURRENT
+ * promoted `claims.head_commit` closes that window.
+ *
+ * Deliberately non-fatal when the comparison cannot be made (legacy record
+ * without `candidate_head`, or no promoted result on disk): those are the
+ * inputs of hand-assembled and historical runs, and turning them into a hard
+ * failure would break integration paths that never had the field. They warn
+ * instead, so the skipped check is visible.
+ *
+ * @param cwd Any checkout of the repository — used only to resolve revisions,
+ *            which every worktree can do against the shared object store.
+ */
+function assertSquashRecordIsFresh(
+  execFn: ExecFunction,
+  cwd: string,
+  rDir: string,
+  taskId: string,
+  recordedHead: unknown,
+): void {
+  if (typeof recordedHead !== 'string' || recordedHead.trim() === '') {
+    warn(
+      `squash record for ${taskId} has no candidate_head — cannot confirm it was`
+      + ' produced from the current promoted head; integrating unchecked',
+    );
+    return;
+  }
+
+  const promotedPath = join(rDir, 'authoritative', 'results', `${taskId}.json`);
+  if (!existsSync(promotedPath)) {
+    warn(
+      `no promoted result at ${promotedPath} — cannot confirm the squash record for`
+      + ` ${taskId} is current; integrating unchecked`,
+    );
+    return;
+  }
+
+  let promotedHead: unknown;
+  try {
+    const promoted = JSON.parse(readFileSync(promotedPath, 'utf8')) as {
+      claims?: { head_commit?: unknown };
+    };
+    promotedHead = promoted?.claims?.head_commit;
+  } catch {
+    fail(`invalid promoted result for ${taskId}: malformed JSON (${promotedPath})`, 5);
+  }
+
+  if (typeof promotedHead !== 'string' || promotedHead.trim() === '') {
+    warn(
+      `promoted result for ${taskId} records no claims.head_commit — cannot confirm`
+      + ' the squash record is current; integrating unchecked',
+    );
+    return;
+  }
+
+  if (promotedHead === recordedHead) return;
+
+  // The promoted result may carry an abbreviated SHA while squash.ts always
+  // records the full one; resolve both through git before calling it a
+  // mismatch. Every worktree of the repository shares one object store, so
+  // the candidate commits are reachable from any of them.
+  const resolvedPromoted = resolveCommit(execFn, cwd, promotedHead);
+  const resolvedRecorded = resolveCommit(execFn, cwd, recordedHead);
+  if (resolvedPromoted && resolvedPromoted === resolvedRecorded) return;
+
+  fail(
+    `stale squash record for ${taskId}: it was produced from candidate head`
+    + ` ${recordedHead}, but the current promoted result names head`
+    + ` ${promotedHead}. The candidate was re-promoted (typically after an`
+    + ' amendment) without being re-squashed, so integrating this record would'
+    + ' ship the pre-amendment tree. Re-run squash.sh for this task, then re-run'
+    + ' integrate.',
+  );
+}
+
+/**
+ * Freshness precondition for the whole run, checked BEFORE the integration
+ * worktree and branch exist.
+ *
+ * Running it up front is what makes the refusal message actionable: the
+ * documented remedy is "re-run squash.sh, then re-run integrate", and a
+ * refusal that had already created `hydra-integration/<runId>` would make that
+ * second integrate die on the pre-existing worktree/branch instead (the
+ * limitation tracked as issue #22). Refusing before anything is created leaves
+ * no debris to clean up by hand.
+ *
+ * Records that are missing or unparseable are left alone here — integrateTask
+ * owns those failures and their exit codes, and duplicating them would only
+ * change which message an operator sees first.
+ */
+function assertSquashRecordsAreFresh(
+  execFn: ExecFunction,
+  cwd: string,
+  rDir: string,
+  taskIds: string[],
+): void {
+  for (const taskId of taskIds) {
+    const recordPath = join(rDir, 'authoritative', 'results', `${taskId}.squash.json`);
+    if (!existsSync(recordPath)) continue;
+    let record: { candidate_head?: unknown };
+    try {
+      record = JSON.parse(readFileSync(recordPath, 'utf8')) as { candidate_head?: unknown };
+    } catch {
+      continue;
+    }
+    assertSquashRecordIsFresh(execFn, cwd, rDir, taskId, record.candidate_head);
+  }
+}
+
 /**
  * Serialized convergence: cherry-pick accepted squashes onto an integration
  * branch with per-candidate smoke verification and a combined verification gate.
@@ -146,6 +275,12 @@ export function integrate(
       process.env.HYDRA_VERIFY_POLICY ||
       defaultVerifyPolicyPath();
     const smokePolicy = process.env.HYDRA_SMOKE_POLICY || verifyPolicy;
+
+    // Precondition, not a mid-flight discovery: a stale squash record must be
+    // rejected while the run has created nothing, so the "re-squash, re-run
+    // integrate" remedy works on the next invocation without hand-removing a
+    // stranded integration worktree/branch.
+    assertSquashRecordsAreFresh(execFn, repoRootPath, rDir, taskIds);
 
     const intBranch = `hydra-integration/${runId}`;
     const intWorktree = join(worktreeRootPath, `run-${runId}-integration`);
@@ -232,16 +367,20 @@ export function integrate(
       if (!existsSync(recordPath)) {
         fail(`no squash record for ${taskId} (run squash.sh first)`);
       }
-      let record: { integration_commit?: unknown };
+      let record: { integration_commit?: unknown; candidate_head?: unknown };
       try {
         record = JSON.parse(readFileSync(recordPath, 'utf8')) as {
           integration_commit?: unknown;
+          candidate_head?: unknown;
         };
       } catch {
         // jq exits 5 on malformed JSON, which set -e propagates in the Bash
         // implementation. Keep that observable exit while adding context.
         fail(`invalid squash record for ${taskId}: malformed JSON`, 5);
       }
+
+      // Freshness was asserted for every task before the worktree existed.
+
       // `jq -r '.integration_commit'` prints "null" for an absent or null key.
       // Preserve that value so git follows Bash's textual-conflict path.
       const integrationCommit =
