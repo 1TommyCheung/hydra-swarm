@@ -32,13 +32,25 @@ export interface IntegrateOptions {
   worktreeRoot?: string;
   exec?: ExecFunction;
   verify?: VerifyFunction;
+  /**
+   * Start the integration branch from this commit instead of run.yaml's frozen
+   * `base_commit` — and instead of an existing integration branch's tip, which
+   * is reset to it (issue #22). The supported form of the operator workaround
+   * "cherry-pick straight onto the current target".
+   */
+  onto?: string;
 }
+
+/** How the integration branch's starting point was chosen. */
+export type IntegrationBase = 'run-yaml-base' | 'existing-branch' | 'onto';
 
 function defaultVerifyPolicyPath(): string {
   // Per-project active config — resolve checkout-relative (spike §9 verdict
   // #7). HYDRA_VERIFY_POLICY keeps precedence over this default.
   return kitAssetPath('policies/verification.yaml');
 }
+
+const USAGE = 'usage: integrate.ts [--onto <commit>] <run_id> <task_id_in_order>...';
 
 export class IntegrationError extends Error {
   exitCode: number;
@@ -102,6 +114,100 @@ function resolveCommit(
   } catch {
     return '';
   }
+}
+
+/**
+ * Whether a pre-existing integration worktree can be picked up where the last
+ * `integrate` call left it.
+ *
+ * `reason` is operator-facing: it is quoted verbatim in the refusal, so it must
+ * say what is wrong, not merely that something is.
+ */
+interface IntegrationWorktreeState {
+  status: 'absent' | 'reusable' | 'unusable';
+  /** Current tip of the reusable worktree's branch. */
+  head?: string;
+  /** Why it is not reusable. */
+  reason?: string;
+}
+
+/** Pseudo-refs git leaves behind while a sequencer operation is suspended. */
+const IN_PROGRESS_REFS: Array<[ref: string, operation: string]> = [
+  ['CHERRY_PICK_HEAD', 'cherry-pick'],
+  ['MERGE_HEAD', 'merge'],
+  ['REVERT_HEAD', 'revert'],
+  ['REBASE_HEAD', 'rebase'],
+];
+
+/**
+ * Classify an existing `hydra-integration/<runId>` worktree (issue #22).
+ *
+ * Integrating tasks as they individually clear review means calling
+ * `integrate.sh` once per task, so the second call finds the worktree and
+ * branch the first one created. That is the normal case, not an error — but
+ * only when nothing is half-finished inside it. A suspended cherry-pick or an
+ * uncommitted edit is somebody's in-flight state; cherry-picking on top of it
+ * would either fail confusingly or bury it, so it is refused instead.
+ *
+ * The checks are deliberately conservative: anything that cannot be positively
+ * confirmed as "on the integration branch, no sequencer in flight, tree clean"
+ * is `unusable`, never `reusable`.
+ */
+function inspectIntegrationWorktree(
+  execFn: ExecFunction,
+  intWorktree: string,
+  intBranch: string,
+): IntegrationWorktreeState {
+  if (!existsSync(intWorktree)) return { status: 'absent' };
+
+  let checkedOut: string;
+  try {
+    checkedOut = git(execFn, intWorktree, ['symbolic-ref', '--quiet', 'HEAD']);
+  } catch {
+    return {
+      status: 'unusable',
+      reason: 'it is not a git worktree with a branch checked out'
+        + ' (detached HEAD, or not a checkout at all)',
+    };
+  }
+  if (checkedOut !== `refs/heads/${intBranch}`) {
+    return {
+      status: 'unusable',
+      reason: `it has ${checkedOut || 'an unreadable ref'} checked out, not ${intBranch}`,
+    };
+  }
+
+  for (const [ref, operation] of IN_PROGRESS_REFS) {
+    if (resolveCommit(execFn, intWorktree, ref)) {
+      return {
+        status: 'unusable',
+        reason: `a ${operation} is still in progress there (${ref} is set)`,
+      };
+    }
+  }
+
+  let dirty: string;
+  try {
+    dirty = git(execFn, intWorktree, [
+      'status',
+      '--porcelain',
+      '--untracked-files=no',
+    ]);
+  } catch {
+    return { status: 'unusable', reason: 'its git status could not be read' };
+  }
+  if (dirty) {
+    return {
+      status: 'unusable',
+      reason: 'it has uncommitted changes to tracked files',
+    };
+  }
+
+  const head = resolveCommit(execFn, intWorktree, 'HEAD');
+  if (!head) {
+    return { status: 'unusable', reason: 'its HEAD could not be resolved' };
+  }
+  return { status: 'reusable', head };
 }
 
 /**
@@ -192,10 +298,12 @@ function assertSquashRecordIsFresh(
  *
  * Running it up front is what makes the refusal message actionable: the
  * documented remedy is "re-run squash.sh, then re-run integrate", and a
- * refusal that had already created `hydra-integration/<runId>` would make that
- * second integrate die on the pre-existing worktree/branch instead (the
- * limitation tracked as issue #22). Refusing before anything is created leaves
- * no debris to clean up by hand.
+ * refusal that had already created `hydra-integration/<runId>` would leave the
+ * retry to start from that debris rather than from the intended base. Issue #22
+ * since made a clean pre-existing integration branch reusable, which raises the
+ * stakes of ordering rather than lowering them: a worktree created before the
+ * refusal would silently become the next call's starting point. Refusing before
+ * anything is created keeps that from happening.
  *
  * Records that are missing or unparseable are left alone here — integrateTask
  * owns those failures and their exit codes, and duplicating them would only
@@ -228,9 +336,16 @@ function assertSquashRecordsAreFresh(
  * success. Throws IntegrationError with exitCode 6 for textual conflicts and
  * exitCode 7 for verification failures.
  *
+ * The branch starts from, in order of precedence (issue #22):
+ *   1. `options.onto`, when given — created fresh at that commit, or an
+ *      existing integration branch reset onto it;
+ *   2. an existing `hydra-integration/<runId>`, when it is clean and idle — so
+ *      tasks can be integrated one call at a time as they clear review;
+ *   3. run.yaml's `base_commit`, frozen at run-init — the first call's base.
+ *
  * @param runId   Run identifier.
  * @param taskIds Task identifiers in dependency order.
- * @param options Optional overrides for testability.
+ * @param options Optional overrides for testability, plus `onto`.
  * @returns The final integration branch HEAD SHA.
  */
 export function integrate(
@@ -253,7 +368,7 @@ export function integrate(
 
   const runIntegration = (): string | Promise<string> => {
     if (!runId) {
-      fail('usage: integrate.ts <run_id> <task_id_in_order>...');
+      fail(USAGE);
     }
     if (!taskIds || taskIds.length === 0) {
       fail('no tasks to integrate');
@@ -285,33 +400,93 @@ export function integrate(
     const intBranch = `hydra-integration/${runId}`;
     const intWorktree = join(worktreeRootPath, `run-${runId}-integration`);
 
-    if (existsSync(intWorktree)) {
-      fail(`integration worktree already exists: ${intWorktree}`);
+    // An explicit target overrides every other choice of starting point: the
+    // frozen run.yaml base AND a reusable branch tip (which is reset to it).
+    const ontoRequested = (options.onto ?? '').trim();
+    let ontoCommit = '';
+    if (ontoRequested) {
+      ontoCommit = resolveCommit(execFn, repoRootPath, ontoRequested);
+      if (!ontoCommit) {
+        fail(`--onto commit cannot be resolved in ${repoRootPath}: ${ontoRequested}`);
+      }
     }
 
-    mkdirSync(dirname(intWorktree), { recursive: true });
+    const state = inspectIntegrationWorktree(execFn, intWorktree, intBranch);
+    if (state.status === 'unusable') {
+      // Distinct from both the plain "already exists" of a first-call collision
+      // and from a real conflict: something is half-finished in there, and only
+      // a human can say whether it matters.
+      fail(
+        `integration worktree already exists and is NOT safely reusable:`
+        + ` ${intWorktree} — ${state.reason}. Nothing was integrated. Inspect it and`
+        + ' finish or abort whatever is in flight (e.g. `git -C'
+        + ` ${intWorktree} cherry-pick --abort\`), or remove it by hand (\`git worktree`
+        + ` remove ${intWorktree}\`), then re-run integrate. This is NOT a content`
+        + ' conflict between candidates.',
+      );
+    }
 
-    try {
-      git(execFn, repoRootPath, [
-        'worktree',
-        'add',
-        '--quiet',
-        '-b',
-        intBranch,
-        intWorktree,
-        baseCommit,
-      ]);
-    } catch {
-      fail('failed to create integration worktree');
+    const branchExists = Boolean(
+      resolveCommit(execFn, repoRootPath, `refs/heads/${intBranch}`),
+    );
+
+    // Which starting point won, for the ledger and for the conflict hint: a
+    // conflict against the frozen run.yaml base is very often a base/target
+    // mismatch, while one against an explicit target or an already-integrated
+    // tip is much more likely to be a genuine content clash.
+    const baseMode: IntegrationBase = ontoCommit
+      ? 'onto'
+      : state.status === 'reusable' || branchExists
+        ? 'existing-branch'
+        : 'run-yaml-base';
+
+    let startCommit: string;
+    if (state.status === 'reusable') {
+      if (ontoCommit) {
+        try {
+          git(execFn, intWorktree, ['reset', '--hard', '--quiet', ontoCommit]);
+        } catch {
+          fail(`failed to reset ${intBranch} onto ${ontoRequested} in ${intWorktree}`);
+        }
+        startCommit = ontoCommit;
+        log(`reset ${intBranch} onto ${ontoCommit} (--onto ${ontoRequested})`);
+      } else {
+        startCommit = state.head as string;
+        log(
+          `reusing integration worktree ${intWorktree} at ${startCommit}`
+          + ` (branch ${intBranch})`,
+        );
+      }
+    } else {
+      mkdirSync(dirname(intWorktree), { recursive: true });
+      startCommit = ontoCommit || (branchExists ? '' : baseCommit);
+
+      // `-B` when a starting commit is given: it creates the branch, or resets
+      // an orphaned one from a worktree the operator removed by hand. With no
+      // starting commit the existing branch is checked out at its own tip.
+      const addArgs = startCommit
+        ? ['worktree', 'add', '--quiet', '-B', intBranch, intWorktree, startCommit]
+        : ['worktree', 'add', '--quiet', intWorktree, intBranch];
+      try {
+        git(execFn, repoRootPath, addArgs);
+      } catch {
+        fail('failed to create integration worktree');
+      }
+      if (!startCommit) {
+        startCommit = git(execFn, intWorktree, ['rev-parse', 'HEAD']);
+        log(`reusing existing integration branch ${intBranch} at ${startCommit}`);
+      }
     }
 
     ledgerAppend(
       runId,
       'integration_started',
       'base_commit',
-      baseCommit,
+      startCommit,
       'branch',
       intBranch,
+      'base_mode',
+      baseMode,
     );
 
     const finishCombinedVerification = (passed: boolean): string => {
@@ -409,6 +584,19 @@ export function integrate(
           before,
         );
         warn(`TEXTUAL CONFLICT integrating ${taskId} onto ${before} — stopped`);
+        if (baseMode === 'run-yaml-base') {
+          // The run's base_commit is frozen at run-init and never advances, so
+          // it can be many merges behind whatever this work is actually meant
+          // to land on. That mis-targeting produces the same message a genuine
+          // content clash does — say so, and give the one-line way out.
+          warn(
+            `this integration started from run.yaml's frozen base_commit ${baseCommit},`
+            + ' which may predate work already merged into the current target — the'
+            + ' conflict may be a BASE/TARGET MISMATCH rather than a real content'
+            + ' conflict. To retry against the current target:'
+            + ` integrate.sh ${runId} --onto <current-target> ${taskIds.join(' ')}`,
+          );
+        }
         throw new IntegrationError(
           `textual conflict integrating ${taskId}`,
           6,
@@ -482,9 +670,41 @@ export default {
   integrate,
 };
 
+/**
+ * Split `--onto <commit>` out of the argument list before anything positional
+ * is read, matching the minimal flag handling used by the other harness CLIs
+ * (wait-task, run-log, status): a flag consumes its value, an unknown
+ * dash-prefixed token is a usage error, everything else stays positional.
+ */
+export function parseIntegrateArgs(args: string[]): {
+  onto?: string;
+  positionals: string[];
+} {
+  const positionals: string[] = [];
+  let onto: string | undefined;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === '--onto') {
+      const value = args[index + 1];
+      if (value === undefined || value.startsWith('-')) {
+        fail(`--onto requires a commit argument. ${USAGE}`);
+      }
+      onto = value;
+      index += 1;
+    } else if (arg.startsWith('-')) {
+      fail(`unknown option ${arg}. ${USAGE}`);
+    } else {
+      positionals.push(arg);
+    }
+  }
+  return { onto, positionals };
+}
+
 export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
   try {
-    await integrate(args[0] ?? '', args.slice(1));
+    const { onto, positionals } = parseIntegrateArgs(args);
+    await integrate(positionals[0] ?? '', positionals.slice(1), onto ? { onto } : {});
     return 0;
   } catch (error) {
     const exitCode = error instanceof IntegrationError ? error.exitCode : 1;
