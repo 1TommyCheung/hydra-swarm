@@ -2,7 +2,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   KNOWN_HEADS,
   availableHeadNames,
@@ -11,6 +11,7 @@ import {
   headsFilePath,
   probeHeads,
   readHeadsFile,
+  recordedCodeGraph,
   type HeadsSnapshot,
   type ProbeExec,
 } from '../src/detect-heads.ts';
@@ -90,15 +91,22 @@ function allAvailableSnapshot(): HeadsSnapshot {
   return {
     detected_at: '2026-01-01T00:00:00Z',
     heads: {
-      claude: { available: true, path: '/usr/local/bin/claude' },
-      codex: { available: true, path: '/usr/local/bin/codex' },
+      claude: { available: true, path: '/usr/local/bin/claude', code_graph: true },
+      codex: { available: true, path: '/usr/local/bin/codex', code_graph: true },
       opencode: {
         available: true,
         path: '/usr/local/bin/opencode',
+        code_graph: false,
         models: ['zai-coding-plan/glm-5.2'],
         active_model: 'zai-coding-plan/glm-5.2',
       },
-      kimi: { available: true, path: '/usr/local/bin/kimi', srt_available: true, write_capable: true },
+      kimi: {
+        available: true,
+        path: '/usr/local/bin/kimi',
+        code_graph: false,
+        srt_available: true,
+        write_capable: true,
+      },
     },
   };
 }
@@ -131,11 +139,20 @@ describe('probeHeads', () => {
       'command -v srt',
     ]);
 
-    assert.deepEqual(snapshot.heads.claude, { available: true, path: '/usr/local/bin/claude' });
-    assert.deepEqual(snapshot.heads.codex, { available: true, path: '/opt/homebrew/bin/codex' });
+    assert.deepEqual(snapshot.heads.claude, {
+      available: true,
+      path: '/usr/local/bin/claude',
+      code_graph: false,
+    });
+    assert.deepEqual(snapshot.heads.codex, {
+      available: true,
+      path: '/opt/homebrew/bin/codex',
+      code_graph: false,
+    });
     assert.deepEqual(snapshot.heads.opencode, {
       available: false,
       path: null,
+      code_graph: false,
       models: [],
       active_model: DEFAULT_MODEL,
     });
@@ -226,6 +243,7 @@ describe('probeHeads', () => {
     assert.deepEqual(snapshot.heads.kimi, {
       available: true,
       path: '/usr/bin/kimi',
+      code_graph: false,
       srt_available: true,
       write_capable: true,
     });
@@ -279,6 +297,234 @@ describe('detectHeads', () => {
 
     writeFileSync(join(stateDir, 'wrong-shape.json'), '{"heads": "nope"}', 'utf8');
     assert.equal(readHeadsFile(join(stateDir, 'wrong-shape.json')), null);
+  });
+});
+
+describe('code-graph capability probe', () => {
+  before(() => mkdirSync(TEST_TMP, { recursive: true }));
+  after(() => {
+    cleanTmp();
+    restoreEnv();
+  });
+
+  /** All four CLIs present, so availability never masks a capability result. */
+  function allPresent(): ProbeExec {
+    return fakeExec({
+      claude: '/usr/bin/claude',
+      codex: '/usr/bin/codex',
+      opencode: '/usr/bin/opencode',
+      kimi: '/usr/bin/kimi',
+      srt: '/usr/bin/srt',
+    }).exec;
+  }
+
+  /** A fake HOME the probe reads its vendor configs out of. */
+  function makeHome(files: Record<string, string>): string {
+    const home = makeTempDir('home');
+    for (const [relative, contents] of Object.entries(files)) {
+      const target = join(home, relative);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, contents, 'utf8');
+    }
+    return home;
+  }
+
+  function probeWithHome(files: Record<string, string>): HeadsSnapshot {
+    return probeHeads({
+      exec: allPresent(),
+      stateDir: makeTempDir('state'),
+      env: { HOME: makeHome(files) },
+    });
+  }
+
+  it('records code_graph false for every head when no vendor config exists', () => {
+    const snapshot = probeWithHome({});
+    for (const name of KNOWN_HEADS) {
+      assert.equal(snapshot.heads[name].code_graph, false, `${name} should default to false`);
+    }
+  });
+
+  it('detects the codex gitnexus MCP server in ~/.codex/config.toml', () => {
+    // The exact file and TOML shape the real capability was confirmed against.
+    const snapshot = probeWithHome({
+      '.codex/config.toml': [
+        '[features]',
+        'hooks = true',
+        '',
+        '[mcp_servers.gitnexus]',
+        'command = "/usr/local/bin/gitnexus"',
+        'args = ["mcp"]',
+        '',
+      ].join('\n'),
+    });
+
+    assert.equal(snapshot.heads.codex.code_graph, true);
+    assert.equal(snapshot.heads.claude.code_graph, false);
+    assert.equal(snapshot.heads.opencode.code_graph, false);
+    assert.equal(snapshot.heads.kimi.code_graph, false);
+  });
+
+  it('accepts the quoted TOML table form for the codex server key', () => {
+    const snapshot = probeWithHome({
+      '.codex/config.toml': '[mcp_servers."gitnexus"]\ncommand = "gitnexus"\n',
+    });
+    assert.equal(snapshot.heads.codex.code_graph, true);
+  });
+
+  it('does not count a non-code-graph codex MCP server as code_graph', () => {
+    // Granularity: the field is code_graph, not "any MCP server configured".
+    // A docs or browser MCP server answers none of the symbol questions this
+    // capability exists for.
+    const snapshot = probeWithHome({
+      '.codex/config.toml': [
+        '[mcp_servers.livekit-docs]',
+        'url = "https://docs.livekit.io/mcp"',
+        '',
+        '[mcp_servers.computer-use]',
+        'command = "./computer-use"',
+        '',
+      ].join('\n'),
+    });
+    assert.equal(snapshot.heads.codex.code_graph, false);
+  });
+
+  it('ignores a commented-out codex MCP table', () => {
+    const snapshot = probeWithHome({
+      '.codex/config.toml': '# [mcp_servers.gitnexus]\n# command = "gitnexus"\n',
+    });
+    assert.equal(snapshot.heads.codex.code_graph, false);
+  });
+
+  it('detects the claude user-scope gitnexus server in ~/.claude.json', () => {
+    const snapshot = probeWithHome({
+      '.claude.json': JSON.stringify({
+        someOtherKey: 1,
+        mcpServers: {
+          gitnexus: { command: '/usr/local/bin/gitnexus', args: ['mcp'] },
+          'unity-mcp': { command: 'relay' },
+        },
+      }),
+    });
+
+    assert.equal(snapshot.heads.claude.code_graph, true);
+    assert.equal(snapshot.heads.codex.code_graph, false);
+  });
+
+  it('does not count non-code-graph claude MCP servers', () => {
+    const snapshot = probeWithHome({
+      '.claude.json': JSON.stringify({ mcpServers: { 'unity-mcp': { command: 'relay' } } }),
+    });
+    assert.equal(snapshot.heads.claude.code_graph, false);
+  });
+
+  it('detects a gitnexus server in the opencode JSONC config', () => {
+    const snapshot = probeWithHome({
+      '.config/opencode/opencode.jsonc': [
+        '{',
+        '  // opencode does have an MCP mechanism (`opencode mcp add`).',
+        '  "mcp": {',
+        '    "gitnexus": { "type": "local", "command": ["gitnexus", "mcp"] }',
+        '  }',
+        '}',
+        '',
+      ].join('\n'),
+    });
+
+    assert.equal(snapshot.heads.opencode.code_graph, true);
+  });
+
+  it('reports opencode false when its config declares no mcp block', () => {
+    const snapshot = probeWithHome({
+      '.config/opencode/opencode.jsonc': '{ "provider": { "openrouter": {} } }\n',
+    });
+    assert.equal(snapshot.heads.opencode.code_graph, false);
+  });
+
+  it('records kimi false even when every other vendor config is present', () => {
+    // kimi ships no MCP flag and no mcp subcommand at all, so the honest
+    // answer is a constant false rather than an ambiguous/absent field.
+    const snapshot = probeWithHome({
+      '.codex/config.toml': '[mcp_servers.gitnexus]\ncommand = "gitnexus"\n',
+      '.claude.json': JSON.stringify({ mcpServers: { gitnexus: {} } }),
+      '.config/opencode/opencode.jsonc': '{ "mcp": { "gitnexus": {} } }',
+      '.kimi/config.toml': '[mcp_servers.gitnexus]\ncommand = "gitnexus"\n',
+    });
+
+    assert.equal(snapshot.heads.kimi.code_graph, false);
+    assert.equal(snapshot.heads.codex.code_graph, true);
+    assert.equal(snapshot.heads.claude.code_graph, true);
+    assert.equal(snapshot.heads.opencode.code_graph, true);
+  });
+
+  it('fails open on malformed configs without failing head detection', () => {
+    const snapshot = probeWithHome({
+      '.claude.json': '{ this is not json',
+      '.codex/config.toml': '  not toml at all',
+      '.config/opencode/opencode.jsonc': '',
+    });
+
+    assert.equal(snapshot.heads.claude.code_graph, false);
+    assert.equal(snapshot.heads.codex.code_graph, false);
+    assert.equal(snapshot.heads.opencode.code_graph, false);
+    // Detection as a whole still produced a normal snapshot.
+    assert.deepEqual(availableHeadNames(snapshot), [...KNOWN_HEADS]);
+  });
+
+  it('fails open when HOME is unset', () => {
+    const snapshot = probeHeads({
+      exec: allPresent(),
+      stateDir: makeTempDir('state'),
+      env: {},
+    });
+    for (const name of KNOWN_HEADS) {
+      assert.equal(snapshot.heads[name].code_graph, false);
+    }
+  });
+
+  it('is read-only: probing does not create or modify the vendor config dirs', () => {
+    const home = makeHome({ '.codex/config.toml': '[mcp_servers.gitnexus]\n' });
+    const before = readFileSync(join(home, '.codex', 'config.toml'), 'utf8');
+
+    probeHeads({ exec: allPresent(), stateDir: makeTempDir('state'), env: { HOME: home } });
+
+    assert.equal(readFileSync(join(home, '.codex', 'config.toml'), 'utf8'), before);
+    assert.equal(existsSync(join(home, '.claude.json')), false);
+    assert.equal(existsSync(join(home, '.config')), false);
+  });
+
+  it('surfaces code_graph in the written heads.json snapshot', () => {
+    const stateDir = makeTempDir('state');
+    const home = makeHome({ '.codex/config.toml': '[mcp_servers.gitnexus]\ncommand = "g"\n' });
+
+    const snapshot = detectHeads({ exec: allPresent(), stateDir, env: { HOME: home } });
+
+    const written = JSON.parse(readFileSync(join(stateDir, 'heads.json'), 'utf8'));
+    assert.deepEqual(written, snapshot);
+    assert.equal(written.heads.codex.code_graph, true);
+    assert.equal(written.heads.kimi.code_graph, false);
+    for (const name of KNOWN_HEADS) {
+      assert.equal(typeof written.heads[name].code_graph, 'boolean');
+    }
+  });
+
+  it('reads capability back with recordedCodeGraph, and null when undetermined', () => {
+    const snapshot = allAvailableSnapshot();
+
+    assert.equal(recordedCodeGraph(snapshot, 'codex'), true);
+    assert.equal(recordedCodeGraph(snapshot, 'kimi'), false);
+
+    // No snapshot, an unknown vendor, and a pre-field snapshot are all
+    // "unknown" — never false.
+    assert.equal(recordedCodeGraph(null, 'codex'), null);
+    assert.equal(recordedCodeGraph(snapshot, 'mystery-vendor'), null);
+
+    const legacy = allAvailableSnapshot();
+    delete legacy.heads.kimi.code_graph;
+    assert.equal(recordedCodeGraph(legacy, 'kimi'), null);
+
+    const nonBoolean = allAvailableSnapshot();
+    (nonBoolean.heads.codex as { code_graph?: unknown }).code_graph = 'yes';
+    assert.equal(recordedCodeGraph(nonBoolean, 'codex'), null);
   });
 });
 

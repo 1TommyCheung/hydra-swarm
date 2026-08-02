@@ -37,6 +37,16 @@ export type ProbeExec = (
 export interface HeadEntry {
   available: boolean;
   path: string | null;
+  /**
+   * Whether this vendor has a code-graph (symbol-index) tool configured on
+   * this machine — see the code-graph probe section below. Best effort and
+   * fail-open: `false` means "not detected", never "detection failed hard".
+   *
+   * Optional on the TYPE, always written by probeHeads. Absent means the
+   * snapshot predates this field, which consumers must read as "unknown" and
+   * act on exactly as they would with no snapshot at all (recordedCodeGraph).
+   */
+  code_graph?: boolean;
 }
 
 export interface OpencodeHeadEntry extends HeadEntry {
@@ -154,6 +164,126 @@ function resolveActiveOpencodeModel(options: DetectHeadsOptions): string {
   return DEFAULT_MODEL;
 }
 
+// ---------------------------------------------------------------------------
+// Code-graph capability probe (run 0068, issue #28 E2).
+//
+// Measured in a live incident: an identical source-grounded review brief
+// completed on codex in ~9 minutes with a 16.5 KB verdict, and failed TWICE
+// on kimi (killed at the 15- and 45-minute caps, 531 and 734 bytes of pure
+// forward-looking narration, no verdict). The difference confirmed on the
+// machine that reproduced it: codex has a GitNexus MCP code-graph server
+// configured; kimi has no MCP mechanism at all, so "find where X is
+// enforced" degrades from one symbol lookup into re-reading every candidate
+// file in full — kimi re-read dispatch.ts four times in a single attempt.
+//
+// This probe is DISCLOSURE ONLY. Nothing here routes, ranks, or substitutes
+// vendors; allocate.ts is deliberately untouched. review-dispatch.ts reads
+// the recorded value to add a reading-strategy preamble and warn, and that
+// is all.
+// ---------------------------------------------------------------------------
+
+/**
+ * MCP servers that actually provide a code-graph / symbol index.
+ *
+ * Granularity note: this is a NAME allow-list rather than "any MCP server is
+ * configured at all". The field is `code_graph`, and an MCP server that
+ * serves docs, mail or a browser does nothing for "where is X enforced?" —
+ * the query whose absence caused the incident. Counting any MCP entry would
+ * report a capability the reviewer does not have, which is worse than
+ * reporting none. Add a name here when another code-graph server ships.
+ */
+export const CODE_GRAPH_MCP_SERVERS = ['gitnexus'] as const;
+
+/** A per-vendor, read-only capability probe over the user's home dir. */
+type CodeGraphProbe = (home: string) => boolean;
+
+/**
+ * codex: MCP servers are declared in ~/.codex/config.toml as TOML tables
+ * named `[mcp_servers.<name>]` (bare or quoted key). This is exactly the
+ * file and format the capability was confirmed against when the incident
+ * was diagnosed — `[mcp_servers.gitnexus]` with `command = ".../gitnexus"`,
+ * `args = ["mcp"]`.
+ */
+const codexCodeGraph: CodeGraphProbe = (home) => {
+  const text = readFileSync(join(home, '.codex', 'config.toml'), 'utf8');
+  return CODE_GRAPH_MCP_SERVERS.some((name) =>
+    new RegExp(String.raw`^[ \t]*\[mcp_servers\.["']?${name}["']?\][ \t]*$`, 'm').test(text));
+};
+
+/**
+ * claude: user-scope MCP servers live in ~/.claude.json under `mcpServers`
+ * (the same set `claude mcp list` reports at "User config" scope). We do not
+ * shell out to `claude mcp list` because it performs a live network health
+ * check per server; and we deliberately ignore project-scoped .mcp.json —
+ * heads.json is a machine-global snapshot, so only machine-global capability
+ * belongs in it.
+ */
+const claudeCodeGraph: CodeGraphProbe = (home) => {
+  const parsed: unknown = JSON.parse(readFileSync(join(home, '.claude.json'), 'utf8'));
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  const servers = (parsed as Record<string, unknown>).mcpServers;
+  if (servers === null || typeof servers !== 'object' || Array.isArray(servers)) return false;
+  return CODE_GRAPH_MCP_SERVERS.some((name) => name in (servers as Record<string, unknown>));
+};
+
+/**
+ * opencode: an MCP mechanism does exist (`opencode mcp add|list`), with
+ * servers declared under the `mcp` key of ~/.config/opencode/opencode.jsonc
+ * (or .json). That config is JSONC — comments are legal — so we match the
+ * declaration textually instead of parsing: a probe that must never throw
+ * should not depend on a JSONC parser this kit does not ship. We do not run
+ * `opencode mcp list` here because it renders an interactive TUI frame.
+ */
+const opencodeCodeGraph: CodeGraphProbe = (home) => {
+  for (const file of ['opencode.jsonc', 'opencode.json']) {
+    let text: string;
+    try {
+      text = readFileSync(join(home, '.config', 'opencode', file), 'utf8');
+    } catch {
+      continue;
+    }
+    if (!/"mcp"[ \t]*:/.test(text)) continue;
+    if (CODE_GRAPH_MCP_SERVERS.some((name) => new RegExp(String.raw`"${name}"[ \t]*:`).test(text))) {
+      return true;
+    }
+  }
+  return false;
+};
+
+/**
+ * kimi: honest constant false. Verified against the CLI's own `--help`
+ * (kimi-code, 2026-08): there is no `--mcp` flag and no `mcp` subcommand —
+ * no MCP configuration mechanism exists for this vendor at all today, so
+ * its tools are Read/Grep/Glob/Bash only. Recorded as an explicit false
+ * rather than left ambiguous; revisit if kimi ever ships MCP support.
+ */
+const kimiCodeGraph: CodeGraphProbe = () => false;
+
+const CODE_GRAPH_PROBES: Record<KnownHead, CodeGraphProbe> = {
+  claude: claudeCodeGraph,
+  codex: codexCodeGraph,
+  opencode: opencodeCodeGraph,
+  kimi: kimiCodeGraph,
+};
+
+/**
+ * Best-effort code-graph probe for one vendor. Read-only, and fail-open on
+ * absolutely anything (no HOME, missing config, unreadable file, malformed
+ * JSON/TOML) so it can never fail overall head detection. Injectable through
+ * the same options bag every other probe here uses: `options.env.HOME`
+ * redirects every config lookup, exactly as resolveActiveOpencodeModel's
+ * stateDir does.
+ */
+function probeCodeGraph(head: KnownHead, options: DetectHeadsOptions): boolean {
+  const home = (options.env ?? process.env).HOME ?? '';
+  if (!home) return false;
+  try {
+    return CODE_GRAPH_PROBES[head](home) === true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Probe every vendor head WITHOUT persisting anything. Never throws: each
  * per-CLI probe fails closed (that CLI is simply unavailable), which is the
@@ -172,6 +302,7 @@ export function probeHeads(options: DetectHeadsOptions = {}): HeadsSnapshot {
   const opencode: OpencodeHeadEntry = {
     available: opencodePath !== null,
     path: opencodePath,
+    code_graph: probeCodeGraph('opencode', options),
     models: opencodePath !== null ? listOpencodeModels(exec, timeoutMs) : [],
     active_model: resolveActiveOpencodeModel(options),
   };
@@ -179,6 +310,7 @@ export function probeHeads(options: DetectHeadsOptions = {}): HeadsSnapshot {
   const kimi: KimiHeadEntry = {
     available: kimiPath !== null,
     path: kimiPath,
+    code_graph: probeCodeGraph('kimi', options),
     srt_available: srtPath !== null,
     write_capable: kimiPath !== null && srtPath !== null,
   };
@@ -191,8 +323,16 @@ export function probeHeads(options: DetectHeadsOptions = {}): HeadsSnapshot {
   return {
     detected_at: now(),
     heads: {
-      claude: { available: claudePath !== null, path: claudePath },
-      codex: { available: codexPath !== null, path: codexPath },
+      claude: {
+        available: claudePath !== null,
+        path: claudePath,
+        code_graph: probeCodeGraph('claude', options),
+      },
+      codex: {
+        available: codexPath !== null,
+        path: codexPath,
+        code_graph: probeCodeGraph('codex', options),
+      },
       opencode,
       kimi,
     },
@@ -232,6 +372,26 @@ export function readHeadsFile(path: string): HeadsSnapshot | null {
   return parsed as HeadsSnapshot;
 }
 
+/**
+ * The code-graph capability recorded for `vendor` in a snapshot, or `null`
+ * when it cannot be determined (unknown vendor, or a snapshot written before
+ * the field existed).
+ *
+ * `null` is emphatically NOT `false`: consumers must treat an undetermined
+ * capability as "no signal" and change nothing, so a stale snapshot can
+ * never silently alter a review.
+ */
+export function recordedCodeGraph(
+  snapshot: HeadsSnapshot | null,
+  vendor: string,
+): boolean | null {
+  if (snapshot === null) return null;
+  if (!(KNOWN_HEADS as readonly string[]).includes(vendor)) return null;
+  const entry = snapshot.heads[vendor as KnownHead] as HeadEntry | undefined;
+  if (entry === undefined || entry === null || typeof entry !== 'object') return null;
+  return typeof entry.code_graph === 'boolean' ? entry.code_graph : null;
+}
+
 /** Names of the available heads, in stable KNOWN_HEADS order. */
 export function availableHeadNames(snapshot: HeadsSnapshot): string[] {
   return KNOWN_HEADS.filter((name) => snapshot.heads[name].available);
@@ -259,7 +419,7 @@ export function main(args: string[] = process.argv.slice(2)): number {
           process.stdout.write(`${name}: unavailable\n`);
           continue;
         }
-        const details: string[] = [];
+        const details: string[] = [`code_graph=${head.code_graph ?? false}`];
         if (name === 'opencode') {
           const opencode = snapshot.heads.opencode;
           details.push(`active_model=${opencode.active_model}`, `models=${opencode.models.length}`);

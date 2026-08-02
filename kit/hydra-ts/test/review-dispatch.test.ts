@@ -14,6 +14,7 @@ import {
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import {
+  REVIEW_FILE_BUDGET,
   defaultExec,
   main as reviewDispatchMain,
   parseReviewDispatchArgs,
@@ -101,6 +102,11 @@ describe('reviewDispatch', () => {
       // override with their own task id or pass taskId: undefined to probe
       // the missing-task rejection.
       taskId: 'task-default',
+      // Point the code-graph capability lookup (issue #28 E2) at a file that
+      // does not exist, so every test that is not ABOUT that lookup sees
+      // "capability unknown" and an untouched prompt regardless of what this
+      // machine's real heads.json happens to record.
+      headsFile: join(TEST_TMP, 'absent-heads.json'),
       ...extras,
     };
   }
@@ -2225,6 +2231,172 @@ describe('reviewDispatch', () => {
       'HYDRA_HERDR_PANE_RATIO overrides the default 0.25 agent-pane ratio',
     );
   });
+
+  // -------------------------------------------------------------------------
+  // Code-graph reading-strategy preamble (issue #28 E2). Disclosure only:
+  // the preamble and the warning are added, the dispatch is never re-routed.
+  // -------------------------------------------------------------------------
+
+  describe('code-graph reading strategy', () => {
+    /** Write a heads.json fixture with the given per-vendor entries. */
+    function writeHeads(name: string, heads: Record<string, unknown>): string {
+      const path = join(TEST_TMP, `${name}-heads.json`);
+      writeFileSync(path, JSON.stringify({ detected_at: '2026-01-01T00:00:00Z', heads }), 'utf8');
+      return path;
+    }
+
+    function headsWithCodeGraph(name: string, values: Record<string, boolean>): string {
+      const heads: Record<string, unknown> = {};
+      for (const [vendor, codeGraph] of Object.entries(values)) {
+        heads[vendor] = { available: true, path: `/usr/bin/${vendor}`, code_graph: codeGraph };
+      }
+      return writeHeads(name, heads);
+    }
+
+    /**
+     * With herdr panes disabled (this suite's default) the vendor runs through
+     * `bash -lc "claude '-p' '<prompt>' '--output-format' ..."`, so the prompt
+     * actually handed to the vendor is the single-quoted argument between
+     * `'-p'` and `'--output-format'`. Fixtures here contain no single quotes,
+     * so this recovers the prompt exactly as the vendor would see it.
+     */
+    function promptFromCommand(command: string): string {
+      const match = command.match(/claude '-p' '([\s\S]*?)' '--output-format'/);
+      return match?.[1] ?? '';
+    }
+
+    /**
+     * Dispatch a claude review, capturing stderr and the prompt the vendor was
+     * actually invoked with.
+     */
+    function dispatchCapturing(
+      runId: string,
+      promptText: string,
+      extras: Omit<ReviewDispatchOptions, 'stateRoot' | 'cwd'>,
+    ): { sentPrompt: string; stderr: string; mdPath: string } {
+      let sentPrompt = '';
+      const exec: ExecFn = (file, args) => {
+        if (file === 'bash' && args[0] === '-lc') sentPrompt = promptFromCommand(args[1]);
+        return { stdout: JSON.stringify({ result: 'verdict' }), stderr: '', exitCode: 0 };
+      };
+      const stderr: string[] = [];
+      const originalWrite = process.stderr.write;
+      process.stderr.write = ((chunk: unknown) => {
+        stderr.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write;
+      let mdPath: string;
+      try {
+        mdPath = reviewDispatch(
+          runId,
+          'rev1',
+          'claude',
+          writePrompt(promptText),
+          options({ taskId: 'task-cg', exec, ...extras }),
+        );
+      } finally {
+        process.stderr.write = originalWrite;
+      }
+      return { sentPrompt, stderr: stderr.join(''), mdPath: mdPath! };
+    }
+
+    it('prepends the reading-strategy preamble when code_graph is false', () => {
+      const brief = 'REVIEW BRIEF: check the gate in allocate.ts';
+      const { sentPrompt } = dispatchCapturing('cg-false-run', brief, {
+        headsFile: headsWithCodeGraph('cg-false', { claude: false }),
+      });
+
+      assert.match(sentPrompt, /^## Reading strategy \(inserted by hydra/);
+      // The operator's brief follows verbatim, unmodified and unreplaced.
+      assert.ok(sentPrompt.endsWith(brief), 'operator brief must be preserved verbatim at the end');
+      assert.match(sentPrompt, /--- operator review brief follows ---/);
+    });
+
+    it('names the concrete strategy: batched ranges, no re-reads, a bounded checkpoint', () => {
+      const { sentPrompt } = dispatchCapturing('cg-content-run', 'brief', {
+        headsFile: headsWithCodeGraph('cg-content', { claude: false }),
+      });
+
+      assert.match(sentPrompt, /nl -ba .* sed -n/);
+      assert.match(sentPrompt, /Never re-read a file you have already read/);
+      assert.match(sentPrompt, new RegExp(`after inspecting at most ${REVIEW_FILE_BUDGET} files`));
+      assert.match(sentPrompt, /STOP\n\s*reading and write your verdict/);
+    });
+
+    it('warns naming the vendor, and still completes the dispatch', () => {
+      const { stderr, mdPath } = dispatchCapturing('cg-warn-run', 'brief', {
+        headsFile: headsWithCodeGraph('cg-warn', { claude: false }),
+      });
+
+      assert.match(stderr, /hydra: warn: claude has no code-graph/);
+      assert.match(stderr, /code_graph=false/);
+      // Advisory, not a block: the review ran and produced its verdict file.
+      assert.equal(readFileSync(mdPath, 'utf8').trim(), 'verdict');
+    });
+
+    it('leaves the prompt byte-for-byte unchanged when code_graph is true', () => {
+      const brief = 'REVIEW BRIEF: capable vendor';
+      const { sentPrompt, stderr } = dispatchCapturing('cg-true-run', brief, {
+        headsFile: headsWithCodeGraph('cg-true', { claude: true }),
+      });
+
+      assert.equal(sentPrompt, brief);
+      assert.doesNotMatch(stderr, /code-graph/);
+    });
+
+    it('leaves the prompt unchanged when heads.json is missing', () => {
+      const brief = 'REVIEW BRIEF: no snapshot';
+      const { sentPrompt, stderr } = dispatchCapturing('cg-missing-run', brief, {
+        headsFile: join(TEST_TMP, 'definitely-absent-heads.json'),
+      });
+
+      assert.equal(sentPrompt, brief);
+      assert.doesNotMatch(stderr, /code-graph/);
+    });
+
+    it('leaves the prompt unchanged for a legacy snapshot with no code_graph field', () => {
+      const brief = 'REVIEW BRIEF: legacy snapshot';
+      const headsFile = writeHeads('cg-legacy', {
+        claude: { available: true, path: '/usr/bin/claude' },
+      });
+
+      const { sentPrompt, stderr } = dispatchCapturing('cg-legacy-run', brief, { headsFile });
+
+      assert.equal(sentPrompt, brief);
+      assert.doesNotMatch(stderr, /code-graph/);
+    });
+
+    it('leaves the prompt unchanged when the vendor is absent from the snapshot', () => {
+      const brief = 'REVIEW BRIEF: vendor not recorded';
+      const headsFile = headsWithCodeGraph('cg-other-vendor', { codex: false });
+
+      const { sentPrompt, stderr } = dispatchCapturing('cg-other-run', brief, { headsFile });
+
+      assert.equal(sentPrompt, brief);
+      assert.doesNotMatch(stderr, /code-graph/);
+    });
+
+    it('leaves the prompt unchanged when heads.json is malformed', () => {
+      const brief = 'REVIEW BRIEF: broken snapshot';
+      const headsFile = join(TEST_TMP, 'broken-heads.json');
+      writeFileSync(headsFile, 'not json at all', 'utf8');
+
+      const { sentPrompt, stderr } = dispatchCapturing('cg-broken-run', brief, { headsFile });
+
+      assert.equal(sentPrompt, brief);
+      assert.doesNotMatch(stderr, /code-graph/);
+    });
+
+    it('is per-vendor: another vendor recorded false does not alter this review', () => {
+      const brief = 'REVIEW BRIEF: this vendor is capable';
+      const headsFile = headsWithCodeGraph('cg-mixed', { claude: true, kimi: false });
+
+      const { sentPrompt, stderr } = dispatchCapturing('cg-mixed-run', brief, { headsFile });
+
+      assert.equal(sentPrompt, brief);
+      assert.doesNotMatch(stderr, /code-graph/);
+    });
+  });
 });
 
 describe('defaultExec', () => {
@@ -2528,4 +2700,5 @@ describe('reviewDispatch herdr workspace pin (issue #19)', () => {
       'an unreadable run.yaml must fall back to a live query',
     );
   });
+
 });

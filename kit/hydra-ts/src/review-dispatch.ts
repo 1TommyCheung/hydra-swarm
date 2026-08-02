@@ -30,6 +30,7 @@ import {
   type JsonlTailState,
 } from './lib.ts';
 import { herdrAgentPaneRatio, monitorEventText } from './dispatch.ts';
+import { headsFilePath, readHeadsFile, recordedCodeGraph } from './detect-heads.ts';
 import { isCompiledBinary } from './kit-assets.ts';
 import { isSafeId, isTaskId, SAFE_ID_PATTERN, TASK_ID_GRAMMAR } from './task-id.ts';
 
@@ -71,6 +72,13 @@ export interface ReviewDispatchOptions {
   killTree?: typeof killTree;
   /** Injectable poll sleeper for tests. */
   sleep?: (ms: number) => void;
+  /**
+   * Explicit heads.json path for the code-graph capability lookup; defaults
+   * to the machine-global snapshot (detect-heads headsFilePath()). A missing
+   * or unreadable file means "capability unknown" — the review prompt is
+   * then left byte-for-byte alone.
+   */
+  headsFile?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -579,6 +587,88 @@ function shrinkAgentPane(exec: ExecFn, repoRootPath: string, pane: string): void
 }
 
 // ---------------------------------------------------------------------------
+// Code-graph reading strategy (run 0068, issue #28 E2).
+//
+// A reviewer with no code-graph (symbol-index) tool cannot answer "where is
+// X enforced?" with a single lookup; it falls back to reading candidate
+// files whole. Measured in a live incident, that is exactly how an identical
+// review brief that codex finished in ~9 minutes with a 16.5 KB verdict
+// failed twice on kimi — killed at both the 15- and 45-minute caps having
+// produced 531 and 734 bytes of forward-looking narration, never beginning
+// synthesis, after re-reading the same large file four times in one attempt.
+//
+// So when heads.json records `code_graph: false` for the target vendor we
+// prepend a reading-strategy block to the operator's brief and warn on the
+// dispatch log. This is DISCLOSURE plus a prompt hint, never routing: the
+// dispatch always proceeds to the vendor the operator chose, and allocate.ts
+// is untouched. Its real-world effectiveness is unmeasured — it is a
+// hypothesis derived from one reproduced incident, and should be evaluated
+// against real reviews before anyone leans on it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Files the reviewer may inspect before it MUST write a draft verdict.
+ *
+ * Eight is chosen to sit just above the widest brief this project actually
+ * issues: a hydra review brief names the task's writable paths plus its
+ * read-only context, which has run 2-6 files. So the checkpoint never fires
+ * before the reviewer has seen its actual subject matter, while still firing
+ * long before context growth becomes unrecoverable (the failed attempts were
+ * tens of whole-file reads deep with nothing written).
+ */
+export const REVIEW_FILE_BUDGET = 8;
+
+/**
+ * The reading-strategy block prepended to a capability-lacking vendor's
+ * review prompt. The operator's own brief follows this verbatim — nothing
+ * here replaces or edits it.
+ */
+export function readingStrategyPreamble(vendor: string): string {
+  return [
+    '## Reading strategy (inserted by hydra — no code-graph tool available)',
+    '',
+    `This machine has no code-graph / symbol-index tool configured for ${vendor},`,
+    'so a question like "where is X enforced?" cannot be answered with one',
+    'lookup. Reviews on this vendor have run out of time reading files and',
+    'never written a verdict. Follow this strategy:',
+    '',
+    '1. Batch and line-range your reads. Once you know what you are looking',
+    '   for, use grep -n to locate the ranges worth extracting, then pull',
+    '   them from SEVERAL files in ONE shell call instead of reading whole',
+    '   files:',
+    "     nl -ba src/a.ts | sed -n '40,90p;220,260p'; nl -ba src/b.ts | sed -n '1,60p'",
+    '',
+    '2. Never re-read a file you have already read in this session. Quote',
+    '   from the earlier result instead. Repeatedly re-reading the same large',
+    '   file is the single failure mode this block exists to prevent.',
+    '',
+    `3. Hard synthesis checkpoint: after inspecting at most ${REVIEW_FILE_BUDGET} files, STOP`,
+    '   reading and write your verdict. Only read further if a specific claim',
+    '   in that draft verdict cannot be settled without it — and then read',
+    '   only the line range that settles it.',
+    '',
+    `A verdict grounded in ${REVIEW_FILE_BUDGET} files is worth far more than an unfinished`,
+    'survey of thirty. Write the verdict.',
+    '',
+    '--- operator review brief follows ---',
+    '',
+  ].join('\n');
+}
+
+/**
+ * The code-graph capability recorded for `vendor`, or null when it cannot be
+ * determined. Never throws: any read/parse failure is "unknown", which
+ * leaves the prompt untouched.
+ */
+function lookupCodeGraph(vendor: string, headsFile: string): boolean | null {
+  try {
+    return recordedCodeGraph(readHeadsFile(headsFile), vendor);
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point.
 // ---------------------------------------------------------------------------
 
@@ -634,7 +724,31 @@ export function reviewDispatch(
   rmSync(pidfile, { force: true });
 
   const prompt = readFileSync(promptFile, 'utf8');
-  const { file, args } = vendorCommand(vendor, prompt, repoRootPath, options.image);
+
+  // Code-graph disclosure (issue #28 E2). ONLY a recorded `false` changes
+  // anything: a capable vendor, an unknown vendor, a missing/stale/unreadable
+  // heads.json all leave `codeGraph` null and the prompt byte-for-byte as the
+  // operator wrote it. The warning is advisory — the dispatch proceeds to the
+  // operator's chosen vendor either way, and nothing here re-routes it.
+  let headsFile: string;
+  try {
+    headsFile = options.headsFile ?? headsFilePath();
+  } catch {
+    headsFile = '';
+  }
+  const codeGraph = headsFile ? lookupCodeGraph(vendor, headsFile) : null;
+  let reviewPrompt = prompt;
+  if (codeGraph === false) {
+    warn(
+      `${vendor} has no code-graph (MCP symbol index) configured on this machine `
+      + `(heads.json: code_graph=false) — prepending a reading-strategy preamble to the `
+      + `review prompt. The review proceeds on ${vendor} as dispatched; hydra never `
+      + `substitutes a vendor. Route future reviews elsewhere if you prefer.`,
+    );
+    reviewPrompt = readingStrategyPreamble(vendor) + prompt;
+  }
+
+  const { file, args } = vendorCommand(vendor, reviewPrompt, repoRootPath, options.image);
 
   // Live pane feedback (issue #18): codex/kimi/opencode stream NDJSON that
   // pollJsonlFile re-parses into event text for the pane's `tail -f` progress
