@@ -103,11 +103,11 @@ interface Expectation {
 
 const EXPECTATIONS: Record<string, Expectation> = {
   'adapter-claude': { exit: 1, signature: 'usage: claude.sh start|resume <task_spec>' },
-  'adapter-codex': { exit: 1, signature: 'usage: codex.sh start <task_spec>' },
+  'adapter-codex': { exit: 1, signature: 'usage: codex.sh start|resume <task_spec>' },
   // requireKimi() gates before the usage error when the kimi CLI is absent
   // (scrubbed PATH): a dependency error, not a usage error — still exit 1.
   'adapter-kimi': { exit: 1, signature: 'kimi CLI not found (Wave 2 dependency)' },
-  'adapter-opencode': { exit: 1, signature: 'usage: opencode.sh explore|review|start ...' },
+  'adapter-opencode': { exit: 1, signature: 'usage: opencode.sh explore|review|start|resume ...' },
   'adapter-stub': { exit: 1, signature: 'usage: stub.sh start|resume <task_spec>' },
   // No-arg success by design: writes an empty measured-profiles report under
   // HYDRA_STATE_ROOT and says so. NOT a usage-error subcommand.
@@ -128,7 +128,7 @@ const EXPECTATIONS: Record<string, Expectation> = {
   'graphify-repo': { exit: 1, signature: 'graphify CLI not found (Wave 2 dependency)' },
   'herdr-push': { exit: 1, signature: 'usage: herdrPush <run_id> [--notify]' },
   'index-candidate': { exit: 1, signature: 'usage: index-candidate.ts <run_id> <task_id>' },
-  'integrate': { exit: 1, signature: 'usage: integrate.ts <run_id> <task_id_in_order>' },
+  'integrate': { exit: 1, signature: 'usage: integrate.ts [--onto <commit>] <run_id> <task_id_in_order>' },
   'ledger-view': { exit: 1, signature: 'usage: ledger-view.sh <run_id> [out.html]' },
   'measure-divergence': { exit: 1, signature: 'no runs found under ' },
   // No-arg success by design: prints the OTel export lines, exit 0.
