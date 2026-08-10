@@ -1,0 +1,23 @@
+# hydra/profiles/grok-build-0.1.yaml — seed profile (vendor-adapters.md §5)
+vendor: grok
+model: grok-build-0.1
+roles: [implementer]
+
+seeded_strengths:
+  - claim: Coding-specialist model with a 256K context window
+    source: vendor_doc
+  - claim: Headless agent workflow with workspace sandbox and reasoning-effort controls
+    source: vendor_doc
+seeded_weaknesses:
+  - claim: Users report occasional Waiting/Responding or stdio hangs after useful work completes
+    source: community
+
+capabilities:
+  input_modalities: [text]
+  headless: "grok -p"
+  fine_tool_allowlist: true
+  write_role: true
+
+cost_hint: "1.0/2.0"
+
+qualitative_notes: []

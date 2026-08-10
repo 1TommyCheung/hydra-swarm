@@ -13,7 +13,7 @@ spec_version: 1
 base_commit: 91df24a               # filled/confirmed at instantiation
 branch: hydra/0042/canvas-node-validation   # harness-assigned; do not hand-edit
 worktree:                          # harness-assigned by create-worktree.sh
-assigned_vendor: claude            # claude | codex | opencode | kimi
+assigned_vendor: claude            # claude | codex | opencode | kimi | grok
 # opencode_model: zai-coding-plan/glm-5.2   # OPTIONAL, opencode tasks only.
 # Pin the model for this task's opencode worker. Precedence: this task-spec
 # field > HYDRA_OPENCODE_MODEL > ~/.local/state/hydra/opencode-model.json >

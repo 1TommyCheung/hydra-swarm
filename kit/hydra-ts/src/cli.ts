@@ -10,7 +10,7 @@
 //
 // Invocation shape mirrors the kit/hydra/scripts/<name>.sh entry points 1:1:
 //   cli.ts <subcommand> [args...]   ==   scripts/<subcommand>.sh [args...]
-// The five adapter-*.ts modules keep their existing standalone shape:
+// The six adapter-*.ts modules keep their existing standalone shape:
 //   cli.ts adapter-<vendor> <verb> [args...]
 //
 // This task does NOT rewire kit/hydra/scripts/*.sh or HYDRA_HARNESS; cli.ts is
@@ -21,6 +21,7 @@ import { pathToFileURL } from 'node:url';
 
 import { main as adapterClaudeMain } from './adapter-claude.ts';
 import { main as adapterCodexMain } from './adapter-codex.ts';
+import { main as adapterGrokMain } from './adapter-grok.ts';
 import { main as adapterKimiMain } from './adapter-kimi.ts';
 import { main as adapterOpencodeMain } from './adapter-opencode.ts';
 import { main as adapterStubMain } from './adapter-stub.ts';
@@ -111,8 +112,9 @@ export const routes: Readonly<Record<string, MainFn>> = {
 // assertion), so newer subcommands register HERE instead: route() consults
 // this table only when the default registry is in play, and usage() lists
 // both. (run 0047: detect-heads; run 0048: gc, run-log; run 0068: wait-task,
-// wait-run.)
+// wait-run, run 0070: adapter-grok.)
 const extensionRoutes: Readonly<Record<string, MainFn>> = {
+  'adapter-grok': adapterGrokMain,
   'detect-heads': detectHeadsMain,
   'gc': gcMain,
   'run-log': runLogMain,
@@ -136,6 +138,7 @@ const extensionRoutes: Readonly<Record<string, MainFn>> = {
 const SIGNATURES: Readonly<Record<string, string>> = {
   'adapter-claude': 'start|resume <task_spec> <worktree> <inbox> <sessions> <agent_run_id> [prior_session]',
   'adapter-codex': 'start|resume <task_spec> <worktree> <inbox> <sessions> <agent_run_id> [prior_session]',
+  'adapter-grok': 'start|resume <task_spec> <worktree> <inbox> <sessions> <agent_run_id> [prior_session]',
   'adapter-kimi': 'start <task_spec> <worktree> <inbox> <sessions> <agent_run_id> | visual <cwd> <prompt> <out_prefix> <agent_run_id> [image]',
   'adapter-opencode': 'start|resume <task_spec> <worktree> <inbox> <sessions> <agent_run_id> [prior_session] | explore|review <cwd> <prompt> <out_prefix> <agent_run_id>',
   'adapter-stub': 'start|resume <task_spec> <worktree> <inbox> <sessions> <agent_run_id> [prior_session]',
@@ -228,7 +231,7 @@ if (isMain) {
   // in the tree carrying it. The embedded-binary behavior itself is verified
   // in Phase 3 (compile lane), not here.
   if (isCompiledBinary()) {
-    const [resultSchema, reviewSchema, profileClaude, profileCodex, profileOpencode, profileKimi, pluginManifest] =
+    const [resultSchema, reviewSchema, profileClaude, profileCodex, profileGrok, profileOpencode, profileKimi, pluginManifest] =
       await Promise.all([
         // @ts-ignore -- Bun 'text'-loader asset specifier; tsc cannot resolve it (no network for typecheck here — visually confirmed, Phase 3 verifies the compile lane).
         import('../../hydra/schemas/result.schema.json', { with: { type: 'text' } }),
@@ -238,6 +241,8 @@ if (isMain) {
         import('../../hydra/profiles/claude-fable-5.yaml', { with: { type: 'text' } }),
         // @ts-ignore -- Bun 'text'-loader asset specifier; see above.
         import('../../hydra/profiles/codex-gpt-5.6-sol.yaml', { with: { type: 'text' } }),
+        // @ts-ignore -- Bun 'text'-loader asset specifier; see above.
+        import('../../hydra/profiles/grok-build-0.1.yaml', { with: { type: 'text' } }),
         // @ts-ignore -- Bun 'text'-loader asset specifier; see above.
         import('../../hydra/profiles/opencode-glm-5.2.yaml', { with: { type: 'text' } }),
         // @ts-ignore -- Bun 'text'-loader asset specifier; see above.
@@ -254,6 +259,7 @@ if (isMain) {
       'schemas/review.schema.json': reviewSchema.default as unknown as string,
       'profiles/claude-fable-5.yaml': profileClaude.default,
       'profiles/codex-gpt-5.6-sol.yaml': profileCodex.default,
+      'profiles/grok-build-0.1.yaml': profileGrok.default,
       'profiles/opencode-glm-5.2.yaml': profileOpencode.default,
       'profiles/kimi-k2.7-code.yaml': profileKimi.default,
       'plugin.json': pluginManifest.default as unknown as string,

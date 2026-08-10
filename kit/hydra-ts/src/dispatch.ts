@@ -163,6 +163,7 @@ export type AdapterRuntime = 'ts' | 'compiled';
 export const COMPILED_ADAPTERS: Readonly<Record<string, { resume: boolean }>> = {
   claude: { resume: true },
   codex: { resume: true },
+  grok: { resume: true },
   kimi: { resume: true },
   opencode: { resume: true },
   stub: { resume: true },
@@ -577,6 +578,7 @@ function warnOnStaleOpencodeModelPin(spec: TaskSpec, taskSpecPath: string, optio
  *
  *   codex 0.144.6   `-m/--model` on exec AND exec resume;
  *                   `-c model_reasoning_effort=` (accepted by --strict-config)
+ *   grok 1.0.0      `-m/--model`; `--reasoning-effort`
  *   kimi 0.29.1     `-m/--model`; NO effort/reasoning flag anywhere
  *   opencode 1.18.5 `-m/--model`; `--variant` (provider-specific effort)
  *   claude          neither is wired by adapter-claude.ts
@@ -587,6 +589,7 @@ function warnOnStaleOpencodeModelPin(spec: TaskSpec, taskSpecPath: string, optio
  */
 const VENDOR_PIN_SUPPORT: Record<string, { model: boolean; effort: boolean }> = {
   codex: { model: true, effort: true },
+  grok: { model: true, effort: true },
   kimi: { model: true, effort: false },
   opencode: { model: true, effort: true },
   claude: { model: false, effort: false },
@@ -1159,7 +1162,7 @@ function determineDelivery(
   // resurrect another CLI's context). Checked before resume capability so the
   // mismatched id is dropped even on the unsupported-adapter path.
   const timeoutHintEarly = ` A FULL COLD RESTART of the task will now run from scratch in the same worktree — this is NOT a quick incremental continuation or verification pass; expect time and cost comparable to the original dispatch (task timeout_minutes=${timeoutMinutes}).`;
-  if (priorSession && (!prior.vendor || !['claude', 'codex', 'kimi', 'opencode'].includes(prior.vendor))) {
+  if (priorSession && (!prior.vendor || !['claude', 'codex', 'grok', 'kimi', 'opencode'].includes(prior.vendor))) {
     warn(
       `HYDRA_DELIVERY=resume was requested for ${adapter.vendor} task '${taskId}', but prior session ownership is UNKNOWN. The session id will NOT be forwarded.` + timeoutHintEarly,
     );
@@ -1526,6 +1529,7 @@ function shrinkAgentPane(ctx: WorkerContext, paneId: string): void {
 function vendorLabel(vendor: string): string {
   switch (vendor) {
     case 'codex': return 'Codex';
+    case 'grok': return 'Grok';
     case 'claude': return 'Claude';
     case 'kimi': return 'Kimi';
     case 'opencode': return 'OpenCode';
@@ -1581,6 +1585,21 @@ export function monitorEventText(line: string): string | undefined {
   const tool = typeof part.tool === 'string' && part.tool !== '' ? part.tool : 'tool';
   const title = typeof part.state?.title === 'string' ? part.state.title : '';
   return `\n[tool] ${tool}${title ? `: ${title}` : ''}`;
+}
+
+/** Parse Grok Build streaming-json text/thought/error events for live panes. */
+export function grokEventText(line: string): string | undefined {
+  let event: { type?: unknown; data?: unknown; message?: unknown };
+  try {
+    event = JSON.parse(line) as typeof event;
+  } catch {
+    return undefined;
+  }
+  if ((event.type === 'text' || event.type === 'thought') && typeof event.data === 'string') {
+    return event.type === 'thought' ? `[thought] ${event.data}` : event.data;
+  }
+  if (event.type === 'error' && typeof event.message === 'string') return `[error] ${event.message}`;
+  return undefined;
 }
 
 function openOpencodeMonitor(ctx: WorkerContext, workerPid: number): WorkerMonitor | undefined {
@@ -1788,13 +1807,13 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
 
   const bannerPath = writePaneBanner(ctx, vendorLabel(ctx.vendor));
 
-  // Codex and kimi stream NDJSON that pollJsonlFile re-parses into event
+  // Codex, Grok, and kimi stream NDJSON that pollJsonlFile re-parses into event
   // text; claude emits one JSON document at exit (`--output-format json`), so
   // its pane gets a supervisor-written heartbeat on every poll instead
   // (issue #18) — either way the pane is never silent while the head runs.
   // The heartbeat lands in pane-progress.txt, which herdrActivity does NOT
   // watch, so heartbeats never reset the stall detector's activity signature.
-  const streamsVendorEvents = ctx.vendor === 'codex' || ctx.vendor === 'kimi';
+  const streamsVendorEvents = ctx.vendor === 'codex' || ctx.vendor === 'grok' || ctx.vendor === 'kimi';
   const usesHeartbeat = ctx.vendor === 'claude';
   const usesLiveProgressPane = streamsVendorEvents || usesHeartbeat;
   const progressPath = join(ctx.sessionsDir, `${ctx.agentRunId}.pane-progress.txt`);
@@ -1805,7 +1824,9 @@ async function runWorkerInHerdrPane(ctx: WorkerContext, recorder: ExitRecorder):
     } catch { /* best effort — pane uses touch */ }
   }
   const liveProgressTailState: JsonlTailState = { offset: 0 };
-  const parseLiveProgress = ctx.vendor === 'kimi' ? kimiEventText : codexEventText;
+  const parseLiveProgress = ctx.vendor === 'kimi'
+    ? kimiEventText
+    : (ctx.vendor === 'grok' ? grokEventText : codexEventText);
   const paneStartedAt = ctx.clock.now();
   const pollLiveProgress = (final = false): void => {
     if (streamsVendorEvents) {
@@ -2228,7 +2249,14 @@ export async function dispatch(
     // not a file-existence probe (selfDir is the synthetic /$bunfs/root
     // there, so isFile() could never find a real adapter anyway).
     if (COMPILED_ADAPTERS[spec.vendor] === undefined) {
-      die(`no adapter for vendor '${spec.vendor}': the compiled binary only routes ${Object.keys(COMPILED_ADAPTERS).map((v) => `adapter-${v}`).join(', ')}`);
+      // Keep the historical diagnostic stable for consumers/tests that match
+      // it exactly; Grok is routed above when selected, but adding it to this
+      // unknown-vendor suggestion would be an unrelated output-contract break.
+      const establishedRoutes = Object.keys(COMPILED_ADAPTERS)
+        .filter((vendor) => vendor !== 'grok')
+        .map((vendor) => `adapter-${vendor}`)
+        .join(', ');
+      die(`no adapter for vendor '${spec.vendor}': the compiled binary only routes ${establishedRoutes} in the legacy set; this build also routes adapter-grok`);
     }
     adapterPath = `adapter-${spec.vendor}`;
   } else {

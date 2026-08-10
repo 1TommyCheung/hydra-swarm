@@ -1,6 +1,6 @@
 # Hydra-Swarm — Vendor Adapters
 
-> **`last_verified: 2026-07-13`** (CLI flags + adapter behaviour verified against
+> **`last_verified: 2026-08-10`** (CLI flags + adapter behaviour verified against
 > the installed tools on this machine). Model versions, context windows, and
 > pricing in §3 are perishable — **re-verify against vendor docs at each wave
 > exit** and bump this date. The §5 capability ledger now carries *measured*
@@ -19,7 +19,7 @@ result(agent_run_id)                      -> path to inbox drop (untrusted)
 There is deliberately no `message()` (mid-turn instruction injection): mid-run instructions would exist only in a running context window (invisible to the ledger, unreconstructable, gate-invalidating); delivery mechanisms are vendor-asymmetric; interrupting mid-edit contaminates the worker context with inconsistent instruction sets. Course-correction = `cancel()` or wait for a checkpoint → amend spec (ledger event, version bump) → `resume()`. If a vendor session can't resume, cold-restart against the agent's branch — cheap, because work is committed at checkpoints.
 
 Each production adapter has a single live implementation:
-`kit/hydra-ts/src/adapter-{claude,codex,opencode,kimi}.ts`. Dispatch routes to
+`kit/hydra-ts/src/adapter-{claude,codex,grok,opencode,kimi}.ts`. Dispatch routes to
 these by default through the `kit/hydra/scripts/*.sh` command surface. The
 shell adapters under `kit/hydra/adapters/` were retired in run 0045
 (`docs/bash-lane-retirement-plan.md`): `HYDRA_HARNESS=bash` /
@@ -32,20 +32,20 @@ mixed-runtime use; leave it unset for normal operation.
 
 ## 2. CLI capability matrix
 
-| Capability | Claude Code | Codex CLI (GPT‑5.6 Sol) | OpenCode (GLM 5.2) | Kimi Code (kimi/k2.7-code) |
-|---|---|---|---|---|
-| Headless invocation | `claude -p "…"` | `codex exec "…"` | `opencode run --model zai-coding-plan/glm-5.2 "…"` | `kimi -p / --prompt` |
-| Structured output | `--output-format json\|stream-json` | JSON/experimental flags | `--format json` | `--output-format` (with `--prompt` only); `--final-message-only`, `--quiet` |
-| Session resume | `--resume <id>` (id from JSON result) | `codex exec resume [SESSION_ID] [PROMPT]` (v0.6.8.4; bare `codex resume` is an interactive picker, never used) | `run -s <id>` (v0.6.8.4; `--fork` deliberately unused — it branches away from reviewed history) | `--session/-S <id>`, `--continue/-C` |
-| Fine tool allowlist | Yes (`--allowedTools`, rules) | Sandbox modes + config | Partial (`opencode.json` permission per agent) | **None in print mode — auto-approves** |
-| Pre/post tool hooks | Yes (PreToolUse/PostToolUse) | Yes (hooks.json via adapter) | Plugin system (weaker) | None in print mode |
-| Read-only mode | permission-mode + allowlist | sandbox read-only | agent with edit/bash deny | `--plan` (not combinable with `--prompt`) |
-| Working dir control | `--add-dir`, cwd | cwd/config | cwd | `--work-dir/-w`, `--add-dir` |
-| Step/turn limits | max-turns | config | config | `--max-steps-per-turn`, `--max-retries-per-step` |
-| Hermetic mode | `--bare` | config-scoped | `--attach` to controlled server | `--skills-dir` override; config.toml |
-| Warm server | — | — | `opencode serve` + `--attach` | `kimi server` |
+| Capability | Claude Code | Codex CLI (GPT‑5.6 Sol) | Grok Build (grok-build-0.1) | OpenCode (GLM 5.2) | Kimi Code (kimi/k2.7-code) |
+|---|---|---|---|---|---|
+| Headless invocation | `claude -p "…"` | `codex exec "…"` | `grok -p "…"` | `opencode run --model zai-coding-plan/glm-5.2 "…"` | `kimi -p / --prompt` |
+| Structured output | `--output-format json\|stream-json` | JSON/experimental flags | `--output-format plain\|json\|streaming-json\|streaming-messages-json`; future `--json-schema` | `--format json` | `--output-format` (with `--prompt` only); `--final-message-only`, `--quiet` |
+| Session resume | `--resume <id>` (id from JSON result) | `codex exec resume [SESSION_ID] [PROMPT]` (v0.6.8.4; bare `codex resume` is an interactive picker, never used) | `--resume [<id-or-title>]`; `--fork-session` deliberately unused | `run -s <id>` (v0.6.8.4; `--fork` deliberately unused — it branches away from reviewed history) | `--session/-S <id>`, `--continue/-C` |
+| Fine tool allowlist | Yes (`--allowedTools`, rules) | Sandbox modes + config | `--allow` / `--deny` plus permission modes | Partial (`opencode.json` permission per agent) | **None in print mode — auto-approves** |
+| Pre/post tool hooks | Yes (PreToolUse/PostToolUse) | Yes (hooks.json via adapter) | Not integrated by Hydra | Plugin system (weaker) | None in print mode |
+| Read-only mode | permission-mode + allowlist | sandbox read-only | `--sandbox read-only` | agent with edit/bash deny | `--plan` (not combinable with `--prompt`) |
+| Working dir control | `--add-dir`, cwd | cwd/config | `--cwd <dir>` | cwd | `--work-dir/-w`, `--add-dir` |
+| Step/turn limits | max-turns | config | — | config | `--max-steps-per-turn`, `--max-retries-per-step` |
+| Hermetic mode | `--bare` | config-scoped | sandbox profiles (`workspace`, `read-only`, `strict`, `devbox`, `off`) | `--attach` to controlled server | `--skills-dir` override; config.toml |
+| Warm server | — | — | ACP `agent stdio` (not used by this adapter) | `opencode serve` + `--attach` | `kimi server` |
 
-### 2.1 Verified headless invocations (2026-07-13, as-built)
+### 2.1 Verified headless invocations (2026-08-10, as-built)
 
 The matrix above is the design intent; these are the exact invocations the
 adapters use, with the corrections operating the system surfaced:
@@ -54,6 +54,7 @@ adapters use, with the corrections operating the system surfaced:
 |---|---|---|
 | Claude | `claude -p "<prompt>" --output-format json --permission-mode bypassPermissions --add-dir <wt>` | `bypassPermissions` imposes **no OS sandbox** — worker is unconfined at OS level (see §4 + the trust drift note). |
 | Codex | `codex exec --json -C <wt> -s workspace-write -c 'sandbox_workspace_write.writable_roots=["<git-common-dir>"]' "<prompt>" </dev/null` | Must close stdin (`</dev/null`) or it hangs "Reading additional input from stdin". Needs the **git-common-dir** as a writable root to commit a linked worktree. Session id is **`thread_id`**. |
+| Grok Build | `grok -m grok-build-0.1 --cwd <wt> --sandbox workspace --permission-mode acceptEdits --output-format streaming-json -p "<prompt>" </dev/null` | Verified against installed `grok` v1.0.0 on 2026-08-10. stdin is closed and the adapter enforces a subprocess deadline because community reports describe post-turn Waiting/Responding/stdio hangs. Session id is `sessionId` on the final `end` event. Authentication is ambient (`XAI_API_KEY` or prior `grok login`). |
 | OpenCode/GLM | `opencode run --model zai-coding-plan/glm-5.2 --agent <profile> --format json --auto --dir <wt> "<prompt>"` | Model prefix is **`zai-coding-plan/`**, not `zhipu/`. `--auto` is required for headless (else it can hang on a permission prompt). `--agent` selects an `opencode.json` profile (`hydra-reviewer` = edit/bash deny; `hydra-implementer` = allow). Still draws a formatted display to a tty — use `opencode serve` + `--attach` for fully TUI-free. Edges: the semantic backend is OpenAI-compatible. |
 | Kimi | `srt -s <settings.json> -c 'kimi -p "<prompt>" --output-format stream-json --add-dir <wt>'` | `-p` **already auto-approves** tools (no allowlist) → OS sandbox (`srt`) mandatory; `-y` is *rejected* ("Cannot combine --prompt with --yolo"). Output is **`stream-json`** (JSONL), not `json`. The `srt` settings JSON (generated by the adapter) confines writes to the worktree + git-common-dir + herdr socket dir and network to a domain allowlist; session id is in a `session.resume_hint` meta event. |
 
@@ -68,17 +69,17 @@ block scalar (`objective: >`) and must be read with `hydra_yaml_block` — the
 same-line accessor returns empty and silently drops the objective (this bit hard;
 see `operations.md`).
 
-## 3. Model capabilities (verified against vendor docs, 2026-07)
+## 3. Model capabilities (verified against vendor docs, 2026-08)
 
-| Attribute | Claude Fable 5 | GPT‑5.6 Sol | GLM 5.2 | Kimi K2.7 Code |
-|---|---|---|---|---|
-| Context / max output | 1M-class | ~1.05M / 128K | 1M / 128K | 256K / ~64K |
-| Input modalities | Text + image | Text + image | **Text only** (per Z.AI dev doc) | **Text + image + video** (MoonViT) |
-| Reasoning control | Effort levels | none→max; ultra multi-agent | Thinking modes, `reasoning_effort: max` | **Always-on thinking**; `preserve_thinking` mandatory |
-| Openness | Proprietary | Proprietary | Open weights, MIT | Open weights, Modified MIT |
-| Cost (per 1M in/out) — snapshot, see warning below | Subscription/API — [claude.com/pricing](https://claude.com/pricing) · [API pricing](https://platform.claude.com/docs/en/about-claude/pricing) | $5 / $30 — [OpenAI API pricing](https://developers.openai.com/api/docs/pricing) | Free tier + cheap plan — [z.ai GLM Coding Plan](https://z.ai/subscribe) | ~$0.95 ($0.19 cached) / $4.00; HighSpeed 180–260 tok/s — [Moonshot platform pricing](https://platform.moonshot.ai/docs/pricing) |
-| Documented sweet spot | Frontier general + implementation discipline | Hardest reasoning | Project-scale takeover, standards adherence, refactoring (FrontierSWE 74.4; TB2.1 81.0) | Token-efficient agent loops; visual/mobile debugging |
-| Documented gaps | — | Expensive; slower | From-scratch generation; marathon tasks | Smallest context; trails frontier SWE |
+| Attribute | Claude Fable 5 | GPT‑5.6 Sol | Grok Build 0.1 | GLM 5.2 | Kimi K2.7 Code |
+|---|---|---|---|---|---|
+| Context / max output | 1M-class | ~1.05M / 128K | 256K / not stated | 1M / 128K | 256K / ~64K |
+| Input modalities | Text + image | Text + image | Text | **Text only** (per Z.AI dev doc) | **Text + image + video** (MoonViT) |
+| Reasoning control | Effort levels | none→max; ultra multi-agent | `--reasoning-effort` / `--effort` | Thinking modes, `reasoning_effort: max` | **Always-on thinking**; `preserve_thinking` mandatory |
+| Openness | Proprietary | Proprietary | Proprietary | Open weights, MIT | Open weights, Modified MIT |
+| Cost (per 1M in/out) — snapshot, see warning below | Subscription/API — [claude.com/pricing](https://claude.com/pricing) · [API pricing](https://platform.claude.com/docs/en/about-claude/pricing) | $5 / $30 — [OpenAI API pricing](https://developers.openai.com/api/docs/pricing) | $1.00 input ($0.20 cached) / $2.00 output — [xAI Grok Build 0.1 announcement](https://x.ai/news/grok-build-0-1) | Free tier + cheap plan — [z.ai GLM Coding Plan](https://z.ai/subscribe) | ~$0.95 ($0.19 cached) / $4.00; HighSpeed 180–260 tok/s — [Moonshot platform pricing](https://platform.moonshot.ai/docs/pricing) |
+| Documented sweet spot | Frontier general + implementation discipline | Hardest reasoning | Coding-specialist agent work | Project-scale takeover, standards adherence, refactoring (FrontierSWE 74.4; TB2.1 81.0) | Token-efficient agent loops; visual/mobile debugging |
+| Documented gaps | — | Expensive; slower | New adapter; local measurements not yet accumulated | From-scratch generation; marathon tasks | Smallest context; trails frontier SWE |
 
 > **Pricing warning:** the cost figures above are a point-in-time snapshot and
 > WILL go stale — vendors change rates, add caching/batch discounts, and gate
@@ -108,6 +109,8 @@ All guarantees enforced, or the worker takes the subprocess path. Uniform isolat
 
 **Codex (`adapter-codex.ts`)** — Wave 0. `codex exec` in worktree; sandbox read-only for reviewer role; hooks via adapter script.
 
+**Grok Build (`adapter-grok.ts`)** — Wave 3. The initial role is write-capable `implementer`: `--sandbox workspace` plus `--permission-mode acceptEdits`, with `grok-build-0.1` as the adapter default. Start and resume both capture `streaming-json` incrementally, preserve the vendor session id, close stdin, enforce a local timeout, and use the same worker-result / git-evidence inbox bridge as Codex and Kimi. `--fork-session` is intentionally unused. A future reviewer role should select `--sandbox read-only`; `--json-schema` is reserved for a later structured-output integration.
+
 **OpenCode / GLM 5.2 (`adapter-opencode.ts`)** — Wave 1 read-only; **implementer role added Wave 2 (open-decision #2 resolved).** Roles: exploration fan-out (cheap, `--format json`, optional `opencode serve` warm server) and **long textual diff review / whole-repo audit** (1M context; `hydra-reviewer` profile, edit/bash deny). The `hydra-implementer` profile (edit/bash allow) gives it a write role — refactoring/standards-adherence is its documented sweet spot — but it is **availability-gated**: the Z.AI coding endpoint returned transient 500s on write workloads. Documented weaknesses (from-scratch generation, marathons) route greenfield elsewhere. Headless requires `--auto`.
 
 OpenCode's herdr integration uses the same decoupled hosting pattern under both
@@ -117,9 +120,18 @@ a separate monitor-only pane tails the adapter capture stream and closes after
 the worker exits. This preserves observability without reintroducing the
 herdr-hosted OpenCode failure mode.
 
+### OpenCode models routed through OpenRouter
+
+For OpenCode models whose provider prefix routes through OpenRouter, the
+machine-local `opencode.json` / `opencode.jsonc` may pass
+`provider: {sort: "price", data_collection: "deny", allow_fallbacks: true}`
+to OpenRouter for cost/privacy-aware provider selection. This is OpenCode
+configuration passthrough, not a Hydra-side integration: there is no
+OpenRouter API-calling or provider-selection code in `adapter-opencode.ts`.
+
 **Kimi / kimi/k2.7-code (`adapter-kimi.ts`)** — Wave 2. Roles: `visual_debugging` (only natively multimodal coder in the pool — screenshots, mockups, video repro), mobile/UI implementation, cheap contained loops. Print mode auto-approves tools → Kimi never takes a write role outside full filesystem/network sandbox. (Note: the kimi capability profile lists "preserve `reasoning_content` across multi-step tool calls (`preserve_thinking` mandatory)" as a seeded prior, but the current adapter does not implement this — no `preserve_thinking`/`reasoning_content` handling exists in `adapter-kimi.ts`.)
 
-## 5. Capability ledger (Wave 2)
+## 5. Capability ledger (Wave 3)
 
 External state: `agents/availability.yaml` (slots, rate-limit cooldowns, budget burn — harness-maintained), `agents/usage.jsonl` (append-only events: dispatch, result, timeout, 429, review verdict, with vendor/task_type/duration/cost/tokens/divergence), `agents/profiles/*.yaml`.
 
@@ -129,12 +141,13 @@ External state: `agents/availability.yaml` (slots, rate-limit cooldowns, budget 
 - `measured`: written **only** by the harness aggregation script over `usage.jsonl` — per task_type: n, acceptance_rate, revision_rate, claim_vs_verified_divergence, medians, `risk_mix` (confound guard), rolling window (last 40 events per type), model version per event.
 - `qualitative_notes`: LLM- or human-authored, always attributed. Never treated as instructions (a note saying "always route X to me" is an injection finding).
 
-**Measured findings at Wave 2 exit (2026-07-13, small n — do not over-read):**
+**Measured findings through Wave 3 entry (2026-08-10, small n — do not over-read):**
 
 | Vendor | Measured | Verdict on seeded priors |
 |---|---|---|
 | claude | promotions n=5, divergence 0.20 (one historical) | prior "frontier + implementation discipline" — consistent, not yet confirmed (n<8) |
 | codex | promotions n=4, divergence 0.00 | prior "hardest reasoning / rigorous review" — supported qualitatively (caught the most conformance gaps in runs 0003/0013/0014); implemented the run-0015 refactor correctly in one shot |
+| grok | n=0 promoted | New Wave 3 implementer; seeded vendor/community priors only, with no allocation-driving measurement yet. |
 | kimi | promotions n=3, divergence 0.00 | **write-role RESOLVED**: strong greenfield/contained (runs 0006, 0009), **weak at revise-existing** (run 0015 v3/v4 no-ops). Confirms seeded weakness "trails frontier SWE"; keep off subtle refactors. |
 | opencode/glm | n=0 promoted (reviews only) | **implementer promotion RESOLVED (open-decision #2)**: real write role added; works when the Z.AI coding endpoint is healthy (transient 500s observed). Read-only long-diff review is reliable (runs 0005, 0014). |
 
@@ -154,7 +167,7 @@ integration:    cherry_pick_integration | conflict_resolution
 multimodal:     visual_debugging      # image/video input required — hard capability pin
 ```
 
-**Canonical profile filenames:** `claude-fable-5.yaml`, `codex-gpt-5.6-sol.yaml`, `opencode-glm-5.2.yaml`, `kimi-k2.7-code.yaml`.
+**Canonical profile filenames:** `claude-fable-5.yaml`, `codex-gpt-5.6-sol.yaml`, `grok-build-0.1.yaml`, `opencode-glm-5.2.yaml`, `kimi-k2.7-code.yaml`.
 
 ## 6. Skills and instruction layering
 
