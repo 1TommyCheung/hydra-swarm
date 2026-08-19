@@ -1,7 +1,7 @@
 {
   "name": "hydra-swarm",
-  "version": "0.6.8.4",
-  "description": "Multi-agent (Claude, Codex, OpenCode/GLM, Kimi) local dev harness: worktree-isolated dispatch, trust-boundary promotion, cross-vendor review, evidence-gated integration.",
+  "version": "0.6.8.5",
+  "description": "Multi-agent (Claude, Codex, OpenCode/GLM, Kimi, Grok Build) local dev harness: worktree-isolated dispatch, trust-boundary promotion, cross-vendor review, evidence-gated integration.",
   "license": "MIT",
   "author": {
     "name": "Tommy Cheung"

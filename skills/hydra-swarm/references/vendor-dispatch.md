@@ -1,13 +1,14 @@
 # Vendor dispatch notes
 
-Herdr pane hosting is the default: with `HYDRA_HERDR_PANES` unset (or `1`) and herdr live, every worker/reviewer is hosted in a pane. Set `HYDRA_HERDR_PANES=0` to force headless subprocess hosting (e.g. CI or a machine without herdr attached — though the harness also falls back automatically when herdr is not live). Pane hosting is reliable for all four vendors since the OpenCode monitor-pane fix; do not reflexively disable it.
+Herdr pane hosting is the default: with `HYDRA_HERDR_PANES` unset (or `1`) and herdr live, every worker/reviewer is hosted in a pane. Set `HYDRA_HERDR_PANES=0` to force headless subprocess hosting (e.g. CI or a machine without herdr attached — though the harness also falls back automatically when herdr is not live). Pane hosting is reliable for all five vendors (Claude, Codex, OpenCode, Kimi, Grok Build) since the OpenCode monitor-pane fix; do not reflexively disable it.
 
 Allow `dispatch.sh` to choose the hosting shape automatically per vendor:
 
-- **Claude / Codex / Kimi** — host directly inside a herdr pane via the `bash -lc "echo $$>pidfile; adapter...; printf rc>sentinel"` wrapper.
+- **Claude / Codex / Kimi / Grok Build** — host directly inside a herdr pane via the `bash -lc "echo $$>pidfile; adapter...; printf rc>sentinel"` wrapper.
   - **Codex** — rely on the live JSONL tail for pane progress.
   - **Kimi** — require srt sandbox confinement; `-p` auto-approves tools, so an OS sandbox is mandatory. Rely on the live NDJSON stdout tail for pane progress, parsed through `kimiEventText()` from the `.cli.jsonl` capture, the same mechanism Codex uses.
   - **Claude** — remember that `-p --output-format json` is not a streaming format; the pane shows only the banner, not a live body.
+  - **Grok Build** — `--output-format streaming-json` gives incremental ACP session updates; live-tailed the same way as Codex/Kimi via `grokEventText()`. Stdin is closed and a subprocess deadline is enforced (SIGTERM → grace → SIGKILL) because of community-reported post-turn hangs — do not assume a quiet pane means it's done; check the ledger for `agent_exited` before treating it as finished.
 
 - **OpenCode / GLM** — never host the vendor CLI directly inside a herdr-spawned process; doing so breaks the CLI call. Run it as a plain background subprocess, and open a separate decoupled monitor pane purely for observability (banner + prompt + live-tailed progress) that never touches the actual process.
 

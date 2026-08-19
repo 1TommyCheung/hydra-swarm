@@ -3,13 +3,15 @@
 > **Dev notes:** vendor design/review/spike artifacts referenced below (`bun-migration-*`, `*-design-*`, `*-review-*`, `license-research-*`, `doc-audit-*`) live in the machine-local, gitignored `docs/dev-notes/` — production users do not need them; recover from git history pre-split if absent.
 
 
-**Status:** v0.6.8.4 (2026-08-02). Waves 0–2 delivered; the post-Wave-2
+**Status:** v0.6.8.5 (2026-08-11). Waves 0–2 delivered; the post-Wave-2
 hardening (Bun single-binary migration, bash lane retirement, head
 auto-detection, GitHub Releases binary distribution, and the `hydra gc` +
 `hydra run-log` worktree-lifecycle pair) shipped across the 0.6.x–0.6.x
-releases. The front of the roadmap is now the two prioritized
+releases. 0.6.8.5 opens Wave 3 with a fifth vendor, **Grok Build**
+(`adapter-grok.ts`), and OpenCode OpenRouter cost/privacy provider routing
+guidance. The front of the roadmap is now the two prioritized
 moat-sharpeners (adversarial verification vault, PR-mode trust check),
-alongside kit extraction (Wave 3) and the hardening daemon. This file is a *delivered changelog + forward plan*, not a
+alongside the rest of kit extraction (Wave 3) and the hardening daemon. This file is a *delivered changelog + forward plan*, not a
 design proposal — per-wave evidence reports lived in the pre-extraction tree
 (`docs/hydra-reports/`) and were not carried into this standalone repo.
 

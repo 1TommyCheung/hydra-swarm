@@ -15,6 +15,46 @@ run-by-run evidence) lives in `docs/roadmap.md`.
 > minor bumps overstated the changes. Content is identical; the superseded
 > tags/releases were retired and v0.6.8 republished.
 
+## [0.6.8.5] — 2026-08-11
+
+Run 0070: **Grok Build** (xAI's terminal coding agent) added as a fifth
+first-class vendor, implemented by Codex after Kimi's `srt`-sandboxed
+attempt hit an environment-specific `EMFILE` crash on the operator's
+machine (unrelated to this repo — reported upstream against
+`@anthropic-ai/sandbox-runtime`), reviewed and accepted by OpenCode.
+
+### Added
+- **`adapter-grok.ts`** (Wave 3): headless dispatch via `grok -m
+  grok-build-0.1 --cwd <wt> --sandbox workspace --permission-mode
+  acceptEdits --output-format streaming-json -p "<prompt>"`, write-capable
+  `implementer` role from the start. Session resume (`--resume`), stdin
+  closed, subprocess deadline enforced (SIGTERM → grace → SIGKILL) —
+  citing community-reported post-turn hangs. `--fork-session` intentionally
+  unused, matching Codex's unused `--fork`. Git-evidence-derived result
+  drop when the worker omits a self-report, same as Codex/Kimi.
+- `grok` wired through `cli.ts` (`adapter-grok` route), `dispatch.ts`
+  (`VENDOR_PIN_SUPPORT`, vendor validation, display name, event streaming),
+  `task.schema.json`'s `assigned_vendor` enum, and the task-spec template.
+- `kit/hydra/profiles/grok-build-0.1.yaml` seed profile.
+- `docs/vendor-adapters.md` updated across every section (capability
+  matrix, verified invocation, model capabilities, per-vendor notes,
+  capability ledger, canonical profile filenames).
+- 7 new tests (`adapter-grok.test.ts`) covering argv construction, JSON
+  result-drop parsing, malformed-output handling, and vendor-pin
+  precedence — never invokes the real `grok` binary.
+- OpenCode's OpenRouter-routed models can now be pinned to the cheapest
+  privacy-respecting provider (`provider: {sort: "price", data_collection:
+  "deny", allow_fallbacks: true}`) — machine-local `opencode.json`/
+  `opencode.jsonc` config, not a hydra-side integration; OpenRouter does
+  the routing server-side per request.
+
+### Known issues
+- 9 tests in `dispatch.test.ts`/`revision-evidence.test.ts` fail on a clean
+  checkout of this release (and on 0.6.8.4) due to a missing
+  `authoritative/reviews/<task>` directory before
+  `materializeEvidenceForDispatch` scans it — pre-existing, unrelated to
+  the Grok work, not yet fixed.
+
 ## [0.6.8.4] — 2026-08-02
 
 Runs 0063–0067 (Batches A–D): trust-boundary and vendor-parity gaps found

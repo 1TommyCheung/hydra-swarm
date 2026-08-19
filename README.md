@@ -1,9 +1,10 @@
 # Hydra-Swarm
 
-**v0.6.8.4** · A local multi-agent development harness. A lead (Claude Code)
+**v0.6.8.5** · A local multi-agent development harness. A lead (Claude Code)
 plans, dispatches, and judges; a deterministic harness owns state, process
-launch, and verification. Four vendor heads — **Claude**, **Codex**,
-**OpenCode/GLM**, and **Kimi** — implement tasks in isolated Git worktrees.
+launch, and verification. Five vendor heads — **Claude**, **Codex**,
+**OpenCode/GLM**, **Kimi**, and **Grok Build** — implement tasks in isolated
+Git worktrees.
 Every candidate crosses a trust boundary (schema validation → Git evidence →
 ownership audit → sandboxed verification) before it is promoted, cross-vendor
 reviewed, squashed, and integrated.
@@ -26,8 +27,13 @@ human-authorized.
 > no-op amendment, Codex and OpenCode gained real session resume, worker
 > model/version/effort is recorded and pinnable, `integrate` supports
 > incremental multi-call runs and an explicit `--onto` target, and the
-> vendor usage-limit cooldown is provider-granular for OpenCode (see
-> [CHANGELOG.md](CHANGELOG.md) for the 0.6.x releases). The remaining
+> vendor usage-limit cooldown is provider-granular for OpenCode. 0.6.8.5
+> adds **Grok Build** (xAI's terminal coding agent) as a fifth first-class
+> vendor — Wave 3, write-capable `implementer` role from the start (see
+> `docs/vendor-adapters.md`) — and OpenCode's OpenRouter-routed models can
+> now be pinned to the cheapest privacy-respecting provider via machine-local
+> `opencode.json`/`opencode.jsonc` (see [CHANGELOG.md](CHANGELOG.md) for the
+> 0.6.x releases). The remaining
 > packaging work (kit extraction, `hydra-init` scaffolding, global ledger,
 > bundle export/import) is still design-only — see `docs/roadmap.md`.
 
@@ -40,13 +46,13 @@ subset with per-command confirmation:
 | Class | Requirement |
 |---|---|
 | Core | `git`, `jq`; `node` ≥ 22.6 for the source lane (the compiled binary needs no Node) |
-| Vendor CLIs | `claude`, `codex`, `opencode`, `kimi` — each optional; a missing one just narrows the available heads |
+| Vendor CLIs | `claude`, `codex`, `opencode`, `kimi`, `grok` — each optional; a missing one just narrows the available heads |
 | Sandbox | [`srt`](https://github.com/anthropic-experimental/sandbox-runtime) (`npm i -g @anthropic-ai/sandbox-runtime`) — required only for Kimi's auto-approving write role |
 | Code intelligence | `gitnexus`, `graphify` (optional, advisory) |
 | Observability | `herdr` (optional — pane hosting degrades to plain background processes) |
 
 Head availability is also detected automatically: `detect-heads.sh` probes
-the four vendor CLIs, enumerates opencode's configured models (GLM family,
+the five vendor CLIs, enumerates opencode's configured models (GLM family,
 Ollama, …) and its active model, and snapshots the result to
 `~/.local/state/hydra/heads.json` — consumed by allocation (unavailable heads
 are never recommended) and dispatch (a missing `assigned_vendor` fails fast
@@ -116,8 +122,8 @@ cycling without real Git progress.
 Every dispatch can be hosted in a `herdr` terminal pane with real streamed
 progress:
 
-- **Claude, Codex, Kimi** — hosted directly inside the pane (Codex JSONL and
-  Kimi NDJSON are live-tailed).
+- **Claude, Codex, Kimi, Grok Build** — hosted directly inside the pane
+  (Codex JSONL, Kimi NDJSON, and Grok streaming-json are live-tailed).
 - **OpenCode/GLM** — runs as a decoupled background process with a separate
   observer-only pane (direct pane-hosting breaks its CLI).
 
